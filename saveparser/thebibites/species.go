@@ -53,8 +53,15 @@ func parseSpeciesRecords(entryName string, species map[string]any) []SpeciesReco
 			record.HasSpeciesID = true
 		}
 		ownerID := ownerIDFromInt(record.SpeciesID, record.HasSpeciesID, fmt.Sprintf("%d", i))
+		if v, ok := intAt(raw, "parentID"); ok {
+			record.ParentID = v
+			record.HasParentID = true
+		}
 		if v, ok := intAt(raw, "generationOfFirstSpecimen"); ok {
 			record.GenerationOfFirstSpecimen = v
+		}
+		if v, ok := floatAt(raw, "timeCreation"); ok {
+			record.TimeCreation = v
 		}
 		if v, ok := boolAt(raw, "favorite"); ok {
 			record.Favorite = v

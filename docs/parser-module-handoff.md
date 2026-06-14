@@ -163,15 +163,33 @@ Expected analytical outputs:
 - `save_archives`
 - `save_entries`
 - `scene_state`
-- `settings_scalars`
+- `vars_state`
+- `scene_color_selectors`
+- `scene_phero_towers`
+- `scene_rad_towers`
+- `settings_sim_values`
+- `settings_independent_values`
 - `settings_materials`
+- `settings_material_values`
 - `settings_zones`
+- `settings_zone_geometry`
+- `settings_zone_values`
+- `settings_zone_groups`
+- `settings_bibite_spawners`
+- `settings_changers`
+- `settings_changer_points`
+- `settings_changer_targets`
+- `active_species`
 - `species_records`
 - `species_template_genes`
 - `species_template_brain_nodes`
 - `species_template_brain_synapses`
 - `bibites`
 - `bibite_body`
+- `bibite_mouth`
+- `bibite_pheromone_emitters`
+- `bibite_egg_layers`
+- `bibite_control`
 - `bibite_genes`
 - `bibite_stomach_contents`
 - `bibite_children`
@@ -181,9 +199,13 @@ Expected analytical outputs:
 - `egg_genes`
 - `egg_brain_nodes`
 - `egg_brain_synapses`
+- `pellet_groups`
 - `pellets`
 - `pheromones`
+- `json_scalars`
 - parser diagnostics
+
+Collection counts must be data-driven. Current fixture counts are test facts, not schema constraints; future saves may have different numbers of zones, zone groups, spawners, changers, pellet groups, pheromones, towers, color selectors, species, eggs, or bibites.
 
 SQLite can hold operational/current extracted state. DuckDB + Parquet should be used for whole-history ad hoc analytics.
 
@@ -273,4 +295,3 @@ Parsing:
 - How should `scene.nBibites` be updated during mutation?
 - Are dead bibite files intentionally kept for corpse/meat/history state?
 - Which fields are safe to mutate without breaking reload?
-

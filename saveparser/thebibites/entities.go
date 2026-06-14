@@ -67,9 +67,82 @@ func parseBibiteBody(entryName string, id int64, hasID bool, ownerID string, bod
 	if v, ok := floatAt(body, "energy"); ok {
 		bibite.Energy = v
 	}
+	parseBibiteBodyDetails(body, bibite)
 	bibite.BodyScalars = collectScalars(entryName, "bibite_body", ownerID, "body", body)
 	bibite.StomachContents = parseStomachContents(entryName, id, hasID, body)
 	bibite.Children = parseChildLinks(entryName, id, hasID, body)
+}
+
+func parseBibiteBodyDetails(body map[string]any, bibite *Bibite) {
+	if v, ok := floatAt(body, "d2Size"); ok {
+		bibite.BodyDetails.D2Size = v
+	}
+	if v, ok := floatAt(body, "fatReservesAmount"); ok {
+		bibite.BodyDetails.FatReservesAmount = v
+	}
+	if v, ok := floatAt(body, "attackedDmg"); ok {
+		bibite.BodyDetails.AttackedDmg = v
+	}
+	if v, ok := floatAt(body, "timesAttacked"); ok {
+		bibite.BodyDetails.TimesAttacked = v
+	}
+	if v, ok := floatAt(body, "totalDamageSuffered"); ok {
+		bibite.BodyDetails.TotalDamageSuffered = v
+	}
+	if v, ok := floatAt(body, "brainTicksCount"); ok {
+		bibite.BodyDetails.BrainTicksCount = v
+	}
+	if v, ok := floatAt(body, "visionLookupCount"); ok {
+		bibite.BodyDetails.VisionLookupCount = v
+	}
+	if v, ok := floatAt(body, "visionSensingCount"); ok {
+		bibite.BodyDetails.VisionSensingCount = v
+	}
+	if v, ok := floatAt(body, "corpseEnergyOffset"); ok {
+		bibite.BodyDetails.CorpseEnergyOffset = v
+	}
+	if mouth, ok := mapAt(body, "mouth"); ok {
+		parseBibiteMouth(mouth, bibite)
+	}
+	if phero, ok := mapAt(body, "phero"); ok {
+		if v, ok := floatAt(phero, "progress"); ok {
+			bibite.Pheromone.Progress = v
+		}
+	}
+	if eggLayer, ok := mapAt(body, "eggLayer"); ok {
+		if v, ok := floatAt(eggLayer, "eggProgress"); ok {
+			bibite.EggLayer.EggProgress = v
+		}
+		if v, ok := floatAt(eggLayer, "nEggsLaid"); ok {
+			bibite.EggLayer.NEggsLaid = v
+		}
+	}
+	if control, ok := mapAt(body, "control"); ok {
+		if v, ok := floatAt(control, "totalTravel"); ok {
+			bibite.Control.TotalTravel = v
+		}
+	}
+}
+
+func parseBibiteMouth(mouth map[string]any, bibite *Bibite) {
+	if v, ok := boolAt(mouth, "attackedLastFrame"); ok {
+		bibite.Mouth.AttackedLastFrame = v
+	}
+	if v, ok := floatAt(mouth, "bibitesBitten"); ok {
+		bibite.Mouth.BibitesBitten = v
+	}
+	if v, ok := floatAt(mouth, "biteProgress"); ok {
+		bibite.Mouth.BiteProgress = v
+	}
+	if v, ok := floatAt(mouth, "murderedArea"); ok {
+		bibite.Mouth.MurderedArea = v
+	}
+	if v, ok := floatAt(mouth, "totalDamageDealt"); ok {
+		bibite.Mouth.TotalDamageDealt = v
+	}
+	if v, ok := floatAt(mouth, "totalMurders"); ok {
+		bibite.Mouth.TotalMurders = v
+	}
 }
 
 func parseBibiteClock(entryName, ownerID string, raw map[string]any, bibite *Bibite) {

@@ -34,9 +34,10 @@ func parsePelletGroup(entryName string, groupIndex int, value any, firstPelletIn
 		return nil, nil
 	}
 	group := &PelletGroup{
-		Index:   groupIndex,
-		Raw:     raw,
-		Scalars: collectScalars(entryName, "pellet_group", fmt.Sprintf("%d", groupIndex), fmt.Sprintf("pellets.groups[%d]", groupIndex), raw),
+		Index:     groupIndex,
+		EntryName: entryName,
+		Raw:       raw,
+		Scalars:   collectScalars(entryName, "pellet_group", fmt.Sprintf("%d", groupIndex), fmt.Sprintf("pellets.groups[%d]", groupIndex), raw),
 	}
 	if v, ok := stringAt(raw, "zone"); ok {
 		group.Zone = v
@@ -86,6 +87,15 @@ func parsePellet(entryName, zone string, groupIndex, groupPelletIndex, pelletInd
 			pellet.Amount = v
 		}
 	}
+	if matterDecay, ok := mapAt(raw, "matterDecay"); ok {
+		pellet.HasMatterDecay = true
+		if v, ok := floatAt(matterDecay, "timeAlive"); ok {
+			pellet.MatterDecayTimeAlive = v
+		}
+		if v, ok := floatAt(matterDecay, "rotAmount"); ok {
+			pellet.MatterDecayRotAmount = v
+		}
+	}
 	return pellet
 }
 
@@ -106,12 +116,39 @@ func parsePheromones(ctx *parserContext, entry *Entry) ([]Pheromone, []Scalar) {
 		if !ok {
 			continue
 		}
-		pheromones = append(pheromones, Pheromone{
+		pheromone := Pheromone{
 			Index:     i,
 			EntryName: entry.Name,
 			Raw:       itemRaw,
 			Scalars:   collectScalars(entry.Name, "pheromone", fmt.Sprintf("%d", i), fmt.Sprintf("pheromones[%d]", i), itemRaw),
-		})
+		}
+		if transform, ok := mapAt(itemRaw, "transform"); ok {
+			pheromone.Transform = parseTransform(transform)
+		}
+		if phero, ok := mapAt(itemRaw, "phero"); ok {
+			if heading, ok := phero["heading"]; ok {
+				pheromone.HeadingRawJSON = rawJSON(heading)
+			}
+			if v, ok := floatAt(phero, "Rstrength"); ok {
+				pheromone.RStrength = v
+			}
+			if v, ok := floatAt(phero, "Gstrength"); ok {
+				pheromone.GStrength = v
+			}
+			if v, ok := floatAt(phero, "Bstrength"); ok {
+				pheromone.BStrength = v
+			}
+			if v, ok := floatAt(phero, "nR"); ok {
+				pheromone.NR = v
+			}
+			if v, ok := floatAt(phero, "nG"); ok {
+				pheromone.NG = v
+			}
+			if v, ok := floatAt(phero, "nB"); ok {
+				pheromone.NB = v
+			}
+		}
+		pheromones = append(pheromones, pheromone)
 	}
 	return pheromones, scalars
 }

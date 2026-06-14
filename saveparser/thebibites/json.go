@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
 )
 
 var utf8BOM = []byte{0xef, 0xbb, 0xbf}
@@ -126,4 +127,34 @@ func toInt(value any) (int64, bool) {
 	default:
 		return 0, false
 	}
+}
+
+func scalarParts(value any) (ScalarType, float64, string, bool, string, bool) {
+	switch v := value.(type) {
+	case nil:
+		return ScalarNull, 0, "", false, "null", true
+	case bool:
+		return ScalarBool, 0, "", v, strconv.FormatBool(v), true
+	case string:
+		return ScalarString, 0, v, false, rawJSON(v), true
+	case json.Number:
+		f, ok := toFloat(v)
+		if !ok {
+			return "", 0, "", false, "", false
+		}
+		return ScalarNumber, f, "", false, v.String(), true
+	default:
+		if f, ok := toFloat(v); ok {
+			return ScalarNumber, f, "", false, strconv.FormatFloat(f, 'g', -1, 64), true
+		}
+		return "", 0, "", false, "", false
+	}
+}
+
+func rawJSON(value any) string {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
 }

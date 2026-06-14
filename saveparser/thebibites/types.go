@@ -192,43 +192,114 @@ type SceneState struct {
 }
 
 type SettingsState struct {
-	EntryName        string
-	Raw              map[string]any
-	Scalars          []Scalar
-	Materials        []SettingsMaterial
-	Zones            []SettingsZone
-	BibiteSpawners   []SettingsBibiteSpawner
-	SettingsChangers []SettingsChanger
+	EntryName         string
+	Raw               map[string]any
+	Scalars           []Scalar
+	SimulationValues  []SettingValue
+	IndependentValues []SettingValue
+	Materials         []SettingsMaterial
+	Zones             []SettingsZone
+	ZoneGroups        []SettingsZoneGroup
+	BibiteSpawners    []SettingsBibiteSpawner
+	SettingsChangers  []SettingsChanger
+}
+
+type SettingValue struct {
+	Name           string
+	Path           string
+	Scope          string
+	OwnerKind      string
+	OwnerID        string
+	Type           ScalarType
+	NumberValue    float64
+	StringValue    string
+	BoolValue      bool
+	RawJSON        string
+	WrapperRawJSON string
 }
 
 type SettingsMaterial struct {
 	Name    string
 	Raw     map[string]any
 	Scalars []Scalar
+	Values  []SettingValue
 }
 
 type SettingsZone struct {
-	Index    int
-	Name     string
-	ID       int64
-	HasID    bool
-	Material string
-	Raw      map[string]any
-	Scalars  []Scalar
+	Index        int
+	Name         string
+	ID           int64
+	HasID        bool
+	Material     string
+	Distribution string
+	Raw          map[string]any
+	Scalars      []Scalar
+	Geometry     []SettingsZoneGeometry
+	Values       []SettingValue
+}
+
+type SettingsZoneGeometry struct {
+	Index            int
+	GeometryKind     string
+	PositionX        float64
+	PositionY        float64
+	Radius           float64
+	RadiusIsRelative bool
+	RawJSON          string
+}
+
+type SettingsZoneGroup struct {
+	Index   int
+	Name    string
+	Raw     map[string]any
+	Scalars []Scalar
 }
 
 type SettingsBibiteSpawner struct {
-	Index   int
-	Path    string
-	Raw     map[string]any
-	Scalars []Scalar
+	Index          int
+	Path           string
+	SpawnPriority  float64
+	Minimum        float64
+	RandomizeGenes string
+	GrowthAtSpawn  string
+	Tagging        string
+	SpawnType      string
+	TotalSpawned   int64
+	Raw            map[string]any
+	Scalars        []Scalar
 }
 
 type SettingsChanger struct {
 	Index   int
 	Name    string
+	Repeat  bool
+	Start   float64
 	Raw     map[string]any
 	Scalars []Scalar
+	Points  []SettingsChangerPoint
+	Targets []SettingsChangerTarget
+}
+
+type SettingsChangerPoint struct {
+	Index int
+	T     float64
+	Y     float64
+	D     string
+	F     float64
+}
+
+type SettingsChangerTarget struct {
+	TargetKey   string
+	Scope       string
+	ZoneIndex   int
+	ZoneID      int64
+	HasZoneID   bool
+	SettingName string
+	Type        ScalarType
+	NumberValue float64
+	StringValue string
+	BoolValue   bool
+	RawJSON     string
 }
 
 type SpeciesData struct {
@@ -243,7 +314,10 @@ type SpeciesRecord struct {
 	Index                     int
 	SpeciesID                 int64
 	HasSpeciesID              bool
+	ParentID                  int64
+	HasParentID               bool
 	GenerationOfFirstSpecimen int64
+	TimeCreation              float64
 	Favorite                  bool
 	GenericName               string
 	SpecificName              string
@@ -294,10 +368,49 @@ type Bibite struct {
 	GeneScalars     []Scalar
 	BodyScalars     []Scalar
 	ClockScalars    []Scalar
+	BodyDetails     BibiteBodyDetails
+	Mouth           BibiteMouth
+	Pheromone       BibitePheromoneEmitter
+	EggLayer        BibiteEggLayer
+	Control         BibiteControl
 	StomachContents []StomachContent
 	Children        []ChildLink
 	BrainNodes      []BrainNode
 	BrainSynapses   []BrainSynapse
+}
+
+type BibiteBodyDetails struct {
+	D2Size              float64
+	FatReservesAmount   float64
+	AttackedDmg         float64
+	TimesAttacked       float64
+	TotalDamageSuffered float64
+	BrainTicksCount     float64
+	VisionLookupCount   float64
+	VisionSensingCount  float64
+	CorpseEnergyOffset  float64
+}
+
+type BibiteMouth struct {
+	AttackedLastFrame bool
+	BibitesBitten     float64
+	BiteProgress      float64
+	MurderedArea      float64
+	TotalDamageDealt  float64
+	TotalMurders      float64
+}
+
+type BibitePheromoneEmitter struct {
+	Progress float64
+}
+
+type BibiteEggLayer struct {
+	EggProgress float64
+	NEggsLaid   float64
+}
+
+type BibiteControl struct {
+	TotalTravel float64
 }
 
 type Egg struct {
@@ -388,11 +501,12 @@ type PelletData struct {
 }
 
 type PelletGroup struct {
-	Index   int
-	Zone    string
-	Count   int
-	Raw     map[string]any
-	Scalars []Scalar
+	Index     int
+	EntryName string
+	Zone      string
+	Count     int
+	Raw       map[string]any
+	Scalars   []Scalar
 }
 
 type Pellet struct {
@@ -403,15 +517,26 @@ type Pellet struct {
 	Raw        map[string]any
 	Scalars    []Scalar
 
-	Transform Transform
-	RigidBody RigidBody
-	Material  string
-	Amount    float64
+	Transform            Transform
+	RigidBody            RigidBody
+	Material             string
+	Amount               float64
+	MatterDecayTimeAlive float64
+	MatterDecayRotAmount float64
+	HasMatterDecay       bool
 }
 
 type Pheromone struct {
-	Index     int
-	EntryName string
-	Raw       map[string]any
-	Scalars   []Scalar
+	Index          int
+	EntryName      string
+	Raw            map[string]any
+	Scalars        []Scalar
+	Transform      Transform
+	HeadingRawJSON string
+	RStrength      float64
+	GStrength      float64
+	BStrength      float64
+	NR             float64
+	NG             float64
+	NB             float64
 }
