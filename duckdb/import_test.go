@@ -3,6 +3,8 @@ package duckdb
 import (
 	"context"
 	"database/sql"
+	"path/filepath"
+	"runtime"
 	"testing"
 
 	tb "github.com/asemones/bibicontrol/saveparser/thebibites"
@@ -48,6 +50,82 @@ func TestImportExtractedSaveCoversEveryTable(t *testing.T) {
 	}
 }
 
+func TestLargestFixtureQueryRefsExistInArchiveState(t *testing.T) {
+	ctx := context.Background()
+	const saveID = "largest-fixture-query"
+	fixturePath := filepath.Join(repoRoot(t), "testdata", "saves", "the-bibites", "autosave_20260301021357.zip")
+
+	archive, err := tb.ParseFile(fixturePath, nil)
+	if err != nil {
+		t.Fatalf("ParseFile(%q) error = %v", fixturePath, err)
+	}
+	save := tb.ExtractTables(saveID, archive)
+
+	db, err := OpenAndImport(ctx, "", save)
+	if err != nil {
+		t.Fatalf("OpenAndImport() error = %v", err)
+	}
+	defer db.Close()
+
+	expected := plantStomachRefsFromArchive(archive)
+	if len(expected) == 0 {
+		t.Fatalf("largest fixture archive has no bibites with Plant stomach content")
+	}
+
+	rows, err := db.QueryContext(ctx, `
+		SELECT refs.entry_name, refs.body_id
+		FROM bibite_mutation_refs refs
+		WHERE refs.save_id = ?
+		  AND EXISTS (
+		      SELECT 1
+		      FROM bibite_stomach_contents contents
+		      WHERE contents.save_id = refs.save_id
+		        AND contents.entry_name = refs.entry_name
+		        AND contents.body_id = refs.body_id
+		        AND contents.material = 'Plant'
+		  )
+		ORDER BY refs.entry_name, refs.body_id
+	`, saveID)
+	if err != nil {
+		t.Fatalf("query Plant stomach refs: %v", err)
+	}
+	defer rows.Close()
+
+	got := make(map[bibiteRef]struct{})
+	for rows.Next() {
+		var ref bibiteRef
+		if err := rows.Scan(&ref.entryName, &ref.bodyID); err != nil {
+			t.Fatalf("scan Plant stomach ref: %v", err)
+		}
+		if archive.Entry(ref.entryName) == nil {
+			t.Fatalf("DuckDB ref %q/%d does not have an archive entry", ref.entryName, ref.bodyID)
+		}
+		if _, ok := expected[ref]; !ok {
+			t.Fatalf("DuckDB ref %q/%d was not found in parsed archive Plant stomach state", ref.entryName, ref.bodyID)
+		}
+		if _, ok := got[ref]; ok {
+			t.Fatalf("DuckDB returned duplicate Plant stomach ref %q/%d", ref.entryName, ref.bodyID)
+		}
+		got[ref] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate Plant stomach refs: %v", err)
+	}
+	if len(got) != len(expected) {
+		t.Fatalf("Plant stomach refs = %d, want %d from parsed archive state", len(got), len(expected))
+	}
+}
+
+func repoRoot(t *testing.T) string {
+	t.Helper()
+
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatalf("runtime.Caller(0) failed")
+	}
+	return filepath.Dir(filepath.Dir(file))
+}
+
 func countRows(t *testing.T, ctx context.Context, db *sql.DB, table, saveID string) int64 {
 	t.Helper()
 
@@ -57,6 +135,30 @@ func countRows(t *testing.T, ctx context.Context, db *sql.DB, table, saveID stri
 		t.Fatalf("count %s: %v", table, err)
 	}
 	return count
+}
+
+type bibiteRef struct {
+	entryName string
+	bodyID    int64
+}
+
+func plantStomachRefsFromArchive(archive *tb.Archive) map[bibiteRef]struct{} {
+	refs := make(map[bibiteRef]struct{})
+	for _, bibite := range archive.Bibites {
+		if !bibite.HasID {
+			continue
+		}
+		for _, content := range bibite.StomachContents {
+			if content.Material == "Plant" {
+				refs[bibiteRef{
+					entryName: bibite.EntryName,
+					bodyID:    bibite.ID,
+				}] = struct{}{}
+				break
+			}
+		}
+	}
+	return refs
 }
 
 func sampleExtractedSave() tb.ExtractedSave {
