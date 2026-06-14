@@ -1,14 +1,27 @@
-This is a bibite control plane. Spin up processes, query sims + saves, mutate them with a DSL. Nowehere near complete. Check issues for progress. 
+# bibicontrol
 
+A control plane for The Bibites. Spin up sim processes, query live
+simulations and save files, and mutate them through a DSL.
 
+**Status: early.** Nowhere near complete — see the issues for what's
+done and what's planned.
 
+## Contributing
 
-Open to PRs but read the labels please; easy means could be vibe coded or single shotted, medium means be cautious, difficult means exercise extreme caution; blind vibe coding is a no go. PRs will not be accepted without test suite, excluding things on DLL side as there is no real way to test that. Eg: ensure the dll returns correct info over network, but no need to write a suite inside the acutal dll
+PRs welcome, but read the issue labels first:
 
-No bepinex mods. They do not work on macos/ARM
+- **easy** — safe to single-shot or vibe-code with minimal review. 
+- **medium** — proceed with caution. Requires some effort; review changes, think about what the code is doing and test it.
+- **difficult** — extreme caution. Blind vibe-coding will be rejected. Either impossible to vibe code, several subtle failure modes exist, or needs an excellent design. Probably stay away unless you are a confident professional developer
 
-But "x agent" can code anything, so why do this?:
-At code base sizes larger than a few k lines, AI will produce an unmaintainable mess. Some of these issues have subtle failure modes that an AI will miss completely
+Every PR needs tests. The one exception is the DLL side, which can't be
+meaningfully tested in isolation: verify the DLL returns correct info
+over the network, but don't write a suite inside the DLL itself. Please create a branch and checkout
 
+No BepInEx mods — they don't work on macOS/ARM.
 
-Please checkout a brain for any PRs, no more direct to main
+## "An agent can write code, so why not raw vibe code?"
+
+Past a few thousand lines, AI produces an unmaintainable mess. Several
+of these issues have subtle failure modes an agent will miss entirely. 
+As the code base expands, it will reach a point where AI is not very effective in terms of cost- think giant context windows if you want to do sweeping changes
