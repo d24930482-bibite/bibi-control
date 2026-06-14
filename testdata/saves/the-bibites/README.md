@@ -4,11 +4,11 @@ These fixtures were copied from the local Unity save directory for The Bibites.
 
 Source root:
 
-`/home/asemones/.config/unity3d/The Bibites/The Bibites/Savefiles`
+`.config/unity3d/The Bibites/The Bibites/Savefiles`
 
 Autosave source root:
 
-`/home/asemones/.config/unity3d/The Bibites/The Bibites/Savefiles/Autosaves`
+`.config/unity3d/The Bibites/The Bibites/Savefiles/Autosaves`
 
 The original files were left untouched. These copies are intended for parser development and tests.
 
