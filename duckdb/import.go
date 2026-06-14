@@ -137,169 +137,67 @@ func deleteSaveRows(ctx context.Context, execer execContext, saveID string) erro
 	return nil
 }
 
-func insertExtractedSave(ctx context.Context, conn *sql.Conn, save tb.ExtractedSave) error {
-	if err := insertStruct(ctx, conn, "save_archives", saveArchiveFields, save.Archive); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "save_entries", saveEntryFields, save.Entries); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "diagnostics", diagnosticFields, save.Diagnostics); err != nil {
-		return err
-	}
-	if err := insertOptional(ctx, conn, "scenes", sceneFields, save.Scene); err != nil {
-		return err
-	}
-	if err := insertOptional(ctx, conn, "vars", varsFields, save.Vars); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "scene_color_selectors", sceneColorSelectorFields, save.SceneColorSelectors); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "scene_phero_towers", sceneTowerFields, save.ScenePheroTowers); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "scene_rad_towers", sceneTowerFields, save.SceneRadTowers); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "settings_simulation_values", settingValueFields, save.SettingsSimulationValues); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "settings_independent_values", settingValueFields, save.SettingsIndependentValues); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "settings_materials", settingsMaterialFields, save.SettingsMaterials); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "settings_material_values", settingValueFields, save.SettingsMaterialValues); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "settings_zones", settingsZoneFields, save.SettingsZones); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "settings_zone_geometry", settingsZoneGeometryFields, save.SettingsZoneGeometry); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "settings_zone_values", settingValueFields, save.SettingsZoneValues); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "settings_zone_groups", settingsZoneGroupFields, save.SettingsZoneGroups); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "settings_bibite_spawners", settingsBibiteSpawnerFields, save.SettingsBibiteSpawners); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "settings_changers", settingsChangerFields, save.SettingsChangers); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "settings_changer_points", settingsChangerPointFields, save.SettingsChangerPoints); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "settings_changer_targets", settingsChangerTargetFields, save.SettingsChangerTargets); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "active_species", activeSpeciesFields, save.ActiveSpecies); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "species", speciesFields, save.Species); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "species_genes", geneFields, save.SpeciesGenes); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "species_brain_nodes", brainNodeFields, save.SpeciesBrainNodes); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "species_brain_synapses", brainSynapseFields, save.SpeciesBrainSynapses); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "bibites", bibiteFields, save.Bibites); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "bibite_genes", geneFields, save.BibiteGenes); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "bibite_body", bibiteBodyFields, save.BibiteBody); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "bibite_mouth", bibiteMouthFields, save.BibiteMouth); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "bibite_pheromone_emitters", bibitePheromoneEmitterFields, save.BibitePheromoneEmitters); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "bibite_egg_layers", bibiteEggLayerFields, save.BibiteEggLayers); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "bibite_control", bibiteControlFields, save.BibiteControl); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "bibite_stomach_contents", stomachContentFields, save.BibiteStomachContents); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "bibite_children", bibiteChildFields, save.BibiteChildren); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "bibite_brain_nodes", brainNodeFields, save.BibiteBrainNodes); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "bibite_brain_synapses", brainSynapseFields, save.BibiteBrainSynapses); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "eggs", eggFields, save.Eggs); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "egg_genes", geneFields, save.EggGenes); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "egg_brain_nodes", brainNodeFields, save.EggBrainNodes); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "egg_brain_synapses", brainSynapseFields, save.EggBrainSynapses); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "pellet_groups", pelletGroupFields, save.PelletGroups); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "pellets", pelletFields, save.Pellets); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "pheromones", pheromoneFields, save.Pheromones); err != nil {
-		return err
-	}
-	if err := insertSlice(ctx, conn, "json_scalars", scalarFields, save.JSONScalars); err != nil {
-		return err
-	}
-	return nil
-}
-
 type fieldSpec struct {
 	field  string
 	column string
 }
 
-func insertStruct(ctx context.Context, conn *sql.Conn, table string, fields []fieldSpec, row any) error {
-	rowValue := reflect.ValueOf(row)
-	return appendRows(ctx, conn, table, fields, rowValue)
+var allTables = normalizedTableNames()
+
+func normalizedTableNames() []string {
+	out := make([]string, len(tb.NormalizedTables))
+	for i, table := range tb.NormalizedTables {
+		out[i] = table.Table
+	}
+	return out
 }
 
-func insertOptional(ctx context.Context, conn *sql.Conn, table string, fields []fieldSpec, row any) error {
-	rowValue := reflect.ValueOf(row)
-	if !rowValue.IsValid() || rowValue.IsNil() {
-		return nil
+func insertExtractedSave(ctx context.Context, conn *sql.Conn, save tb.ExtractedSave) error {
+	saveValue := reflect.ValueOf(save)
+	for _, table := range tb.NormalizedTables {
+		if err := insertExtractedTable(ctx, conn, saveValue, table); err != nil {
+			return err
+		}
 	}
-	return appendRows(ctx, conn, table, fields, rowValue)
+	return nil
 }
 
-func insertSlice(ctx context.Context, conn *sql.Conn, table string, fields []fieldSpec, rows any) error {
-	rowsValue := reflect.ValueOf(rows)
-	if rowsValue.Kind() != reflect.Slice {
-		return fmt.Errorf("duckdb: %s rows are %s, want slice", table, rowsValue.Kind())
+func insertExtractedTable(ctx context.Context, conn *sql.Conn, saveValue reflect.Value, table tb.NormalizedTableSpec) error {
+	rows := saveValue.FieldByName(table.SaveField)
+	if !rows.IsValid() {
+		return fmt.Errorf("duckdb: ExtractedSave missing field %s for table %s", table.SaveField, table.Table)
 	}
-	if rowsValue.Len() == 0 {
+
+	switch rows.Kind() {
+	case reflect.Pointer:
+		if rows.IsNil() {
+			if table.Optional {
+				return nil
+			}
+			return fmt.Errorf("duckdb: %s row is nil", table.Table)
+		}
+	case reflect.Slice:
+		if rows.Len() == 0 {
+			return nil
+		}
+	case reflect.Struct:
+	default:
+		return fmt.Errorf("duckdb: ExtractedSave.%s is %s, want struct, pointer, or slice", table.SaveField, rows.Kind())
+	}
+
+	fields := fieldSpecs(table.Fields)
+	return appendRows(ctx, conn, table.Table, fields, rows)
+}
+
+func fieldSpecs(fields []tb.NormalizedFieldSpec) []fieldSpec {
+	if len(fields) == 0 {
 		return nil
 	}
-	return appendRows(ctx, conn, table, fields, rowsValue)
+	out := make([]fieldSpec, len(fields))
+	for i, field := range fields {
+		out[i] = fieldSpec{field: field.Field, column: field.Column}
+	}
+	return out
 }
 
 func appendRows(ctx context.Context, conn *sql.Conn, table string, fields []fieldSpec, rows reflect.Value) error {

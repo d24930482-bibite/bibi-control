@@ -1,57 +1,59 @@
 package thebibites
 
+//go:generate go run ../../cmd/gen_thebibites_schema
+
 type ExtractedSave struct {
-	Archive     SaveArchiveRow
-	Entries     []SaveEntryRow
-	Diagnostics []DiagnosticRow
-	Scene       *SceneRow
-	Vars        *VarsRow
+	Archive     SaveArchiveRow  `dbtable:"save_archives"`
+	Entries     []SaveEntryRow  `dbtable:"save_entries"`
+	Diagnostics []DiagnosticRow `dbtable:"diagnostics"`
+	Scene       *SceneRow       `dbtable:"scenes"`
+	Vars        *VarsRow        `dbtable:"vars"`
 
-	SceneColorSelectors []SceneColorSelectorRow
-	ScenePheroTowers    []SceneTowerRow
-	SceneRadTowers      []SceneTowerRow
+	SceneColorSelectors []SceneColorSelectorRow `dbtable:"scene_color_selectors"`
+	ScenePheroTowers    []SceneTowerRow         `dbtable:"scene_phero_towers"`
+	SceneRadTowers      []SceneTowerRow         `dbtable:"scene_rad_towers"`
 
-	SettingsSimulationValues  []SettingValueRow
-	SettingsIndependentValues []SettingValueRow
-	SettingsMaterials         []SettingsMaterialRow
-	SettingsMaterialValues    []SettingValueRow
-	SettingsZones             []SettingsZoneRow
-	SettingsZoneGeometry      []SettingsZoneGeometryRow
-	SettingsZoneValues        []SettingValueRow
-	SettingsZoneGroups        []SettingsZoneGroupRow
-	SettingsBibiteSpawners    []SettingsBibiteSpawnerRow
-	SettingsChangers          []SettingsChangerRow
-	SettingsChangerPoints     []SettingsChangerPointRow
-	SettingsChangerTargets    []SettingsChangerTargetRow
+	SettingsSimulationValues  []SettingValueRow          `dbtable:"settings_simulation_values"`
+	SettingsIndependentValues []SettingValueRow          `dbtable:"settings_independent_values"`
+	SettingsMaterials         []SettingsMaterialRow      `dbtable:"settings_materials"`
+	SettingsMaterialValues    []SettingValueRow          `dbtable:"settings_material_values"`
+	SettingsZones             []SettingsZoneRow          `dbtable:"settings_zones"`
+	SettingsZoneGeometry      []SettingsZoneGeometryRow  `dbtable:"settings_zone_geometry"`
+	SettingsZoneValues        []SettingValueRow          `dbtable:"settings_zone_values"`
+	SettingsZoneGroups        []SettingsZoneGroupRow     `dbtable:"settings_zone_groups"`
+	SettingsBibiteSpawners    []SettingsBibiteSpawnerRow `dbtable:"settings_bibite_spawners"`
+	SettingsChangers          []SettingsChangerRow       `dbtable:"settings_changers"`
+	SettingsChangerPoints     []SettingsChangerPointRow  `dbtable:"settings_changer_points"`
+	SettingsChangerTargets    []SettingsChangerTargetRow `dbtable:"settings_changer_targets"`
 
-	ActiveSpecies        []ActiveSpeciesRow
-	Species              []SpeciesRow
-	SpeciesGenes         []GeneRow
-	SpeciesBrainNodes    []BrainNodeRow
-	SpeciesBrainSynapses []BrainSynapseRow
+	ActiveSpecies        []ActiveSpeciesRow `dbtable:"active_species"`
+	Species              []SpeciesRow       `dbtable:"species"`
+	SpeciesGenes         []GeneRow          `dbtable:"species_genes"`
+	SpeciesBrainNodes    []BrainNodeRow     `dbtable:"species_brain_nodes"`
+	SpeciesBrainSynapses []BrainSynapseRow  `dbtable:"species_brain_synapses"`
 
-	Bibites                 []BibiteRow
-	BibiteGenes             []GeneRow
-	BibiteBody              []BibiteBodyRow
-	BibiteMouth             []BibiteMouthRow
-	BibitePheromoneEmitters []BibitePheromoneEmitterRow
-	BibiteEggLayers         []BibiteEggLayerRow
-	BibiteControl           []BibiteControlRow
-	BibiteStomachContents   []StomachContentRow
-	BibiteChildren          []BibiteChildRow
-	BibiteBrainNodes        []BrainNodeRow
-	BibiteBrainSynapses     []BrainSynapseRow
+	Bibites                 []BibiteRow                 `dbtable:"bibites"`
+	BibiteGenes             []GeneRow                   `dbtable:"bibite_genes"`
+	BibiteBody              []BibiteBodyRow             `dbtable:"bibite_body"`
+	BibiteMouth             []BibiteMouthRow            `dbtable:"bibite_mouth"`
+	BibitePheromoneEmitters []BibitePheromoneEmitterRow `dbtable:"bibite_pheromone_emitters"`
+	BibiteEggLayers         []BibiteEggLayerRow         `dbtable:"bibite_egg_layers"`
+	BibiteControl           []BibiteControlRow          `dbtable:"bibite_control"`
+	BibiteStomachContents   []StomachContentRow         `dbtable:"bibite_stomach_contents"`
+	BibiteChildren          []BibiteChildRow            `dbtable:"bibite_children"`
+	BibiteBrainNodes        []BrainNodeRow              `dbtable:"bibite_brain_nodes"`
+	BibiteBrainSynapses     []BrainSynapseRow           `dbtable:"bibite_brain_synapses"`
 
-	Eggs             []EggRow
-	EggGenes         []GeneRow
-	EggBrainNodes    []BrainNodeRow
-	EggBrainSynapses []BrainSynapseRow
+	Eggs             []EggRow          `dbtable:"eggs"`
+	EggGenes         []GeneRow         `dbtable:"egg_genes"`
+	EggBrainNodes    []BrainNodeRow    `dbtable:"egg_brain_nodes"`
+	EggBrainSynapses []BrainSynapseRow `dbtable:"egg_brain_synapses"`
 
-	PelletGroups []PelletGroupRow
-	Pellets      []PelletRow
-	Pheromones   []PheromoneRow
+	PelletGroups []PelletGroupRow `dbtable:"pellet_groups"`
+	Pellets      []PelletRow      `dbtable:"pellets"`
+	Pheromones   []PheromoneRow   `dbtable:"pheromones"`
 
-	JSONScalars []ScalarRow
+	JSONScalars []ScalarRow `dbtable:"json_scalars"`
 }
 
 type SaveArchiveRow struct {

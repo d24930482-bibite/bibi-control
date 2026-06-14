@@ -29,8 +29,10 @@ Relevant files:
 - `saveparser/thebibites/parse_environment.go`
 - `saveparser/thebibites/normalize.go`
 - `saveparser/thebibites/normalize_types.go`
-- `duckdb/tables.go`
+- `saveparser/thebibites/normalize_metadata.go`
+- `duckdb/import.go`
 - `duckdb/migrations/0001_extracted_save.sql`
+- `cmd/gen_thebibites_schema/main.go`
 
 ## Core Contract
 
@@ -269,11 +271,35 @@ GOMODCACHE=/tmp/bibicontrol-go-mod GOCACHE=/tmp/bibicontrol-go-build go test ./.
 
 This passed after the bridge slice was added.
 
+## Auto-Generation Slice
+
+Implemented after this handoff was created.
+
+`saveparser/thebibites/normalize_types.go` is now the source for normalized table order, table names, row field order, DuckDB import field specs, and generated DuckDB schema. `ExtractedSave` fields carry `dbtable` tags; row structs remain the source for column order and Go-to-SQL type inference.
+
+Generation command:
+
+```bash
+GOMODCACHE=/tmp/bibicontrol-go-mod GOCACHE=/tmp/bibicontrol-go-build go generate ./saveparser/thebibites
+```
+
+Generated outputs:
+
+- `saveparser/thebibites/normalize_metadata.go`
+- `duckdb/migrations/0001_extracted_save.sql`
+
+The generator lives at:
+
+- `cmd/gen_thebibites_schema/main.go`
+
+`duckdb/import.go` consumes `saveparser/thebibites.NormalizedTables` directly, so there is no separate generated DuckDB field-spec file.
+
+The generated migration intentionally keeps the custom `bibite_mutation_refs` view trailer.
+
 ## Next Slices
 
-1. Add `go generate` for row metadata, field specs, and DuckDB schema so `normalize_types.go`, `duckdb/tables.go`, and SQL migrations stop drifting.
-2. Add a typed DuckDB scanner helper that converts selected rows into `SQLValueRef` structs.
-3. Add fixture-backed end-to-end tests: parse largest fixture, import to DuckDB, query candidates, stage SQL refs, commit, reparse, and assert normalized values changed.
-4. Decide whether settings value rows should be writable through `SQLValueRef`; wrapper `.Value` handling needs explicit mapping.
-5. Add schema migration handling for already-existing DuckDB files.
-6. Keep broader domain mutations separate: deletes, appends, count updates, corpse/pellet conversion, species/link consistency, and entry removal are not solved by this bridge.
+1. Add a typed DuckDB scanner helper that converts selected rows into `SQLValueRef` structs.
+2. Add fixture-backed end-to-end tests: parse largest fixture, import to DuckDB, query candidates, stage SQL refs, commit, reparse, and assert normalized values changed.
+3. Decide whether settings value rows should be writable through `SQLValueRef`; wrapper `.Value` handling needs explicit mapping.
+4. Add schema migration handling for already-existing DuckDB files.
+5. Keep broader domain mutations separate: deletes, appends, count updates, corpse/pellet conversion, species/link consistency, and entry removal are not solved by this bridge.
