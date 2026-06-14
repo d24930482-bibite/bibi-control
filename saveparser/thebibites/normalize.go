@@ -3,6 +3,7 @@ package thebibites
 import (
 	"fmt"
 	"sort"
+	"strings"
 )
 
 func ExtractTables(saveID string, archive *Archive) ExtractedSave {
@@ -494,6 +495,13 @@ func normalizeEnvironment(saveID string, archive *Archive, out *ExtractedSave) {
 
 func normalizeScalars(saveID string, scalars []Scalar, out *ExtractedSave) {
 	for _, scalar := range scalars {
+		// Brain node/synapse fields are already captured in the typed
+		// *_brain_nodes / *_brain_synapses tables. The generic scalar walk
+		// re-emits every one as an EAV row — ~87% of json_scalars, pure
+		// duplication of data we store in queryable columns elsewhere.
+		if isRedundantScalar(scalar.Path) {
+			continue
+		}
 		out.JSONScalars = append(out.JSONScalars, ScalarRow{
 			SaveID:      saveID,
 			EntryName:   scalar.EntryName,
@@ -509,6 +517,47 @@ func normalizeScalars(saveID string, scalars []Scalar, out *ExtractedSave) {
 	}
 }
 
+// scalarKeepSuffixes are the only entity scalars with NO typed column anywhere.
+// Everything else under a known entity prefix is already captured in a typed
+// table, so the generic scalar walk's copy is pure EAV duplication.
+var scalarKeepSuffixes = []string{
+	".clock.tic",
+	".clock.ticProgress",
+	".clock.chronoTime",
+	".clock.timeAlive",
+	".brain.isReady",
+}
+
+// typedEntityPrefixes are roots whose subtrees are fully modeled by typed
+// tables. Scalars under these are dropped unless they match a keep suffix.
+var typedEntityPrefixes = []string{
+	"bibite.",
+	"egg_entity.",
+	"egg.",
+	"species_entity.",
+	"species.",
+	"pellets.",
+	"pheromones.",
+}
+
+func isRedundantScalar(path string) bool {
+	underTypedEntity := false
+	for _, p := range typedEntityPrefixes {
+		if strings.HasPrefix(path, p) {
+			underTypedEntity = true
+			break
+		}
+	}
+	if !underTypedEntity {
+		return false // unknown root: keep, it has no typed duplicate
+	}
+	for _, s := range scalarKeepSuffixes {
+		if strings.HasSuffix(path, s) {
+			return false // genuinely unmodeled scalar, keep it
+		}
+	}
+	return true
+}
 func appendGeneRowsFromEntityGenes(rows *[]GeneRow, saveID, entryName, ownerKind, ownerID string, genes map[string]any) {
 	keys := sortedKeys(genes)
 	for _, key := range keys {

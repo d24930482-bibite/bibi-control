@@ -308,7 +308,22 @@ func appendRows(ctx context.Context, conn *sql.Conn, table string, fields []fiel
 		single.Index(0).Set(rows)
 		rows = single
 	}
+
+	// Resolve struct field names to index paths ONCE per table, not per row.
+	// reflect.FieldByName is a linear string-compared scan over the struct's
+	// fields; doing it per row turns into tens of millions of scans on a large
+	// save. FieldByIndex with a precomputed []int is a direct offset lookup.
+	plan, err := buildFieldIndices(rows.Type().Elem(), fields)
+	if err != nil {
+		return fmt.Errorf("duckdb: %s field plan: %w", table, err)
+	}
+
 	columns := fieldColumns(fields)
+
+	// Reused across every row: AppendRow consumes the values synchronously into
+	// the appender's column chunk, so the backing array is safe to refill.
+	buf := make([]driver.Value, len(fields))
+
 	return conn.Raw(func(rawConn any) error {
 		driverConn, ok := rawConn.(driver.Conn)
 		if !ok {
@@ -328,11 +343,10 @@ func appendRows(ctx context.Context, conn *sql.Conn, table string, fields []fiel
 		}()
 
 		for i := 0; i < rows.Len(); i++ {
-			values, err := rowValues(table, rows.Index(i), fields)
-			if err != nil {
+			if err := rowValuesInto(buf, table, rows.Index(i), plan); err != nil {
 				return err
 			}
-			if err := appender.AppendRow(values...); err != nil {
+			if err := appender.AppendRow(buf...); err != nil {
 				clearErr := appender.Clear()
 				closeErr := appender.Close()
 				closed = true
@@ -356,30 +370,50 @@ func fieldColumns(fields []fieldSpec) []string {
 	return columns
 }
 
-func rowValues(table string, row reflect.Value, fields []fieldSpec) ([]driver.Value, error) {
+// buildFieldIndices resolves each fieldSpec to its struct field index path
+// against the row element type. Done once per table; the result is reused for
+// every row via FieldByIndex.
+func buildFieldIndices(elem reflect.Type, fields []fieldSpec) ([][]int, error) {
+	for elem.Kind() == reflect.Pointer {
+		elem = elem.Elem()
+	}
+	if elem.Kind() != reflect.Struct {
+		return nil, fmt.Errorf("element type %s is not a struct", elem)
+	}
+	plan := make([][]int, len(fields))
+	for i, spec := range fields {
+		sf, ok := elem.FieldByName(spec.field)
+		if !ok {
+			return nil, fmt.Errorf("missing field %s", spec.field)
+		}
+		// Copy: StructField.Index may share backing storage; we hold this long-term.
+		idx := make([]int, len(sf.Index))
+		copy(idx, sf.Index)
+		plan[i] = idx
+	}
+	return plan, nil
+}
+
+// rowValuesInto fills buf with the row's field values using a precomputed index
+// plan. buf must have len(plan) capacity and is overwritten in place.
+func rowValuesInto(buf []driver.Value, table string, row reflect.Value, plan [][]int) error {
 	for row.Kind() == reflect.Pointer {
 		if row.IsNil() {
-			return nil, fmt.Errorf("duckdb: %s row is nil", table)
+			return fmt.Errorf("duckdb: %s row is nil", table)
 		}
 		row = row.Elem()
 	}
 	if row.Kind() != reflect.Struct {
-		return nil, fmt.Errorf("duckdb: %s row is %s, want struct", table, row.Kind())
+		return fmt.Errorf("duckdb: %s row is %s, want struct", table, row.Kind())
 	}
-
-	values := make([]driver.Value, len(fields))
-	for i, spec := range fields {
-		field := row.FieldByName(spec.field)
-		if !field.IsValid() {
-			return nil, fmt.Errorf("duckdb: %s row missing field %s", table, spec.field)
-		}
-		value, err := fieldValue(field)
+	for i, idx := range plan {
+		value, err := fieldValue(row.FieldByIndex(idx))
 		if err != nil {
-			return nil, fmt.Errorf("duckdb: %s.%s: %w", table, spec.field, err)
+			return fmt.Errorf("duckdb: %s field %d: %w", table, i, err)
 		}
-		values[i] = value
+		buf[i] = value
 	}
-	return values, nil
+	return nil
 }
 
 func fieldValue(value reflect.Value) (driver.Value, error) {

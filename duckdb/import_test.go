@@ -3,8 +3,10 @@ package duckdb
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"testing"
 
 	tb "github.com/asemones/bibicontrol/saveparser/thebibites"
@@ -49,7 +51,32 @@ func TestImportExtractedSaveCoversEveryTable(t *testing.T) {
 		t.Fatalf("bibites rows after replace = %d, want 1", got)
 	}
 }
-
+func logImportRowCounts(t *testing.T, ctx context.Context, db *sql.DB, saveID string) {
+	t.Helper()
+	type tableCount struct {
+		table string
+		count int64
+	}
+	counts := make([]tableCount, 0, len(allTables))
+	var total int64
+	for _, table := range allTables {
+		var n int64
+		q := fmt.Sprintf("SELECT count(*) FROM %s WHERE save_id = ?", quoteIdent(table))
+		if err := db.QueryRowContext(ctx, q, saveID).Scan(&n); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		counts = append(counts, tableCount{table, n})
+		total += n
+	}
+	sort.Slice(counts, func(i, j int) bool { return counts[i].count > counts[j].count })
+	t.Logf("imported %d rows for save_id %q across %d tables:", total, saveID, len(allTables))
+	for _, c := range counts {
+		if c.count == 0 {
+			continue
+		}
+		t.Logf("  %8d  %s", c.count, c.table)
+	}
+}
 func TestLargestFixtureQueryRefsExistInArchiveState(t *testing.T) {
 	ctx := context.Background()
 	const saveID = "largest-fixture-query"
@@ -89,8 +116,9 @@ func TestLargestFixtureQueryRefsExistInArchiveState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query Plant stomach refs: %v", err)
 	}
-	defer rows.Close()
 
+	defer rows.Close()
+	logImportRowCounts(t, ctx, db, saveID)
 	got := make(map[bibiteRef]struct{})
 	for rows.Next() {
 		var ref bibiteRef
@@ -113,6 +141,45 @@ func TestLargestFixtureQueryRefsExistInArchiveState(t *testing.T) {
 	}
 	if len(got) != len(expected) {
 		t.Fatalf("Plant stomach refs = %d, want %d from parsed archive state", len(got), len(expected))
+	}
+}
+func TestDumpJSONScalarPaths(t *testing.T) {
+	ctx := context.Background()
+	const saveID = "largest-fixture-query"
+	fixturePath := filepath.Join(repoRoot(t), "testdata", "saves", "the-bibites", "autosave_20260301021357.zip")
+	archive, err := tb.ParseFile(fixturePath, nil)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+	save := tb.ExtractTables(saveID, archive)
+	db, err := OpenAndImport(ctx, "", save)
+	if err != nil {
+		t.Fatalf("OpenAndImport: %v", err)
+	}
+	defer db.Close()
+
+	rows, err := db.QueryContext(ctx, `
+		SELECT path, count(*) AS n
+		FROM json_scalars
+		WHERE save_id = ?
+		GROUP BY path
+		ORDER BY n DESC
+		LIMIT 40
+	`, saveID)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var path string
+		var n int64
+		if err := rows.Scan(&path, &n); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		t.Logf("%8d  %s", n, path)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate: %v", err)
 	}
 }
 
