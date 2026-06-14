@@ -14,6 +14,15 @@ const (
 	OperationSet OperationKind = "set"
 )
 
+const (
+	SettingsEntryName   = "settings.bb8settings"
+	SpeciesEntryName    = "speciesData.json"
+	SceneEntryName      = "scene.bb8scene"
+	VarsEntryName       = "vars.bb8scene"
+	PelletsEntryName    = "pellets.bb8scene"
+	PheromonesEntryName = "pheromones.bb8scene"
+)
+
 // Target identifies the archive entry to mutate and optional guards that must
 // still match when the operation is applied.
 type Target struct {
@@ -64,6 +73,36 @@ func EntryTarget(entryName string, kind tb.EntryKind, guards ...Guard) Target {
 		Kind:      kind,
 		Guards:    append([]Guard(nil), guards...),
 	}
+}
+
+// SettingsTarget returns a target for settings.bb8settings.
+func SettingsTarget(guards ...Guard) Target {
+	return EntryTarget(SettingsEntryName, tb.EntrySettings, guards...)
+}
+
+// SpeciesTarget returns a target for speciesData.json.
+func SpeciesTarget(guards ...Guard) Target {
+	return EntryTarget(SpeciesEntryName, tb.EntrySpecies, guards...)
+}
+
+// SceneTarget returns a target for scene.bb8scene.
+func SceneTarget(guards ...Guard) Target {
+	return EntryTarget(SceneEntryName, tb.EntryScene, guards...)
+}
+
+// VarsTarget returns a target for vars.bb8scene.
+func VarsTarget(guards ...Guard) Target {
+	return EntryTarget(VarsEntryName, tb.EntryVars, guards...)
+}
+
+// PelletsTarget returns a target for pellets.bb8scene.
+func PelletsTarget(guards ...Guard) Target {
+	return EntryTarget(PelletsEntryName, tb.EntryPellets, guards...)
+}
+
+// PheromonesTarget returns a target for pheromones.bb8scene.
+func PheromonesTarget(guards ...Guard) Target {
+	return EntryTarget(PheromonesEntryName, tb.EntryPheromones, guards...)
 }
 
 // BibiteTarget returns a bibite target guarded by body.id.

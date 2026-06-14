@@ -109,6 +109,138 @@ func TestSessionSetSupportsNestedArrayPaths(t *testing.T) {
 	}
 }
 
+func TestSessionSetUpdatesSettingsAndZones(t *testing.T) {
+	session := NewSession(parseSyntheticArchive(t))
+
+	zoneTarget := SettingsTarget(Require("zones[0].id", int64(7)))
+	if err := session.StageSet(SettingsTarget(), "pelletEnergy.Value", 33.5); err != nil {
+		t.Fatalf("StageSet(pelletEnergy) error = %v", err)
+	}
+	if err := session.StageSet(SettingsTarget(), "independents.worldSize.Value", 2000.0); err != nil {
+		t.Fatalf("StageSet(worldSize) error = %v", err)
+	}
+	if err := session.StageSet(zoneTarget, "zones[0].name", "Updated Zone"); err != nil {
+		t.Fatalf("StageSet(zone name) error = %v", err)
+	}
+	if err := session.StageSet(zoneTarget, "zones[0].fertility.Value", 0.85); err != nil {
+		t.Fatalf("StageSet(zone fertility) error = %v", err)
+	}
+	if err := session.StageSet(zoneTarget, "zones[0].posX", -4.5); err != nil {
+		t.Fatalf("StageSet(zone posX) error = %v", err)
+	}
+	if err := session.StageSet(zoneTarget, "zones[0].posY", 8.25); err != nil {
+		t.Fatalf("StageSet(zone posY) error = %v", err)
+	}
+	if err := session.StageSet(zoneTarget, "zones[0].radius", 42.0); err != nil {
+		t.Fatalf("StageSet(zone radius) error = %v", err)
+	}
+	if err := session.StageSet(zoneTarget, "zones[0].size", 99.0); err != nil {
+		t.Fatalf("StageSet(zone size) error = %v", err)
+	}
+
+	fresh, err := session.Commit(filepath.Join(t.TempDir(), "mutated.zip"))
+	if err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+	tables := tb.ExtractTables("settings", fresh)
+	if got := settingNumber(t, tables.SettingsSimulationValues, "pelletEnergy"); got != 33.5 {
+		t.Fatalf("pelletEnergy = %v, want 33.5", got)
+	}
+	if got := settingNumber(t, tables.SettingsIndependentValues, "worldSize"); got != 2000.0 {
+		t.Fatalf("worldSize = %v, want 2000", got)
+	}
+	if len(tables.SettingsZones) != 1 {
+		t.Fatalf("settings zones = %d, want 1", len(tables.SettingsZones))
+	}
+	if got := tables.SettingsZones[0].Name; got != "Updated Zone" {
+		t.Fatalf("zone name = %q, want Updated Zone", got)
+	}
+	if got := settingNumber(t, tables.SettingsZoneValues, "fertility"); got != 0.85 {
+		t.Fatalf("zone fertility = %v, want 0.85", got)
+	}
+	if got := settingNumber(t, tables.SettingsZoneValues, "size"); got != 99.0 {
+		t.Fatalf("zone size = %v, want 99", got)
+	}
+	if len(tables.SettingsZoneGeometry) != 1 {
+		t.Fatalf("zone geometry rows = %d, want 1", len(tables.SettingsZoneGeometry))
+	}
+	geometry := tables.SettingsZoneGeometry[0]
+	if geometry.PositionX != -4.5 || geometry.PositionY != 8.25 || geometry.Radius != 42.0 {
+		t.Fatalf("zone geometry = (%v, %v, r=%v), want (-4.5, 8.25, r=42)", geometry.PositionX, geometry.PositionY, geometry.Radius)
+	}
+}
+
+func TestSessionSetUpdatesPellets(t *testing.T) {
+	session := NewSession(parseSyntheticArchive(t))
+
+	target := PelletsTarget(
+		Require("pellets[0].zone", "Zone A"),
+		Require("pellets[0].pellets[0].pellet.material", "Plant"),
+	)
+	if err := session.StageSet(target, "pellets[0].pellets[0].pellet.amount", 12.25); err != nil {
+		t.Fatalf("StageSet(pellet amount) error = %v", err)
+	}
+	if err := session.StageSet(target, "pellets[0].pellets[0].transform.position[0]", -1.5); err != nil {
+		t.Fatalf("StageSet(pellet x) error = %v", err)
+	}
+	if err := session.StageSet(target, "pellets[0].pellets[0].transform.position[1]", 2.25); err != nil {
+		t.Fatalf("StageSet(pellet y) error = %v", err)
+	}
+
+	fresh, err := session.Commit(filepath.Join(t.TempDir(), "mutated.zip"))
+	if err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+	tables := tb.ExtractTables("pellets", fresh)
+	if len(tables.Pellets) != 1 {
+		t.Fatalf("pellets = %d, want 1", len(tables.Pellets))
+	}
+	pellet := tables.Pellets[0]
+	if pellet.Amount != 12.25 || pellet.TransformPositionX != -1.5 || pellet.TransformPositionY != 2.25 {
+		t.Fatalf("pellet amount/location = %v (%v, %v), want 12.25 (-1.5, 2.25)", pellet.Amount, pellet.TransformPositionX, pellet.TransformPositionY)
+	}
+}
+
+func TestSessionSetUpdatesBibiteGenesAndLocation(t *testing.T) {
+	session := NewSession(parseSyntheticArchive(t))
+
+	target := BibiteTarget(BibiteRef{
+		EntryName: "bibites/bibite_0.bb8",
+		BodyID:    42,
+	})
+	if err := session.StageSet(target, "genes.genes.Diet", 0.9); err != nil {
+		t.Fatalf("StageSet(bibite gene) error = %v", err)
+	}
+	if err := session.StageSet(target, "transform.position[0]", -10.0); err != nil {
+		t.Fatalf("StageSet(bibite transform x) error = %v", err)
+	}
+	if err := session.StageSet(target, "transform.position[1]", 14.5); err != nil {
+		t.Fatalf("StageSet(bibite transform y) error = %v", err)
+	}
+	if err := session.StageSet(target, "rb2d.px", -10.0); err != nil {
+		t.Fatalf("StageSet(bibite rb2d px) error = %v", err)
+	}
+	if err := session.StageSet(target, "rb2d.py", 14.5); err != nil {
+		t.Fatalf("StageSet(bibite rb2d py) error = %v", err)
+	}
+
+	fresh, err := session.Commit(filepath.Join(t.TempDir(), "mutated.zip"))
+	if err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+	tables := tb.ExtractTables("bibite", fresh)
+	if len(tables.Bibites) != 1 {
+		t.Fatalf("bibites = %d, want 1", len(tables.Bibites))
+	}
+	bibite := tables.Bibites[0]
+	if bibite.TransformPositionX != -10.0 || bibite.TransformPositionY != 14.5 || bibite.RB2DPX != -10.0 || bibite.RB2DPY != 14.5 {
+		t.Fatalf("bibite location = transform(%v, %v) rb2d(%v, %v), want (-10, 14.5) for both", bibite.TransformPositionX, bibite.TransformPositionY, bibite.RB2DPX, bibite.RB2DPY)
+	}
+	if got := geneNumber(t, tables.BibiteGenes, "Diet"); got != 0.9 {
+		t.Fatalf("Diet gene = %v, want 0.9", got)
+	}
+}
+
 func TestSessionRejectsGuardMismatchWithoutChangingRaw(t *testing.T) {
 	archive := parseSyntheticArchive(t)
 	bibite := archive.Entry("bibites/bibite_0.bb8")
@@ -195,9 +327,13 @@ func parseSyntheticArchive(t *testing.T) *tb.Archive {
 	t.Helper()
 
 	rawBibite := append([]byte(nil), utf8BOM...)
-	rawBibite = append(rawBibite, []byte(`{"body":{"id":42,"energy":12.5,"stomach":{"content":[{"material":"Plant","amount":2.5,"averageChunkAmount":1.25}]}},"genes":{"speciesID":3,"gen":4},"brain":{"Nodes":[],"Synapses":[]}}`)...)
+	rawBibite = append(rawBibite, []byte(`{"transform":{"position":[1,2],"rotation":0,"scale":1},"rb2d":{"px":1,"py":2,"vx":0,"vy":0,"r":0},"body":{"id":42,"energy":12.5,"stomach":{"content":[{"material":"Plant","amount":2.5,"averageChunkAmount":1.25}]}},"genes":{"speciesID":3,"gen":4,"genes":{"Diet":0.1,"Speed":1.1}},"brain":{"Nodes":[],"Synapses":[]}}`)...)
 	rawScene := append([]byte(nil), utf8BOM...)
 	rawScene = append(rawScene, []byte(`{"nBibites":1}`)...)
+	rawSettings := append([]byte(nil), utf8BOM...)
+	rawSettings = append(rawSettings, []byte(`{"pelletEnergy":{"Value":20},"independents":{"worldSize":{"Value":1000}},"materials":{},"zones":[{"id":7,"name":"Zone A","material":"Plant","distribution":"uniform","posX":1,"posY":2,"radius":10,"radiusIsRelative":false,"fertility":{"Value":0.4},"size":5}],"zoneGroups":[],"bibites":[],"settingsChangers":[]}`)...)
+	rawPellets := append([]byte(nil), utf8BOM...)
+	rawPellets = append(rawPellets, []byte(`{"pellets":[{"zone":"Zone A","pellets":[{"transform":{"position":[3,4],"rotation":0,"scale":1},"rb2d":{"px":3,"py":4,"vx":0,"vy":0,"r":0},"pellet":{"material":"Plant","amount":5},"matterDecay":{"timeAlive":1,"rotAmount":2}}]}]}`)...)
 
 	sourcePath := filepath.Join(t.TempDir(), "source.zip")
 	archive := &tb.Archive{
@@ -211,6 +347,20 @@ func parseSyntheticArchive(t *testing.T) *tb.Archive {
 			},
 			{
 				Index:  1,
+				Name:   "settings.bb8settings",
+				Kind:   tb.EntrySettings,
+				Method: zip.Deflate,
+				Raw:    rawSettings,
+			},
+			{
+				Index:  2,
+				Name:   "pellets.bb8scene",
+				Kind:   tb.EntryPellets,
+				Method: zip.Deflate,
+				Raw:    rawPellets,
+			},
+			{
+				Index:  3,
 				Name:   "bibites/bibite_0.bb8",
 				Kind:   tb.EntryBibite,
 				Method: zip.Deflate,
@@ -226,4 +376,28 @@ func parseSyntheticArchive(t *testing.T) *tb.Archive {
 		t.Fatalf("ParseFile(synthetic) error = %v", err)
 	}
 	return parsed
+}
+
+func settingNumber(t *testing.T, rows []tb.SettingValueRow, name string) float64 {
+	t.Helper()
+
+	for _, row := range rows {
+		if row.SettingName == name {
+			return row.NumberValue
+		}
+	}
+	t.Fatalf("missing setting %q", name)
+	return 0
+}
+
+func geneNumber(t *testing.T, rows []tb.GeneRow, name string) float64 {
+	t.Helper()
+
+	for _, row := range rows {
+		if row.GeneName == name {
+			return row.NumberValue
+		}
+	}
+	t.Fatalf("missing gene %q", name)
+	return 0
 }
