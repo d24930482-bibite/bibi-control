@@ -44,6 +44,22 @@ session.StageSet(target, "some.path[0].field", value)
 session.StageSetWithOptions(target, path, value, mutator.SetOptions{CreateMissing: true})
 ```
 
+SQL-selected value set:
+
+```go
+err = session.StageSQLSet(mutator.SQLValueRef{
+    Table:     "bibites",
+    Column:    "health",
+    EntryName: entryName,
+    BodyID:    bodyID,
+    HasBodyID: true,
+}.WithExpected(currentHealth), 0)
+```
+
+`SQLValueRef` is an allowlisted bridge from normalized SQL cells to guarded archive JSON paths. It intentionally rejects unsupported table/column pairs instead of guessing.
+
+Detailed SQL bridge handoff: `docs/the-bibites-sql-mutation-bridge-handoff.md`.
+
 Targets:
 
 - `EntryTarget(entryName, kind, guards...)`
@@ -75,6 +91,7 @@ Current tests prove generic set through commit, reparse, and `ExtractTables` for
 - Bibite genes: `genes.genes.Diet`
 - Bibite location: `transform.position[0]`, `transform.position[1]`, `rb2d.px`, `rb2d.py`
 - Bibite health/energy fields are independently settable, but do not use energy as a kill/delete signal.
+- SQL value refs currently cover direct bibite/egg fields, bibite/egg genes, bibite/egg brain rows, bibite component tables, stomach content rows, pellets, pheromones, and basic `settings_zones` fields.
 
 ## Culling Guidance
 

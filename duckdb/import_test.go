@@ -542,6 +542,7 @@ func sampleExtractedSave() tb.ExtractedSave {
 			EntryName:            "pellets.bb8scene",
 			PelletIndex:          0,
 			GroupIndex:           0,
+			GroupPelletIndex:     0,
 			Zone:                 "Zone A",
 			Material:             "Plant",
 			Amount:               2,

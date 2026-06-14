@@ -425,6 +425,7 @@ var pelletFields = []fieldSpec{
 	{"EntryName", "entry_name"},
 	{"PelletIndex", "pellet_index"},
 	{"GroupIndex", "group_index"},
+	{"GroupPelletIndex", "group_pellet_index"},
 	{"Zone", "zone"},
 	{"Material", "material"},
 	{"Amount", "amount"},

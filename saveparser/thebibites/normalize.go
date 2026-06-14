@@ -455,6 +455,7 @@ func normalizeEnvironment(saveID string, archive *Archive, out *ExtractedSave) {
 				EntryName:            pellet.EntryName,
 				PelletIndex:          pellet.Index,
 				GroupIndex:           pellet.GroupIndex,
+				GroupPelletIndex:     pellet.GroupPelletIndex,
 				Zone:                 pellet.Zone,
 				Material:             pellet.Material,
 				Amount:               pellet.Amount,

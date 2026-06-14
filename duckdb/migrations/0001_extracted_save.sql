@@ -522,6 +522,7 @@ CREATE TABLE IF NOT EXISTS pellets (
 	entry_name TEXT,
 	pellet_index INTEGER,
 	group_index INTEGER,
+	group_pellet_index INTEGER,
 	zone TEXT,
 	material TEXT,
 	amount DOUBLE,

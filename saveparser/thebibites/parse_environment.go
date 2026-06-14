@@ -66,12 +66,13 @@ func parsePellet(entryName, zone string, groupIndex, groupPelletIndex, pelletInd
 	}
 	ownerID := fmt.Sprintf("%d", pelletIndex)
 	pellet := &Pellet{
-		Index:      pelletIndex,
-		GroupIndex: groupIndex,
-		EntryName:  entryName,
-		Zone:       zone,
-		Raw:        raw,
-		Scalars:    collectScalars(entryName, "pellet", ownerID, fmt.Sprintf("pellets.groups[%d].pellets[%d]", groupIndex, groupPelletIndex), raw),
+		Index:            pelletIndex,
+		GroupIndex:       groupIndex,
+		GroupPelletIndex: groupPelletIndex,
+		EntryName:        entryName,
+		Zone:             zone,
+		Raw:              raw,
+		Scalars:          collectScalars(entryName, "pellet", ownerID, fmt.Sprintf("pellets.groups[%d].pellets[%d]", groupIndex, groupPelletIndex), raw),
 	}
 	if transform, ok := mapAt(raw, "transform"); ok {
 		pellet.Transform = parseTransform(transform)

@@ -223,6 +223,22 @@ ref := mutator.BibiteRef{
 err := session.StageSet(mutator.BibiteTarget(ref), "body.health", 0)
 ```
 
+For allowlisted normalized cells, mutation code can use `SQLValueRef`:
+
+```go
+err := session.StageSQLSet(mutator.SQLValueRef{
+    Table:     "bibites",
+    Column:    "health",
+    EntryName: entryName,
+    BodyID:    bodyID,
+    HasBodyID: true,
+}.WithExpected(currentHealth), 0)
+```
+
+Rows from `pellets` include `group_pellet_index` in addition to the flattened `pellet_index`; mutation staging needs the group-local index to reconstruct paths such as `pellets[0].pellets[0].pellet.amount`.
+
+Detailed SQL bridge handoff: `docs/the-bibites-sql-mutation-bridge-handoff.md`.
+
 ## Tests
 
 Current coverage:

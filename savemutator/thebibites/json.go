@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"math/big"
 	"reflect"
+	"strconv"
 )
 
 var utf8BOM = []byte{0xef, 0xbb, 0xbf}
@@ -157,9 +158,5 @@ func ratFromUint64(value uint64) (*big.Rat, bool) {
 }
 
 func ratFromFloat(value float64) (*big.Rat, bool) {
-	rat := new(big.Rat)
-	if rat.SetFloat64(value) == nil {
-		return nil, false
-	}
-	return rat, true
+	return ratFromString(strconv.FormatFloat(value, 'g', -1, 64))
 }

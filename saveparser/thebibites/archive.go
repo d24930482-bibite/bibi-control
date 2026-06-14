@@ -520,12 +520,13 @@ type PelletGroup struct {
 }
 
 type Pellet struct {
-	Index      int
-	GroupIndex int
-	EntryName  string
-	Zone       string
-	Raw        map[string]any
-	Scalars    []Scalar
+	Index            int
+	GroupIndex       int
+	GroupPelletIndex int
+	EntryName        string
+	Zone             string
+	Raw              map[string]any
+	Scalars          []Scalar
 
 	Transform            Transform
 	RigidBody            RigidBody

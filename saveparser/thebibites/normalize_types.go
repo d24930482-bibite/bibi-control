@@ -432,6 +432,7 @@ type PelletRow struct {
 	EntryName            string
 	PelletIndex          int
 	GroupIndex           int
+	GroupPelletIndex     int
 	Zone                 string
 	Material             string
 	Amount               float64
