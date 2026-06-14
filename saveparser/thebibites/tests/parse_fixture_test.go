@@ -1,4 +1,4 @@
-package thebibites
+package tests
 
 import (
 	"archive/zip"
@@ -7,9 +7,11 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+
+	tb "github.com/asemones/bibicontrol/saveparser/thebibites"
 )
 
-var fixtureDir = filepath.Join("..", "..", "testdata", "saves", "the-bibites")
+var fixtureDir = filepath.Join("..", "..", "..", "testdata", "saves", "the-bibites")
 
 func TestParseFixtureArchives(t *testing.T) {
 	tests := []struct {
@@ -79,9 +81,9 @@ func TestParseFixtureArchives(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			archive, err := ParseFile(filepath.Join(fixtureDir, tt.name), nil)
+			archive, err := tb.ParseFile(filepath.Join(fixtureDir, tt.name), nil)
 			if err != nil {
-				t.Fatalf("ParseFile() error = %v", err)
+				t.Fatalf("tb.ParseFile() error = %v", err)
 			}
 
 			if archive.SHA256 != tt.sha256 {
@@ -140,9 +142,9 @@ func TestParseFixtureArchives(t *testing.T) {
 }
 
 func TestParseLargestFixtureDerivedCounts(t *testing.T) {
-	archive, err := ParseFile(filepath.Join(fixtureDir, "autosave_20260301021357.zip"), nil)
+	archive, err := tb.ParseFile(filepath.Join(fixtureDir, "autosave_20260301021357.zip"), nil)
 	if err != nil {
-		t.Fatalf("ParseFile() error = %v", err)
+		t.Fatalf("tb.ParseFile() error = %v", err)
 	}
 
 	if archive.Counts.BibiteFileCount != 1027 {
@@ -187,12 +189,12 @@ func TestParseSingleEntryBytes(t *testing.T) {
 	const fixtureName = "autosave_20260301021357.zip"
 
 	bibiteRaw := readFixtureEntry(t, fixtureName, "bibites/bibite_0.bb8")
-	parsedBibite, err := ParseEntryBytes("bibites/bibite_0.bb8", bibiteRaw)
+	parsedBibite, err := tb.ParseEntryBytes("bibites/bibite_0.bb8", bibiteRaw)
 	if err != nil {
-		t.Fatalf("ParseEntryBytes() error = %v", err)
+		t.Fatalf("tb.ParseEntryBytes() error = %v", err)
 	}
-	if parsedBibite.Entry.Kind != EntryBibite {
-		t.Fatalf("kind = %s, want %s", parsedBibite.Entry.Kind, EntryBibite)
+	if parsedBibite.Entry.Kind != tb.EntryBibite {
+		t.Fatalf("kind = %s, want %s", parsedBibite.Entry.Kind, tb.EntryBibite)
 	}
 	if !parsedBibite.Entry.HasUTF8BOM {
 		t.Fatalf("bibite did not record UTF-8 BOM")
@@ -217,9 +219,9 @@ func TestParseSingleEntryBytes(t *testing.T) {
 	}
 
 	sceneRaw := readFixtureEntry(t, fixtureName, "scene.bb8scene")
-	parsedScene, err := ParseBytesAs(EntryScene, sceneRaw)
+	parsedScene, err := tb.ParseBytesAs(tb.EntryScene, sceneRaw)
 	if err != nil {
-		t.Fatalf("ParseBytesAs(scene) error = %v", err)
+		t.Fatalf("tb.ParseBytesAs(scene) error = %v", err)
 	}
 	if parsedScene.Scene == nil {
 		t.Fatalf("Scene = nil")
@@ -231,18 +233,18 @@ func TestParseSingleEntryBytes(t *testing.T) {
 		t.Fatalf("single-entry parse should not emit archive-level count mismatch")
 	}
 
-	parsedCustomScene, err := ParseEntryBytesAs("scratch/scene.bb8scene", EntryScene, sceneRaw)
+	parsedCustomScene, err := tb.ParseEntryBytesAs("scratch/scene.bb8scene", tb.EntryScene, sceneRaw)
 	if err != nil {
-		t.Fatalf("ParseEntryBytesAs(scene) error = %v", err)
+		t.Fatalf("tb.ParseEntryBytesAs(scene) error = %v", err)
 	}
-	if parsedCustomScene.Entry.Kind != EntryScene || parsedCustomScene.Scene == nil {
+	if parsedCustomScene.Entry.Kind != tb.EntryScene || parsedCustomScene.Scene == nil {
 		t.Fatalf("explicit scene kind was not honored")
 	}
 
 	eggRaw := readFixtureEntry(t, fixtureName, "eggs/egg_0.bb8")
-	parsedEgg, err := ParseBytesAs(EntryEgg, eggRaw)
+	parsedEgg, err := tb.ParseBytesAs(tb.EntryEgg, eggRaw)
 	if err != nil {
-		t.Fatalf("ParseBytesAs(egg) error = %v", err)
+		t.Fatalf("tb.ParseBytesAs(egg) error = %v", err)
 	}
 	if parsedEgg.Egg == nil {
 		t.Fatalf("Egg = nil")
@@ -253,9 +255,9 @@ func TestParseSingleEntryBytes(t *testing.T) {
 }
 
 func TestSingleEntryMalformedJSONIsDiagnostic(t *testing.T) {
-	parsed, err := ParseBytesAs(EntryBibite, []byte("\ufeff{\"body\":"))
+	parsed, err := tb.ParseBytesAs(tb.EntryBibite, []byte("\ufeff{\"body\":"))
 	if err != nil {
-		t.Fatalf("ParseBytesAs() error = %v", err)
+		t.Fatalf("tb.ParseBytesAs() error = %v", err)
 	}
 	if parsed.Bibite != nil {
 		t.Fatalf("Bibite = %#v, want nil", parsed.Bibite)
@@ -274,9 +276,9 @@ func TestRejectsUnsafeZipEntryNames(t *testing.T) {
 		"../escape.bb8scene": "\ufeff{}",
 	})
 
-	_, err := ParseFile(path, nil)
+	_, err := tb.ParseFile(path, nil)
 	if err == nil {
-		t.Fatalf("ParseFile() error = nil, want unsafe entry error")
+		t.Fatalf("tb.ParseFile() error = nil, want unsafe entry error")
 	}
 }
 
@@ -294,9 +296,9 @@ func TestMalformedJSONIsDiagnosticNotArchiveFailure(t *testing.T) {
 		"bibites/bibite_0.bb8": "\ufeff{\"body\":",
 	})
 
-	archive, err := ParseFile(path, nil)
+	archive, err := tb.ParseFile(path, nil)
 	if err != nil {
-		t.Fatalf("ParseFile() error = %v", err)
+		t.Fatalf("tb.ParseFile() error = %v", err)
 	}
 	if archive.Counts.BibiteFileCount != 1 {
 		t.Fatalf("bibite file count = %d, want 1", archive.Counts.BibiteFileCount)
@@ -309,8 +311,8 @@ func TestMalformedJSONIsDiagnosticNotArchiveFailure(t *testing.T) {
 	}
 }
 
-func hasDiagnostic(diagnostics []Diagnostic, code string) bool {
-	return slices.ContainsFunc(diagnostics, func(diagnostic Diagnostic) bool {
+func hasDiagnostic(diagnostics []tb.Diagnostic, code string) bool {
+	return slices.ContainsFunc(diagnostics, func(diagnostic tb.Diagnostic) bool {
 		return diagnostic.Code == code
 	})
 }

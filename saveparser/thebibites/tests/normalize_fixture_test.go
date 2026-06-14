@@ -1,17 +1,19 @@
-package thebibites
+package tests
 
 import (
 	"path/filepath"
 	"testing"
+
+	tb "github.com/asemones/bibicontrol/saveparser/thebibites"
 )
 
 func TestExtractTablesLargestFixture(t *testing.T) {
-	archive, err := ParseFile(filepath.Join(fixtureDir, "autosave_20260301021357.zip"), nil)
+	archive, err := tb.ParseFile(filepath.Join(fixtureDir, "autosave_20260301021357.zip"), nil)
 	if err != nil {
-		t.Fatalf("ParseFile() error = %v", err)
+		t.Fatalf("tb.ParseFile() error = %v", err)
 	}
 
-	tables := ExtractTables("largest", archive)
+	tables := tb.ExtractTables("largest", archive)
 	if tables.Archive.SaveID != "largest" {
 		t.Fatalf("archive save ID = %q, want largest", tables.Archive.SaveID)
 	}
@@ -66,12 +68,12 @@ func TestExtractTablesLargestFixture(t *testing.T) {
 }
 
 func TestExtractTablesPheromonesWithoutSettingChangers(t *testing.T) {
-	archive, err := ParseFile(filepath.Join(fixtureDir, "dasdasd.zip"), nil)
+	archive, err := tb.ParseFile(filepath.Join(fixtureDir, "dasdasd.zip"), nil)
 	if err != nil {
-		t.Fatalf("ParseFile() error = %v", err)
+		t.Fatalf("tb.ParseFile() error = %v", err)
 	}
 
-	tables := ExtractTables("pheromones", archive)
+	tables := tb.ExtractTables("pheromones", archive)
 	if len(tables.Pheromones) != 1 {
 		t.Fatalf("pheromones = %d, want 1", len(tables.Pheromones))
 	}
@@ -86,7 +88,7 @@ func TestExtractTablesPheromonesWithoutSettingChangers(t *testing.T) {
 	}
 }
 
-func hasMatterDecayRow(pellets []PelletRow) bool {
+func hasMatterDecayRow(pellets []tb.PelletRow) bool {
 	for _, pellet := range pellets {
 		if pellet.HasMatterDecay {
 			return true

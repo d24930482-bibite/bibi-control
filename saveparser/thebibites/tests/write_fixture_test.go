@@ -1,4 +1,4 @@
-package thebibites
+package tests
 
 import (
 	"archive/zip"
@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+
+	tb "github.com/asemones/bibicontrol/saveparser/thebibites"
 )
 
 func TestWriteArchiveRoundTripFixtures(t *testing.T) {
@@ -22,19 +24,19 @@ func TestWriteArchiveRoundTripFixtures(t *testing.T) {
 	for _, fixturePath := range fixtures {
 		fixtureName := filepath.Base(fixturePath)
 		t.Run(fixtureName, func(t *testing.T) {
-			archive, err := ParseFile(fixturePath, nil)
+			archive, err := tb.ParseFile(fixturePath, nil)
 			if err != nil {
-				t.Fatalf("ParseFile(original) error = %v", err)
+				t.Fatalf("tb.ParseFile(original) error = %v", err)
 			}
 
 			outPath := filepath.Join(t.TempDir(), fixtureName)
-			if err := WriteArchive(outPath, archive); err != nil {
-				t.Fatalf("WriteArchive() error = %v", err)
+			if err := tb.WriteArchive(outPath, archive); err != nil {
+				t.Fatalf("tb.WriteArchive() error = %v", err)
 			}
 
-			rewritten, err := ParseFile(outPath, nil)
+			rewritten, err := tb.ParseFile(outPath, nil)
 			if err != nil {
-				t.Fatalf("ParseFile(rewritten) error = %v", err)
+				t.Fatalf("tb.ParseFile(rewritten) error = %v", err)
 			}
 			assertRoundTripArchive(t, archive, rewritten)
 			assertZipPayloadsEqual(t, fixturePath, outPath)
@@ -45,29 +47,29 @@ func TestWriteArchiveRoundTripFixtures(t *testing.T) {
 func TestWriteArchiveRejectsInvalidEntries(t *testing.T) {
 	tests := []struct {
 		name    string
-		archive *Archive
+		archive *tb.Archive
 	}{
 		{
 			name: "nil raw payload with nonzero size",
-			archive: &Archive{Entries: []Entry{{
+			archive: &tb.Archive{Entries: []tb.Entry{{
 				Name:             "scene.bb8scene",
-				Kind:             EntryScene,
+				Kind:             tb.EntryScene,
 				Method:           zip.Deflate,
 				UncompressedSize: 1,
 			}}},
 		},
 		{
 			name: "duplicate entry",
-			archive: &Archive{Entries: []Entry{
-				{Name: "scene.bb8scene", Kind: EntryScene, Method: zip.Deflate, Raw: []byte("{}")},
-				{Name: "scene.bb8scene", Kind: EntryScene, Method: zip.Deflate, Raw: []byte("{}")},
+			archive: &tb.Archive{Entries: []tb.Entry{
+				{Name: "scene.bb8scene", Kind: tb.EntryScene, Method: zip.Deflate, Raw: []byte("{}")},
+				{Name: "scene.bb8scene", Kind: tb.EntryScene, Method: zip.Deflate, Raw: []byte("{}")},
 			}},
 		},
 		{
 			name: "unsafe entry",
-			archive: &Archive{Entries: []Entry{{
+			archive: &tb.Archive{Entries: []tb.Entry{{
 				Name:   "../scene.bb8scene",
-				Kind:   EntryScene,
+				Kind:   tb.EntryScene,
 				Method: zip.Deflate,
 				Raw:    []byte("{}"),
 			}}},
@@ -76,15 +78,15 @@ func TestWriteArchiveRejectsInvalidEntries(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := WriteArchive(filepath.Join(t.TempDir(), "out.zip"), tt.archive)
+			err := tb.WriteArchive(filepath.Join(t.TempDir(), "out.zip"), tt.archive)
 			if err == nil {
-				t.Fatalf("WriteArchive() error = nil, want error")
+				t.Fatalf("tb.WriteArchive() error = nil, want error")
 			}
 		})
 	}
 }
 
-func assertRoundTripArchive(t *testing.T, original, rewritten *Archive) {
+func assertRoundTripArchive(t *testing.T, original, rewritten *tb.Archive) {
 	t.Helper()
 
 	if rewritten.Comment != original.Comment {
