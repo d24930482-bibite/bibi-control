@@ -109,6 +109,30 @@ func TestSessionSetSupportsNestedArrayPaths(t *testing.T) {
 	}
 }
 
+func TestSetJSONPathSupportsQuotedMapKeys(t *testing.T) {
+	root := map[string]any{
+		"settingsChangers": []any{
+			map[string]any{
+				"settingsBases": map[string]any{
+					"Zone(0).fertility": 0.7827918,
+				},
+			},
+		},
+	}
+
+	path := `settingsChangers[0].settingsBases["Zone(0).fertility"]`
+	if err := setJSONPath(root, path, 30.0, SetOptions{}); err != nil {
+		t.Fatalf("setJSONPath() error = %v", err)
+	}
+	got, ok, err := getJSONPath(root, path)
+	if err != nil {
+		t.Fatalf("getJSONPath() error = %v", err)
+	}
+	if !ok || got != 30.0 {
+		t.Fatalf("quoted key value = %v/%t, want 30/true", got, ok)
+	}
+}
+
 func TestSessionSetUpdatesSettingsAndZones(t *testing.T) {
 	session := NewSession(parseSyntheticArchive(t))
 
@@ -331,7 +355,7 @@ func parseSyntheticArchive(t *testing.T) *tb.Archive {
 	rawScene := append([]byte(nil), utf8BOM...)
 	rawScene = append(rawScene, []byte(`{"nBibites":1}`)...)
 	rawSettings := append([]byte(nil), utf8BOM...)
-	rawSettings = append(rawSettings, []byte(`{"pelletEnergy":{"Value":20},"debugFlag":{"Value":true},"worldLabel":{"Value":"alpha"},"independents":{"worldSize":{"Value":1000}},"materials":{"Plant":{"energy":{"Value":2}}},"zones":[{"id":7,"name":"Zone A","material":"Plant","distribution":"uniform","posX":1,"posY":2,"radius":10,"radiusIsRelative":false,"fertility":{"Value":0.4},"size":5}],"zoneGroups":[],"bibites":[],"settingsChangers":[]}`)...)
+	rawSettings = append(rawSettings, []byte(`{"pelletEnergy":{"Value":20},"debugFlag":{"Value":true},"worldLabel":{"Value":"alpha"},"independents":{"worldSize":{"Value":1000}},"materials":{"Plant":{"energy":{"Value":2}}},"zones":[{"id":7,"name":"Zone A","material":"Plant","distribution":"uniform","posX":1,"posY":2,"radius":10,"radiusIsRelative":false,"fertility":{"Value":0.4},"size":5}],"zoneGroups":[],"bibites":[],"settingsChangers":[{"name":"season","repeat":true,"start":0,"settingsBases":{"Zone(0).fertility":0.4}}]}`)...)
 	rawPellets := append([]byte(nil), utf8BOM...)
 	rawPellets = append(rawPellets, []byte(`{"pellets":[{"zone":"Zone A","pellets":[{"transform":{"position":[3,4],"rotation":0,"scale":1},"rb2d":{"px":3,"py":4,"vx":0,"vy":0,"r":0},"pellet":{"material":"Plant","amount":5},"matterDecay":{"timeAlive":1,"rotAmount":2}}]}]}`)...)
 
@@ -412,6 +436,18 @@ func settingString(t *testing.T, rows []tb.SettingValueRow, name string) string 
 	}
 	t.Fatalf("missing setting %q", name)
 	return ""
+}
+
+func changerTargetNumber(t *testing.T, rows []tb.SettingsChangerTargetRow, targetKey string) float64 {
+	t.Helper()
+
+	for _, row := range rows {
+		if row.TargetKey == targetKey {
+			return row.NumberValue
+		}
+	}
+	t.Fatalf("missing changer target %q", targetKey)
+	return 0
 }
 
 func geneNumber(t *testing.T, rows []tb.GeneRow, name string) float64 {

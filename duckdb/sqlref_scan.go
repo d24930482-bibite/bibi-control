@@ -168,6 +168,16 @@ func sqlRefFromRow(spec SQLRefScanSpec, columns map[string]int, values []any) (m
 	} else if ok {
 		ref.SettingName = value
 	}
+	if value, ok, err := rowString(columns, values, "scope"); err != nil {
+		return ref, err
+	} else if ok {
+		ref.Scope = value
+	}
+	if value, ok, err := rowString(columns, values, "target_key"); err != nil {
+		return ref, err
+	} else if ok {
+		ref.TargetKey = value
+	}
 	if value, ok, err := rowString(columns, values, "value_type"); err != nil {
 		return ref, err
 	} else if ok {
@@ -226,6 +236,12 @@ func sqlRefFromRow(spec SQLRefScanSpec, columns map[string]int, values []any) (m
 	} else if ok {
 		ref.ZoneIndex = value
 		ref.HasZoneIndex = true
+	}
+	if value, ok, err := rowInt(columns, values, "changer_index"); err != nil {
+		return ref, err
+	} else if ok {
+		ref.ChangerIndex = value
+		ref.HasChangerIndex = true
 	}
 	zoneIDOK := false
 	if value, ok, err := rowInt64(columns, values, "zone_id"); err != nil {

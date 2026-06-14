@@ -6,6 +6,28 @@ This handoff covers the bridge from normalized SQL query results to staged save 
 
 The goal is not to make SQL rows editable state. The parsed `Archive` remains the source of truth. SQL is used to select readable, normalized candidates; the bridge converts an allowlisted SQL cell reference into a guarded archive JSON path.
 
+## Current Status
+
+The SQL `SET` path is implemented end to end for allowlisted normalized cells:
+
+```text
+Parse save -> ExtractTables -> DuckDB import -> SQL query -> ScanSQLRefs
+-> SQLValueRef.WithExpected(current_cell_value) -> Session.StageSQLSet(...)
+-> Commit -> reparse -> assert normalized values changed
+```
+
+This is a guarded archive mutation path, not an editable-DuckDB path.
+
+Implemented pieces:
+
+- `savemutator/thebibites.SQLValueRef`
+- `Session.StageSQLSet`
+- `duckdb.ScanSQLRefs`
+- settings value row mapping
+- zone-scoped `settings_changer_targets.number_value` mapping
+- quoted JSON path keys for `settingsBases["Zone(0).fertility"]`
+- fixture-backed smoke test that mutates the large save and installs it into The Bibites `Savefiles` directory
+
 ## Implemented Slice
 
 New mutator API:
@@ -24,12 +46,18 @@ Relevant files:
 
 - `savemutator/thebibites/sqlref.go`
 - `savemutator/thebibites/sqlref_test.go`
+- `savemutator/thebibites/install.go`
+- `savemutator/thebibites/install_test.go`
+- `savemutator/thebibites/path.go`
+- `savemutator/thebibites/session_test.go`
 - `savemutator/thebibites/json.go`
 - `saveparser/thebibites/archive.go`
 - `saveparser/thebibites/parse_environment.go`
 - `saveparser/thebibites/normalize.go`
 - `saveparser/thebibites/normalize_types.go`
 - `saveparser/thebibites/normalize_metadata.go`
+- `duckdb/sqlref_scan.go`
+- `duckdb/sqlref_scan_test.go`
 - `duckdb/import.go`
 - `duckdb/migrations/0001_extracted_save.sql`
 - `cmd/gen_thebibites_schema/main.go`
@@ -55,6 +83,12 @@ type SQLValueRef struct {
     OwnerID   string
     Path      string
 
+    SettingName    string
+    Scope          string
+    TargetKey      string
+    ValueType      string
+    WrapperRawJSON string
+
     ContentIndex          int
     HasContentIndex       bool
     GroupIndex            int
@@ -73,6 +107,11 @@ type SQLValueRef struct {
     HasZoneIndex          bool
     ZoneID                int64
     HasZoneID             bool
+    ChangerIndex          int
+    HasChangerIndex       bool
+
+    Expected              any
+    HasExpected           bool
 }
 ```
 
@@ -181,6 +220,57 @@ Settings zones:
 - `settings_zones.material`
 - `settings_zones.distribution`
 
+Settings value rows:
+
+- `settings_simulation_values.number_value`
+- `settings_simulation_values.bool_value`
+- `settings_simulation_values.string_value`
+- `settings_independent_values.number_value`
+- `settings_independent_values.bool_value`
+- `settings_independent_values.string_value`
+- `settings_material_values.number_value`
+- `settings_material_values.bool_value`
+- `settings_material_values.string_value`
+- `settings_zone_values.number_value`
+- `settings_zone_values.bool_value`
+- `settings_zone_values.string_value`
+
+Settings value refs require `entry_name`, `owner_kind`, `owner_id`, `setting_name`, `path`, `value_type`, and `wrapper_raw_json`.
+
+The resolver verifies exact table/path/owner consistency and only appends `.Value` when `wrapper_raw_json` is a JSON object containing `Value`. This matters because zone settings may be represented either as wrapped values:
+
+```text
+zones[0].fertility.Value
+```
+
+or direct scalar values:
+
+```text
+zones[0].size
+```
+
+Settings changer targets:
+
+- `settings_changer_targets.number_value`
+
+Only zone-scoped numeric changer targets are writable right now. The supported target shape is:
+
+```text
+target_key = Zone(N).settingName
+scope = zone
+setting_name = settingName
+zone_index = N
+value_type = number
+```
+
+It resolves to:
+
+```text
+settingsChangers[changer_index].settingsBases["Zone(N).settingName"]
+```
+
+Simulation-wide changer targets such as `pelletEnergy` and `biomassDensity` are parsed into `settings_changer_targets`, but are not writable through `SQLValueRef` yet.
+
 ## Pellet Locator Change
 
 `PelletRow` now includes `GroupPelletIndex`, imported as `group_pellet_index`.
@@ -203,7 +293,7 @@ Optionally select `zone` and pass it as a guard.
 
 ## Direct Refeed Adapter
 
-The next adapter layer should convert DuckDB query rows into typed `SQLValueRef` values plus the current selected cell value.
+`duckdb.ScanSQLRefs` converts DuckDB query rows into typed `SQLValueRef` values plus the current selected cell value.
 
 This is the direct refeed path:
 
@@ -237,6 +327,8 @@ Queries must select every locator column required by the target table/column pai
 - `bibite_stomach_contents.amount` needs `entry_name`, `body_id`, `has_body_id`, and `content_index`.
 - `pellets.amount` needs `entry_name`, `group_index`, and `group_pellet_index`; `zone` is optional as an extra guard.
 - `settings_zones.name` needs `entry_name` and `zone_index`; `zone_id` plus `has_zone_id` is optional as an extra guard.
+- `settings_zone_values.number_value` needs `entry_name`, `owner_kind`, `owner_id`, `setting_name`, `path`, `value_type`, `wrapper_raw_json`, and optionally `zone_index`, `zone_id`, `has_zone_id`.
+- `settings_changer_targets.number_value` for zone targets needs `entry_name`, `changer_index`, `target_key`, `scope`, `zone_index`, `setting_name`, `value_type`, and optionally `zone_id`, `has_zone_id`.
 
 The scanner may infer `SQLValueRef` fields from returned column names, but it must not infer archive JSON paths. Path resolution stays in `savemutator/thebibites/sqlref.go`.
 
@@ -276,6 +368,59 @@ err := session.StageSQLSet(mutator.SQLValueRef{
 - Do not infer JSON paths from column names at runtime.
 - Do not add delete, append, or entry removal through this bridge yet.
 - After `Apply`, parser projections on the in-memory archive are invalid until `Commit` reparses the written archive.
+- Treat settings changer targets as separate from static settings values. The game can use `settingsChangers[*].settingsBases` to override or repopulate values such as World fertility.
+
+## Settings Changer Caveat
+
+The large fixture has this raw settings shape:
+
+```text
+settingsChangers[0] "season"
+  settingsBases:
+    Zone(0).fertility = 0.7827918
+    pelletEnergy = 1000.0
+
+settingsChangers[1] "Climate"
+  settingsBases:
+    biomassDensity = 0.01
+```
+
+Changing only `zones[0].fertility` is not enough for the World zone in the game. The season changer also carries `settingsBases["Zone(0).fertility"]`, and the game appears to use that value. The smoke test now updates both:
+
+```text
+zones[0].fertility = 30
+settingsChangers[0].settingsBases["Zone(0).fertility"] = 30
+```
+
+The mutator JSON path parser supports quoted map keys for this case:
+
+```text
+settingsChangers[0].settingsBases["Zone(0).fertility"]
+```
+
+Do not replace this with dotted path syntax; `Zone(0).fertility` is a single JSON object key.
+
+## Savefile Installer
+
+`savemutator/thebibites/install.go` provides reusable helpers:
+
+- `DefaultSavefilesDir()`
+- `InstallSaveFile(srcPath, dstName)`
+- `InstallSaveFileToDir(srcPath, dstDir, dstName)`
+
+Default Linux path:
+
+```text
+~/.config/unity3d/The Bibites/The Bibites/Savefiles
+```
+
+Override with:
+
+```bash
+BIBITES_SAVEFILES_DIR=/path/to/Savefiles
+```
+
+The installer copies through a temporary file in the destination directory, then renames it into place. It rejects destination names with path separators and requires `.zip`.
 
 ## Numeric Guard Note
 
@@ -289,7 +434,12 @@ Before relying on pellet mutation refs against an existing DuckDB file, either r
 
 ## Tests
 
-Coverage lives in `savemutator/thebibites/sqlref_test.go`.
+Coverage lives mainly in:
+
+- `savemutator/thebibites/sqlref_test.go`
+- `savemutator/thebibites/session_test.go`
+- `savemutator/thebibites/install_test.go`
+- `duckdb/sqlref_scan_test.go`
 
 Current test coverage verifies:
 
@@ -298,8 +448,27 @@ Current test coverage verifies:
 - SQL refs commit and reparse for stomach content amount.
 - SQL refs commit and reparse for pellet amount.
 - SQL refs commit and reparse for settings zone name.
+- SQL refs commit and reparse for settings value rows:
+  - simulation values
+  - independent values
+  - material values
+  - zone values
+  - wrapped and unwrapped settings
+  - number, bool, and string columns
+- SQL refs commit and reparse for zone-scoped `settings_changer_targets.number_value`.
+- DuckDB direct refeed for `bibites.health`.
+- DuckDB direct refeed for a fixture settings simulation value.
+- Large-fixture smoke test:
+  - all bibites set to green via `ColorR=0`, `ColorG=1`, `ColorB=0`
+  - all zone `fertility` values set to `30`
+  - all zone-scoped changer-target `fertility` base values set to `30`
+  - output written to `/tmp/bibicontrol-smoke/green-fertility.zip`
+  - output installed to The Bibites `Savefiles/green-fertility.zip`
+- Installer copies to temp destination, honors `BIBITES_SAVEFILES_DIR`, and rejects unsafe destination names.
 - Unsupported refs fail instead of guessing.
 - Pellet refs require `group_pellet_index`.
+- Settings refs reject missing wrapper metadata, wrong value type, owner/path mismatch, unsafe setting names, bad wrapper object shape, and zone index mismatch.
+- JSON path parser supports quoted map keys such as `["Zone(0).fertility"]`.
 - Expected-value guard mismatches do not change raw bytes.
 
 Full verification command:
@@ -308,7 +477,9 @@ Full verification command:
 GOMODCACHE=/tmp/bibicontrol-go-mod GOCACHE=/tmp/bibicontrol-go-build go test ./...
 ```
 
-This passed after the bridge slice was added.
+This passed after the settings changer target and smoke installer changes were added.
+
+The smoke test intentionally writes to The Bibites save directory. In a sandboxed environment, it may require elevated filesystem permissions or `BIBITES_SAVEFILES_DIR` pointed at a writable temp directory.
 
 ## Auto-Generation Slice
 
@@ -337,8 +508,8 @@ The generated migration intentionally keeps the custom `bibite_mutation_refs` vi
 
 ## Next Slices
 
-1. Add the typed DuckDB direct refeed adapter that scans selected query rows into `SQLValueRef` values plus current cell values.
-2. Add fixture-backed end-to-end tests: parse largest fixture, import to DuckDB, query candidates, stage SQL refs, commit, reparse, and assert normalized values changed.
-3. Decide whether settings value rows should be writable through `SQLValueRef`; wrapper `.Value` handling needs explicit mapping.
-4. Add schema migration handling for already-existing DuckDB files.
+1. Add exhaustive cheap resolver tests for every allowlisted `table.column` pair.
+2. Add SQL ref support for simulation-wide `settings_changer_targets` if game testing proves it is needed.
+3. Add schema migration handling for already-existing DuckDB files.
+4. Decide whether more settings changer target types should be writable, such as bool/string or non-zone targets.
 5. Keep broader domain mutations separate: deletes, appends, count updates, corpse/pellet conversion, species/link consistency, and entry removal are not solved by this bridge.

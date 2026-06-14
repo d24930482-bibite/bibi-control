@@ -194,6 +194,23 @@ func TestStageSQLSetUpdatesSettingsValueRows(t *testing.T) {
 	}.WithExpected(5.0), 99.0); err != nil {
 		t.Fatalf("StageSQLSet(settings_zone_values.number_value unwrapped) error = %v", err)
 	}
+	if err := session.StageSQLSet(SQLValueRef{
+		Table:           "settings_changer_targets",
+		Column:          "number_value",
+		EntryName:       SettingsEntryName,
+		ChangerIndex:    0,
+		HasChangerIndex: true,
+		TargetKey:       "Zone(0).fertility",
+		Scope:           "zone",
+		ZoneIndex:       0,
+		HasZoneIndex:    true,
+		ZoneID:          7,
+		HasZoneID:       true,
+		SettingName:     "fertility",
+		ValueType:       "number",
+	}.WithExpected(0.4), 30.0); err != nil {
+		t.Fatalf("StageSQLSet(settings_changer_targets.number_value) error = %v", err)
+	}
 
 	fresh, err := session.Commit(filepath.Join(t.TempDir(), "mutated.zip"))
 	if err != nil {
@@ -220,6 +237,9 @@ func TestStageSQLSetUpdatesSettingsValueRows(t *testing.T) {
 	}
 	if got := settingNumber(t, tables.SettingsZoneValues, "size"); got != 99.0 {
 		t.Fatalf("zone size = %v, want 99", got)
+	}
+	if got := changerTargetNumber(t, tables.SettingsChangerTargets, "Zone(0).fertility"); got != 30.0 {
+		t.Fatalf("changer Zone(0).fertility = %v, want 30", got)
 	}
 }
 
@@ -332,6 +352,23 @@ func TestSQLSetRejectsUnsafeSettingsValueRefs(t *testing.T) {
 				HasZoneIndex:   true,
 			},
 			want: "zone_index",
+		},
+		{
+			name: "changer target key mismatch",
+			ref: SQLValueRef{
+				Table:           "settings_changer_targets",
+				Column:          "number_value",
+				EntryName:       SettingsEntryName,
+				ChangerIndex:    0,
+				HasChangerIndex: true,
+				TargetKey:       "Zone(1).fertility",
+				Scope:           "zone",
+				ZoneIndex:       0,
+				HasZoneIndex:    true,
+				SettingName:     "fertility",
+				ValueType:       "number",
+			},
+			want: "target_key",
 		},
 	}
 

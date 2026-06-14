@@ -29,6 +29,8 @@ type SQLValueRef struct {
 	Path      string
 
 	SettingName    string
+	Scope          string
+	TargetKey      string
 	ValueType      string
 	WrapperRawJSON string
 
@@ -51,6 +53,8 @@ type SQLValueRef struct {
 	HasZoneIndex        bool
 	ZoneID              int64
 	HasZoneID           bool
+	ChangerIndex        int
+	HasChangerIndex     bool
 	Expected            any
 	HasExpected         bool
 }
@@ -128,6 +132,8 @@ func ResolveSQLValueRef(ref SQLValueRef) (Target, string, error) {
 		return resolvePheromoneColumn(ref)
 	case "settings_simulation_values", "settings_independent_values", "settings_material_values", "settings_zone_values":
 		return resolveSettingsValueColumn(ref)
+	case "settings_changer_targets":
+		return resolveSettingsChangerTargetColumn(ref)
 	case "settings_zones":
 		return resolveSettingsZoneColumn(ref)
 	default:
@@ -500,6 +506,45 @@ func settingsValueArchivePath(ref SQLValueRef) (path string, zoneIndex int, hasZ
 	default:
 		return "", 0, false, unsupportedSQLValueRef(ref)
 	}
+}
+
+func resolveSettingsChangerTargetColumn(ref SQLValueRef) (Target, string, error) {
+	if ref.Column != "number_value" {
+		return Target{}, "", unsupportedSQLValueRef(ref)
+	}
+	if ref.EntryName == "" {
+		return Target{}, "", fmt.Errorf("%s.%s requires entry_name", ref.Table, ref.Column)
+	}
+	if !ref.HasChangerIndex {
+		return Target{}, "", fmt.Errorf("%s.%s requires changer_index", ref.Table, ref.Column)
+	}
+	if ref.TargetKey == "" {
+		return Target{}, "", fmt.Errorf("%s.%s requires target_key", ref.Table, ref.Column)
+	}
+	if ref.Scope != "zone" {
+		return Target{}, "", fmt.Errorf("%s.%s scope = %q, want zone", ref.Table, ref.Column, ref.Scope)
+	}
+	if !ref.HasZoneIndex {
+		return Target{}, "", fmt.Errorf("%s.%s requires zone_index", ref.Table, ref.Column)
+	}
+	if ref.SettingName == "" {
+		return Target{}, "", fmt.Errorf("%s.%s requires setting_name", ref.Table, ref.Column)
+	}
+	if ref.ValueType != string(tb.ScalarNumber) {
+		return Target{}, "", fmt.Errorf("%s.%s value_type = %q, want %q", ref.Table, ref.Column, ref.ValueType, tb.ScalarNumber)
+	}
+
+	expectedKey := fmt.Sprintf("Zone(%d).%s", ref.ZoneIndex, ref.SettingName)
+	if ref.TargetKey != expectedKey {
+		return Target{}, "", fmt.Errorf("%s.%s target_key = %q, want %q", ref.Table, ref.Column, ref.TargetKey, expectedKey)
+	}
+
+	guards := make([]Guard, 0, 1)
+	if ref.HasZoneID {
+		guards = append(guards, Require(fmt.Sprintf("zones[%d].id", ref.ZoneIndex), ref.ZoneID))
+	}
+	path := fmt.Sprintf("settingsChangers[%d].settingsBases[%s]", ref.ChangerIndex, strconv.Quote(ref.TargetKey))
+	return EntryTarget(ref.EntryName, tb.EntrySettings, guards...), path, nil
 }
 
 func settingValueUsesWrapper(raw string) (bool, error) {

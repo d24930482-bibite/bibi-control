@@ -24,6 +24,26 @@ func parsePath(path string) ([]pathPart, error) {
 		case '.':
 			return nil, fmt.Errorf("empty path segment at byte %d", i)
 		case '[':
+			if i+1 < len(path) && path[i+1] == '"' {
+				end, key, err := parseQuotedKey(path, i)
+				if err != nil {
+					return nil, err
+				}
+				parts = append(parts, pathPart{key: key, original: path[i : end+1]})
+				i = end + 1
+				if i < len(path) {
+					if path[i] == '.' {
+						i++
+						if i == len(path) {
+							return nil, fmt.Errorf("trailing dot")
+						}
+					} else if path[i] != '[' {
+						return nil, fmt.Errorf("expected dot or index at byte %d", i)
+					}
+				}
+				continue
+			}
+
 			end := strings.IndexByte(path[i:], ']')
 			if end < 0 {
 				return nil, fmt.Errorf("unterminated index at byte %d", i)
@@ -71,6 +91,28 @@ func parsePath(path string) ([]pathPart, error) {
 		return nil, fmt.Errorf("path is empty")
 	}
 	return parts, nil
+}
+
+func parseQuotedKey(path string, start int) (int, string, error) {
+	for i := start + 2; i < len(path); i++ {
+		switch path[i] {
+		case '\\':
+			i++
+		case '"':
+			if i+1 >= len(path) || path[i+1] != ']' {
+				return 0, "", fmt.Errorf("expected closing bracket after quoted key at byte %d", i)
+			}
+			key, err := strconv.Unquote(path[start+1 : i+1])
+			if err != nil {
+				return 0, "", fmt.Errorf("invalid quoted key at byte %d: %w", start, err)
+			}
+			if key == "" {
+				return 0, "", fmt.Errorf("empty quoted key at byte %d", start)
+			}
+			return i + 1, key, nil
+		}
+	}
+	return 0, "", fmt.Errorf("unterminated quoted key at byte %d", start)
 }
 
 func getJSONPath(root any, path string) (any, bool, error) {
@@ -158,6 +200,10 @@ func renderPath(parts []pathPart) string {
 	var out strings.Builder
 	for i, part := range parts {
 		if part.isIndex {
+			out.WriteString(part.original)
+			continue
+		}
+		if strings.HasPrefix(part.original, "[") {
 			out.WriteString(part.original)
 			continue
 		}
