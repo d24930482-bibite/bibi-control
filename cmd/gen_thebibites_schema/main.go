@@ -55,7 +55,12 @@ func run() error {
 	if err := writeFormattedGo(filepath.Join(root, "saveparser", "thebibites", "normalize_metadata.go"), renderParserMetadata(tables)); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(root, "duckdb", "migrations", "0001_extracted_save.sql"), []byte(renderMigration(tables)), 0o644); err != nil {
+
+	migration, err := renderMigration(tables)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(root, "duckdb", "migrations", "0001_extracted_save.sql"), []byte(migration), 0o644); err != nil {
 		return err
 	}
 	return nil
@@ -85,7 +90,10 @@ func parseNormalizedTables(path string) ([]tableSpec, error) {
 		return nil, err
 	}
 
-	structs := make(map[string][]rowField)
+	// Store every declared struct as its raw AST node so embedded fields can be
+	// resolved and flattened on demand (fix 2). ExtractedSave is handled
+	// separately because its fields carry dbtable tags and container types.
+	structs := make(map[string]*ast.StructType)
 	var extracted *ast.StructType
 	for _, decl := range file.Decls {
 		gen, ok := decl.(*ast.GenDecl)
@@ -105,7 +113,7 @@ func parseNormalizedTables(path string) ([]tableSpec, error) {
 				extracted = structType
 				continue
 			}
-			structs[typeSpec.Name.Name] = parseStructFields(structType)
+			structs[typeSpec.Name.Name] = structType
 		}
 	}
 	if extracted == nil {
@@ -125,9 +133,9 @@ func parseNormalizedTables(path string) ([]tableSpec, error) {
 		if err != nil {
 			return nil, fmt.Errorf("ExtractedSave.%s: %w", astField.Names[0].Name, err)
 		}
-		rowFields, ok := structs[rowType]
-		if !ok {
-			return nil, fmt.Errorf("row type %s for table %s not found", rowType, tableName)
+		rowFields, err := flattenFields(rowType, structs, map[string]bool{})
+		if err != nil {
+			return nil, fmt.Errorf("table %s: %w", tableName, err)
 		}
 		table := tableSpec{
 			SaveField: astField.Names[0].Name,
@@ -136,30 +144,96 @@ func parseNormalizedTables(path string) ([]tableSpec, error) {
 			Optional:  optional,
 			Fields:    make([]field, 0, len(rowFields)),
 		}
-		for _, rowField := range rowFields {
-			sqlType, err := sqlType(rowField.Type)
+		for _, rf := range rowFields {
+			sqlType, err := sqlType(rf.Type)
 			if err != nil {
-				return nil, fmt.Errorf("%s.%s: %w", rowType, rowField.Name, err)
+				return nil, fmt.Errorf("%s.%s: %w", rowType, rf.Name, err)
 			}
 			table.Fields = append(table.Fields, field{
-				Field:   rowField.Name,
-				Column:  columnName(rowType, rowField.Name),
+				Field:   rf.Name,
+				Column:  columnName(rowType, rf.Name),
 				SQLType: sqlType,
 			})
 		}
+
+		// Fix 3: a table with no columns emits invalid SQL (CREATE TABLE x ();)
+		// that the .sql output never validates. Fail loudly at generate time.
+		if len(table.Fields) == 0 {
+			return nil, fmt.Errorf("table %s (%s) produced no columns", table.Table, rowType)
+		}
+
+		// Fix 3: two Go fields collapsing to one column (snakeCase edge case or a
+		// copy-pasted override) emits a duplicate column DuckDB rejects at apply
+		// time. Catch it here. The resulting set doubles as the column lookup for
+		// the EAV discriminator check below.
+		cols := make(map[string]bool, len(table.Fields))
+		for _, f := range table.Fields {
+			if cols[f.Column] {
+				return nil, fmt.Errorf("table %s: duplicate column %q", table.Table, f.Column)
+			}
+			cols[f.Column] = true
+		}
+
+		// Fix 5: value-shaped (EAV) rows must name their discriminator value_type
+		// so the uniform `WHERE value_type = '...'` predicate the ref/query layer
+		// depends on can't silently break when a new value table forgets the
+		// per-row override and snakeCase produces "type".
+		if cols["number_value"] && cols["bool_value"] {
+			if cols["type"] || !cols["value_type"] {
+				return nil, fmt.Errorf("EAV table %s (%s): discriminator must map to column value_type", table.Table, rowType)
+			}
+		}
+
 		tables = append(tables, table)
 	}
 	return tables, nil
 }
 
-func parseStructFields(structType *ast.StructType) []rowField {
-	fields := make([]rowField, 0, len(structType.Fields.List))
-	for _, astField := range structType.Fields.List {
-		for _, name := range astField.Names {
-			fields = append(fields, rowField{Name: name.Name, Type: astField.Type})
+// flattenFields resolves a row struct into a flat, ordered field list, expanding
+// embedded structs in place. An embedded field contributes zero AST names, so the
+// previous implementation silently dropped it; here an unresolved or cyclic embed
+// is a hard error instead (fix 2).
+func flattenFields(name string, structs map[string]*ast.StructType, stack map[string]bool) ([]rowField, error) {
+	st, ok := structs[name]
+	if !ok {
+		return nil, fmt.Errorf("struct %s not found", name)
+	}
+	if stack[name] {
+		return nil, fmt.Errorf("embedded cycle through %s", name)
+	}
+	stack[name] = true
+	defer delete(stack, name)
+
+	out := make([]rowField, 0, len(st.Fields.List))
+	for _, f := range st.Fields.List {
+		if len(f.Names) == 0 { // embedded field
+			emb, err := embeddedTypeName(f.Type)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", name, err)
+			}
+			inner, err := flattenFields(emb, structs, stack)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, inner...)
+			continue
+		}
+		for _, n := range f.Names {
+			out = append(out, rowField{Name: n.Name, Type: f.Type})
 		}
 	}
-	return fields
+	return out, nil
+}
+
+func embeddedTypeName(expr ast.Expr) (string, error) {
+	switch t := expr.(type) {
+	case *ast.Ident:
+		return t.Name, nil
+	case *ast.StarExpr:
+		return embeddedTypeName(t.X)
+	default:
+		return "", fmt.Errorf("unsupported embedded field type %T", expr)
+	}
 }
 
 func tableNameFromTag(tag *ast.BasicLit) string {
@@ -194,10 +268,21 @@ func sqlType(expr ast.Expr) (string, error) {
 			return "BOOLEAN", nil
 		case "float32", "float64":
 			return "DOUBLE", nil
-		case "int", "int8", "int16", "int32":
-			return "INTEGER", nil
-		case "int64", "uint", "uint8", "uint16", "uint32", "uint64":
+		// Fix 4: Go int is 64-bit on every real target; DuckDB INTEGER is signed
+		// 32-bit, so int must map to BIGINT to avoid silent narrowing.
+		case "int", "int64":
 			return "BIGINT", nil
+		case "int8", "int16", "int32":
+			return "INTEGER", nil
+		// Fix 4: unsigned Go types map to DuckDB's unsigned types. uint64 does not
+		// fit signed BIGINT; UBIGINT is the faithful target. (Verify the DuckDB
+		// driver round-trips UBIGINT/UINTEGER into Go uint64/uint on scan; if it
+		// is fussy, BIGINT is a safe fallback for the only uint64 fields here,
+		// which are entry byte sizes that cannot realistically overflow it.)
+		case "uint", "uint64":
+			return "UBIGINT", nil
+		case "uint8", "uint16", "uint32":
+			return "UINTEGER", nil
 		default:
 			return "", fmt.Errorf("unsupported field type %s", t.Name)
 		}
@@ -319,7 +404,7 @@ func renderParserMetadata(tables []tableSpec) []byte {
 	return b.Bytes()
 }
 
-func renderMigration(tables []tableSpec) string {
+func renderMigration(tables []tableSpec) (string, error) {
 	var b strings.Builder
 	b.WriteString("-- Code generated by go generate ./saveparser/thebibites; DO NOT EDIT.\n\n")
 	for _, table := range tables {
@@ -333,17 +418,63 @@ func renderMigration(tables []tableSpec) string {
 		}
 		b.WriteString(");\n\n")
 	}
-	b.WriteString(strings.TrimSpace(customSQLTrailer))
+
+	views, err := renderViews(tables)
+	if err != nil {
+		return "", err
+	}
+	b.WriteString(strings.TrimSpace(views))
 	b.WriteString("\n")
-	return b.String()
+	return b.String(), nil
 }
 
-const customSQLTrailer = `
-CREATE OR REPLACE VIEW bibite_mutation_refs AS
-SELECT save_id, entry_name, body_id, health, energy, dead, dying, has_body_id
-FROM bibites
-WHERE has_body_id;
-`
+// viewSpec declares a generated view in terms of the table and columns it reads,
+// so the column list has a single home and can be checked against the generated
+// schema (fix 1). Previously this lived as a hand-typed SQL string constant whose
+// column references silently rotted when a struct field was renamed, failing only
+// at DuckDB-apply time in another package.
+type viewSpec struct {
+	Name    string
+	Table   string
+	Columns []string
+	Where   string
+}
+
+var generatedViews = []viewSpec{
+	{
+		Name:    "bibite_mutation_refs",
+		Table:   "bibites",
+		Columns: []string{"save_id", "entry_name", "body_id", "health", "energy", "dead", "dying", "has_body_id"},
+		Where:   "has_body_id",
+	},
+}
+
+func renderViews(tables []tableSpec) (string, error) {
+	columnsByTable := make(map[string]map[string]bool, len(tables))
+	for _, t := range tables {
+		set := make(map[string]bool, len(t.Fields))
+		for _, f := range t.Fields {
+			set[f.Column] = true
+		}
+		columnsByTable[t.Table] = set
+	}
+
+	var b strings.Builder
+	for _, v := range generatedViews {
+		cols, ok := columnsByTable[v.Table]
+		if !ok {
+			return "", fmt.Errorf("view %s references unknown table %s", v.Name, v.Table)
+		}
+		for _, c := range v.Columns {
+			if !cols[c] {
+				return "", fmt.Errorf("view %s references %s.%s, which the schema no longer has", v.Name, v.Table, c)
+			}
+		}
+		fmt.Fprintf(&b, "CREATE OR REPLACE VIEW %s AS\nSELECT %s\nFROM %s\nWHERE %s;\n\n",
+			v.Name, strings.Join(v.Columns, ", "), v.Table, v.Where)
+	}
+	return b.String(), nil
+}
 
 func writeFormattedGo(path string, source []byte) error {
 	formatted, err := format.Source(source)

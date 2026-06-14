@@ -10,12 +10,12 @@ CREATE TABLE IF NOT EXISTS save_archives (
 
 CREATE TABLE IF NOT EXISTS save_entries (
 	save_id TEXT,
-	entry_index INTEGER,
+	entry_index BIGINT,
 	entry_name TEXT,
 	kind TEXT,
 	sha256 TEXT,
-	compressed_size BIGINT,
-	uncompressed_size BIGINT,
+	compressed_size UBIGINT,
+	uncompressed_size UBIGINT,
 	has_utf8_bom BOOLEAN
 );
 
@@ -37,12 +37,12 @@ CREATE TABLE IF NOT EXISTS scenes (
 	has_reported_n_bibites BOOLEAN,
 	reported_n_pellets BIGINT,
 	has_reported_n_pellets BOOLEAN,
-	parsed_bibites INTEGER,
-	parsed_eggs INTEGER,
-	alive_bibites INTEGER,
-	dead_bibites INTEGER,
-	dying_bibites INTEGER,
-	parsed_pellets INTEGER
+	parsed_bibites BIGINT,
+	parsed_eggs BIGINT,
+	alive_bibites BIGINT,
+	dead_bibites BIGINT,
+	dying_bibites BIGINT,
+	parsed_pellets BIGINT
 );
 
 CREATE TABLE IF NOT EXISTS vars (
@@ -55,7 +55,7 @@ CREATE TABLE IF NOT EXISTS vars (
 CREATE TABLE IF NOT EXISTS scene_color_selectors (
 	save_id TEXT,
 	entry_name TEXT,
-	color_selector_index INTEGER,
+	color_selector_index BIGINT,
 	raw_json TEXT
 );
 
@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS scene_phero_towers (
 	save_id TEXT,
 	entry_name TEXT,
 	tower_kind TEXT,
-	tower_index INTEGER,
+	tower_index BIGINT,
 	raw_json TEXT
 );
 
@@ -71,7 +71,7 @@ CREATE TABLE IF NOT EXISTS scene_rad_towers (
 	save_id TEXT,
 	entry_name TEXT,
 	tower_kind TEXT,
-	tower_index INTEGER,
+	tower_index BIGINT,
 	raw_json TEXT
 );
 
@@ -110,7 +110,7 @@ CREATE TABLE IF NOT EXISTS settings_independent_values (
 CREATE TABLE IF NOT EXISTS settings_materials (
 	save_id TEXT,
 	entry_name TEXT,
-	material_index INTEGER,
+	material_index BIGINT,
 	material_name TEXT,
 	raw_json TEXT
 );
@@ -134,7 +134,7 @@ CREATE TABLE IF NOT EXISTS settings_material_values (
 CREATE TABLE IF NOT EXISTS settings_zones (
 	save_id TEXT,
 	entry_name TEXT,
-	zone_index INTEGER,
+	zone_index BIGINT,
 	zone_id BIGINT,
 	has_zone_id BOOLEAN,
 	name TEXT,
@@ -146,10 +146,10 @@ CREATE TABLE IF NOT EXISTS settings_zones (
 CREATE TABLE IF NOT EXISTS settings_zone_geometry (
 	save_id TEXT,
 	entry_name TEXT,
-	zone_index INTEGER,
+	zone_index BIGINT,
 	zone_id BIGINT,
 	has_zone_id BOOLEAN,
-	geometry_index INTEGER,
+	geometry_index BIGINT,
 	geometry_kind TEXT,
 	position_x DOUBLE,
 	position_y DOUBLE,
@@ -177,7 +177,7 @@ CREATE TABLE IF NOT EXISTS settings_zone_values (
 CREATE TABLE IF NOT EXISTS settings_zone_groups (
 	save_id TEXT,
 	entry_name TEXT,
-	group_index INTEGER,
+	group_index BIGINT,
 	name TEXT,
 	raw_json TEXT
 );
@@ -185,7 +185,7 @@ CREATE TABLE IF NOT EXISTS settings_zone_groups (
 CREATE TABLE IF NOT EXISTS settings_bibite_spawners (
 	save_id TEXT,
 	entry_name TEXT,
-	spawner_index INTEGER,
+	spawner_index BIGINT,
 	path TEXT,
 	spawn_priority DOUBLE,
 	minimum DOUBLE,
@@ -200,7 +200,7 @@ CREATE TABLE IF NOT EXISTS settings_bibite_spawners (
 CREATE TABLE IF NOT EXISTS settings_changers (
 	save_id TEXT,
 	entry_name TEXT,
-	changer_index INTEGER,
+	changer_index BIGINT,
 	name TEXT,
 	repeat_enabled BOOLEAN,
 	start_time DOUBLE,
@@ -210,8 +210,8 @@ CREATE TABLE IF NOT EXISTS settings_changers (
 CREATE TABLE IF NOT EXISTS settings_changer_points (
 	save_id TEXT,
 	entry_name TEXT,
-	changer_index INTEGER,
-	point_index INTEGER,
+	changer_index BIGINT,
+	point_index BIGINT,
 	t DOUBLE,
 	y DOUBLE,
 	d TEXT,
@@ -221,10 +221,10 @@ CREATE TABLE IF NOT EXISTS settings_changer_points (
 CREATE TABLE IF NOT EXISTS settings_changer_targets (
 	save_id TEXT,
 	entry_name TEXT,
-	changer_index INTEGER,
+	changer_index BIGINT,
 	target_key TEXT,
 	scope TEXT,
-	zone_index INTEGER,
+	zone_index BIGINT,
 	zone_id BIGINT,
 	has_zone_id BOOLEAN,
 	setting_name TEXT,
@@ -238,14 +238,14 @@ CREATE TABLE IF NOT EXISTS settings_changer_targets (
 CREATE TABLE IF NOT EXISTS active_species (
 	save_id TEXT,
 	entry_name TEXT,
-	active_species_index INTEGER,
+	active_species_index BIGINT,
 	species_id BIGINT
 );
 
 CREATE TABLE IF NOT EXISTS species (
 	save_id TEXT,
 	entry_name TEXT,
-	species_index INTEGER,
+	species_index BIGINT,
 	species_id BIGINT,
 	has_species_id BOOLEAN,
 	parent_id BIGINT,
@@ -278,7 +278,7 @@ CREATE TABLE IF NOT EXISTS species_brain_nodes (
 	owner_kind TEXT,
 	owner_id TEXT,
 	entry_name TEXT,
-	node_row_index INTEGER,
+	node_row_index BIGINT,
 	node_index BIGINT,
 	innovation BIGINT,
 	node_type BIGINT,
@@ -296,7 +296,7 @@ CREATE TABLE IF NOT EXISTS species_brain_synapses (
 	owner_kind TEXT,
 	owner_id TEXT,
 	entry_name TEXT,
-	synapse_row_index INTEGER,
+	synapse_row_index BIGINT,
 	innovation BIGINT,
 	node_in BIGINT,
 	node_out BIGINT,
@@ -400,7 +400,7 @@ CREATE TABLE IF NOT EXISTS bibite_stomach_contents (
 	entry_name TEXT,
 	body_id BIGINT,
 	has_body_id BOOLEAN,
-	content_index INTEGER,
+	content_index BIGINT,
 	material TEXT,
 	amount DOUBLE,
 	average_chunk_amount DOUBLE
@@ -411,7 +411,7 @@ CREATE TABLE IF NOT EXISTS bibite_children (
 	entry_name TEXT,
 	parent_body_id BIGINT,
 	has_parent_id BOOLEAN,
-	child_index INTEGER,
+	child_index BIGINT,
 	child_body_id BIGINT
 );
 
@@ -420,7 +420,7 @@ CREATE TABLE IF NOT EXISTS bibite_brain_nodes (
 	owner_kind TEXT,
 	owner_id TEXT,
 	entry_name TEXT,
-	node_row_index INTEGER,
+	node_row_index BIGINT,
 	node_index BIGINT,
 	innovation BIGINT,
 	node_type BIGINT,
@@ -438,7 +438,7 @@ CREATE TABLE IF NOT EXISTS bibite_brain_synapses (
 	owner_kind TEXT,
 	owner_id TEXT,
 	entry_name TEXT,
-	synapse_row_index INTEGER,
+	synapse_row_index BIGINT,
 	innovation BIGINT,
 	node_in BIGINT,
 	node_out BIGINT,
@@ -485,7 +485,7 @@ CREATE TABLE IF NOT EXISTS egg_brain_nodes (
 	owner_kind TEXT,
 	owner_id TEXT,
 	entry_name TEXT,
-	node_row_index INTEGER,
+	node_row_index BIGINT,
 	node_index BIGINT,
 	innovation BIGINT,
 	node_type BIGINT,
@@ -503,7 +503,7 @@ CREATE TABLE IF NOT EXISTS egg_brain_synapses (
 	owner_kind TEXT,
 	owner_id TEXT,
 	entry_name TEXT,
-	synapse_row_index INTEGER,
+	synapse_row_index BIGINT,
 	innovation BIGINT,
 	node_in BIGINT,
 	node_out BIGINT,
@@ -514,17 +514,17 @@ CREATE TABLE IF NOT EXISTS egg_brain_synapses (
 CREATE TABLE IF NOT EXISTS pellet_groups (
 	save_id TEXT,
 	entry_name TEXT,
-	group_index INTEGER,
+	group_index BIGINT,
 	zone TEXT,
-	pellet_count INTEGER
+	pellet_count BIGINT
 );
 
 CREATE TABLE IF NOT EXISTS pellets (
 	save_id TEXT,
 	entry_name TEXT,
-	pellet_index INTEGER,
-	group_index INTEGER,
-	group_pellet_index INTEGER,
+	pellet_index BIGINT,
+	group_index BIGINT,
+	group_pellet_index BIGINT,
 	zone TEXT,
 	material TEXT,
 	amount DOUBLE,
@@ -545,7 +545,7 @@ CREATE TABLE IF NOT EXISTS pellets (
 CREATE TABLE IF NOT EXISTS pheromones (
 	save_id TEXT,
 	entry_name TEXT,
-	pheromone_index INTEGER,
+	pheromone_index BIGINT,
 	transform_position_x DOUBLE,
 	transform_position_y DOUBLE,
 	transform_rotation DOUBLE,
