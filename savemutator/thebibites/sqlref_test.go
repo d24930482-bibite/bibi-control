@@ -450,6 +450,44 @@ func TestSmokeLiveSQLRefMatrixInstallsAllObservedFields(t *testing.T) {
 	assertCoversWritableSQLRefs(t, covered)
 }
 
+func TestLiveSQLRefEnumBackedStringsUseKnownAlternates(t *testing.T) {
+	if got := nextLiveSQLRefValue(t, tb.ExtractedSave{}, "settings_zones", "distribution", "CentricGradual"); got != "Flat" {
+		t.Fatalf("settings_zones.distribution next value = %v, want Flat", got)
+	}
+
+	row := reflect.ValueOf(tb.SettingValueRow{SettingName: "movement"})
+	if got := nextLiveSQLRefCaseValue(t, tb.ExtractedSave{}, "settings_zone_values", "string_value", "None", row); got != "Free" {
+		t.Fatalf("settings_zone_values.string_value movement next value = %v, want Free", got)
+	}
+}
+
+func TestLiveSQLRefRuntimeMaterialsUseObservedAlternates(t *testing.T) {
+	tables := tb.ExtractedSave{
+		SettingsMaterials: []tb.SettingsMaterialRow{
+			{MaterialName: "ArmorSettings"},
+			{MaterialName: "PlantSettings"},
+		},
+		Pellets: []tb.PelletRow{
+			{Material: "Plant"},
+			{Material: "Meat"},
+		},
+		BibiteStomachContents: []tb.StomachContentRow{
+			{Material: "Plant"},
+			{Material: "Meat"},
+		},
+	}
+
+	if got := nextLiveSQLRefValue(t, tables, "pellets", "material", "Plant"); got != "Meat" {
+		t.Fatalf("pellets.material next value = %v, want Meat", got)
+	}
+	if got := nextLiveSQLRefValue(t, tables, "bibite_stomach_contents", "material", "Plant"); got != "Meat" {
+		t.Fatalf("bibite_stomach_contents.material next value = %v, want Meat", got)
+	}
+	if got := nextLiveSQLRefValue(t, tables, "settings_zones", "material", "Plant"); got != "ArmorSettings" {
+		t.Fatalf("settings_zones.material next value = %v, want ArmorSettings", got)
+	}
+}
+
 func TestSQLSetRejectsUnsupportedRefs(t *testing.T) {
 	_, err := SQLSet(SQLValueRef{
 		Table:  "settings_zone_geometry",
@@ -1222,7 +1260,7 @@ func addLiveSettingsValueCases(t *testing.T, cases *[]liveSQLRefMutationCase, ta
 
 	for _, column := range sortedSQLRefKeys(settingsValueColumnTypes) {
 		valueType := tb.ScalarType(settingsValueColumnTypes[column])
-		row, ok := firstSettingValueRow(rows, valueType)
+		row, ok := firstLiveSettingValueRow(table, rows, valueType)
 		if !ok {
 			continue
 		}
@@ -1259,6 +1297,17 @@ func addLiveSettingsValueCases(t *testing.T, cases *[]liveSQLRefMutationCase, ta
 		}
 		addLiveCase(t, cases, tables, table, column, ref, reflect.ValueOf(row), matcher)
 	}
+}
+
+func firstLiveSettingValueRow(table string, rows []tb.SettingValueRow, valueType tb.ScalarType) (tb.SettingValueRow, bool) {
+	if table == "settings_material_values" && valueType == tb.ScalarBool {
+		for _, row := range rows {
+			if row.Type == valueType && row.BoolValue {
+				return row, true
+			}
+		}
+	}
+	return firstSettingValueRow(rows, valueType)
 }
 
 func firstSettingValueRow(rows []tb.SettingValueRow, valueType tb.ScalarType) (tb.SettingValueRow, bool) {
@@ -1331,7 +1380,7 @@ func addLiveCase(t *testing.T, cases *[]liveSQLRefMutationCase, tables tb.Extrac
 	t.Helper()
 
 	current := normalizedColumnValue(t, row, table, column)
-	next := nextLiveSQLRefValue(t, tables, table, column, current)
+	next := nextLiveSQLRefCaseValue(t, tables, table, column, current, row)
 	*cases = append(*cases, liveSQLRefMutationCase{
 		name:    table + "." + column,
 		ref:     ref,
@@ -1339,6 +1388,21 @@ func addLiveCase(t *testing.T, cases *[]liveSQLRefMutationCase, tables tb.Extrac
 		next:    next,
 		lookup:  liveColumnLookup(table, column, matcher),
 	})
+}
+
+func nextLiveSQLRefCaseValue(t *testing.T, tables tb.ExtractedSave, table, column string, current any, row reflect.Value) any {
+	t.Helper()
+
+	if table == "settings_zone_values" && column == "string_value" {
+		if settingValue, ok := row.Interface().(tb.SettingValueRow); ok && settingValue.SettingName == "movement" {
+			value, ok := current.(string)
+			if !ok {
+				t.Fatalf("%s.%s movement current value %T is not a string", table, column, current)
+			}
+			return alternateLiveMovement(value)
+		}
+	}
+	return nextLiveSQLRefValue(t, tables, table, column, current)
 }
 
 type liveRowMatcher map[string]any
@@ -1445,7 +1509,7 @@ func nextLiveSQLRefValue(t *testing.T, tables tb.ExtractedSave, table, column st
 	case string:
 		switch column {
 		case "material":
-			return alternateLiveMaterial(tables, value)
+			return alternateLiveMaterial(tables, table, value)
 		case "distribution":
 			return alternateLiveDistribution(tables, value)
 		default:
@@ -1470,7 +1534,12 @@ func nextLiveSQLRefValue(t *testing.T, tables tb.ExtractedSave, table, column st
 	}
 }
 
-func alternateLiveMaterial(tables tb.ExtractedSave, current string) string {
+func alternateLiveMaterial(tables tb.ExtractedSave, table, current string) string {
+	if table == "pellets" || table == "bibite_stomach_contents" {
+		if value, ok := alternateObservedLiveMatterMaterial(tables, current); ok {
+			return value
+		}
+	}
 	for _, material := range tables.SettingsMaterials {
 		if material.MaterialName != "" && material.MaterialName != current {
 			return material.MaterialName
@@ -1482,13 +1551,57 @@ func alternateLiveMaterial(tables tb.ExtractedSave, current string) string {
 	return current + "_sql"
 }
 
+func alternateObservedLiveMatterMaterial(tables tb.ExtractedSave, current string) (string, bool) {
+	for _, pellet := range tables.Pellets {
+		if pellet.Material != "" && pellet.Material != current {
+			return pellet.Material, true
+		}
+	}
+	for _, content := range tables.BibiteStomachContents {
+		if content.Material != "" && content.Material != current {
+			return content.Material, true
+		}
+	}
+	return "", false
+}
+
 func alternateLiveDistribution(tables tb.ExtractedSave, current string) string {
 	for _, zone := range tables.SettingsZones {
 		if zone.Distribution != "" && zone.Distribution != current {
 			return zone.Distribution
 		}
 	}
-	return current + "_sql"
+	return alternateKnownLiveValue(current, liveSpawnDistributionValues)
+}
+
+var liveSpawnDistributionValues = []string{
+	"Flat",
+	"CentricGradual",
+	"ExteriorGradual",
+	"Ring",
+	"FlatRing",
+	"Rect",
+}
+
+var liveMovementValues = []string{
+	"None",
+	"Free",
+	"Repulsed",
+	"Orbit",
+	"Attached",
+}
+
+func alternateLiveMovement(current string) string {
+	return alternateKnownLiveValue(current, liveMovementValues)
+}
+
+func alternateKnownLiveValue(current string, values []string) string {
+	for _, value := range values {
+		if value != "" && value != current {
+			return value
+		}
+	}
+	return current
 }
 
 func rowStringField(row reflect.Value, field string) string {

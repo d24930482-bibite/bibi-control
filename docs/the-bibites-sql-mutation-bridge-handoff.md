@@ -509,6 +509,9 @@ Current test coverage verifies:
   - starts with `autosave_20260301021357.zip`
   - selects an additional real fixture when needed for remaining observed refs, currently `dasdasd.zip` for pheromone rows
   - mutates every observed writable `table.column` through SQL refs
+  - chooses a material setting row with `decay=true` for `settings_material_values.bool_value` so the bool mutation moves to `false`; flipping a non-decaying material to `true` can make the game expect missing decay fields during load
+  - uses known game enum alternates for `settings_zones.distribution` and `settings_zone_values.string_value` when the selected setting is zone `movement`, avoiding parser-valid values like `CentricGradual_sql` or `None_sql` that Unity rejects during load
+  - uses observed runtime matter material names for `pellets.material` and `bibite_stomach_contents.material`, avoiding settings material keys such as `ArmorSettings` that Unity cannot resolve while spawning pellets
   - commits and reparses each written zip from disk
   - asserts normalized values changed
   - writes `/tmp/bibicontrol-smoke/all-observed-sqlref-autosave_20260301021357.zip`
