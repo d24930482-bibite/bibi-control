@@ -14,7 +14,7 @@ PRs welcome, but read the issue labels first:
 - **medium** — proceed with caution. Requires some effort; review changes, think about what the code is doing and test it.
 - **difficult** — extreme caution. Blind vibe-coding will be rejected. Either impossible to vibe code, several subtle failure modes exist, or needs an excellent design. Probably stay away unless you are a confident professional developer
 
-Every PR needs tests. The one exception is the DLL side, which can't be
+If someone is assigned to the issue, do not work on it. Every PR needs tests. The one exception is the DLL side, which can't be
 meaningfully tested in isolation: verify the DLL returns correct info
 over the network, but don't write a suite inside the DLL itself. Please create a branch and checkout
 
