@@ -231,6 +231,53 @@ var brainSynapseColumnKeys = map[string]string{
 	"enabled":    "En",
 }
 
+var bibiteStomachContentColumnFields = map[string]string{
+	"material":             "material",
+	"amount":               "amount",
+	"average_chunk_amount": "averageChunkAmount",
+}
+
+var pelletColumnPaths = map[string]string{
+	"material":                "pellet.material",
+	"amount":                  "pellet.amount",
+	"matter_decay_time_alive": "matterDecay.timeAlive",
+	"matter_decay_rot_amount": "matterDecay.rotAmount",
+	"transform_position_x":    "transform.position[0]",
+	"transform_position_y":    "transform.position[1]",
+	"transform_rotation":      "transform.rotation",
+	"transform_scale":         "transform.scale",
+	"rb2d_px":                 "rb2d.px",
+	"rb2d_py":                 "rb2d.py",
+	"rb2d_vx":                 "rb2d.vx",
+	"rb2d_vy":                 "rb2d.vy",
+	"rb2d_r":                  "rb2d.r",
+}
+
+var pheromoneColumnPaths = map[string]string{
+	"transform_position_x": "transform.position[0]",
+	"transform_position_y": "transform.position[1]",
+	"transform_rotation":   "transform.rotation",
+	"transform_scale":      "transform.scale",
+	"r_strength":           "phero.Rstrength",
+	"g_strength":           "phero.Gstrength",
+	"b_strength":           "phero.Bstrength",
+	"nr":                   "phero.nR",
+	"ng":                   "phero.nG",
+	"nb":                   "phero.nB",
+}
+
+var settingsValueColumnTypes = map[string]string{
+	"number_value": string(tb.ScalarNumber),
+	"string_value": string(tb.ScalarString),
+	"bool_value":   string(tb.ScalarBool),
+}
+
+var settingsZoneColumnPaths = map[string]string{
+	"name":         "name",
+	"material":     "material",
+	"distribution": "distribution",
+}
+
 func resolveBibiteColumn(ref SQLValueRef, paths map[string]string) (Target, string, error) {
 	path, ok := paths[ref.Column]
 	if !ok {
@@ -244,11 +291,7 @@ func resolveBibiteColumn(ref SQLValueRef, paths map[string]string) (Target, stri
 }
 
 func resolveBibiteStomachColumn(ref SQLValueRef) (Target, string, error) {
-	field, ok := map[string]string{
-		"material":             "material",
-		"amount":               "amount",
-		"average_chunk_amount": "averageChunkAmount",
-	}[ref.Column]
+	field, ok := bibiteStomachContentColumnFields[ref.Column]
 	if !ok {
 		return Target{}, "", unsupportedSQLValueRef(ref)
 	}
@@ -333,21 +376,7 @@ func resolveEggColumn(ref SQLValueRef, paths map[string]string) (Target, string,
 }
 
 func resolvePelletColumn(ref SQLValueRef) (Target, string, error) {
-	field, ok := map[string]string{
-		"material":                "pellet.material",
-		"amount":                  "pellet.amount",
-		"matter_decay_time_alive": "matterDecay.timeAlive",
-		"matter_decay_rot_amount": "matterDecay.rotAmount",
-		"transform_position_x":    "transform.position[0]",
-		"transform_position_y":    "transform.position[1]",
-		"transform_rotation":      "transform.rotation",
-		"transform_scale":         "transform.scale",
-		"rb2d_px":                 "rb2d.px",
-		"rb2d_py":                 "rb2d.py",
-		"rb2d_vx":                 "rb2d.vx",
-		"rb2d_vy":                 "rb2d.vy",
-		"rb2d_r":                  "rb2d.r",
-	}[ref.Column]
+	field, ok := pelletColumnPaths[ref.Column]
 	if !ok {
 		return Target{}, "", unsupportedSQLValueRef(ref)
 	}
@@ -369,18 +398,7 @@ func resolvePelletColumn(ref SQLValueRef) (Target, string, error) {
 }
 
 func resolvePheromoneColumn(ref SQLValueRef) (Target, string, error) {
-	field, ok := map[string]string{
-		"transform_position_x": "transform.position[0]",
-		"transform_position_y": "transform.position[1]",
-		"transform_rotation":   "transform.rotation",
-		"transform_scale":      "transform.scale",
-		"r_strength":           "phero.Rstrength",
-		"g_strength":           "phero.Gstrength",
-		"b_strength":           "phero.Bstrength",
-		"nr":                   "phero.nR",
-		"ng":                   "phero.nG",
-		"nb":                   "phero.nB",
-	}[ref.Column]
+	field, ok := pheromoneColumnPaths[ref.Column]
 	if !ok {
 		return Target{}, "", unsupportedSQLValueRef(ref)
 	}
@@ -394,11 +412,7 @@ func resolvePheromoneColumn(ref SQLValueRef) (Target, string, error) {
 }
 
 func resolveSettingsValueColumn(ref SQLValueRef) (Target, string, error) {
-	wantType, ok := map[string]string{
-		"number_value": string(tb.ScalarNumber),
-		"string_value": string(tb.ScalarString),
-		"bool_value":   string(tb.ScalarBool),
-	}[ref.Column]
+	wantType, ok := settingsValueColumnTypes[ref.Column]
 	if !ok {
 		return Target{}, "", unsupportedSQLValueRef(ref)
 	}
@@ -588,11 +602,7 @@ func safeSettingsPathSegment(segment string) bool {
 }
 
 func resolveSettingsZoneColumn(ref SQLValueRef) (Target, string, error) {
-	field, ok := map[string]string{
-		"name":         "name",
-		"material":     "material",
-		"distribution": "distribution",
-	}[ref.Column]
+	field, ok := settingsZoneColumnPaths[ref.Column]
 	if !ok {
 		return Target{}, "", unsupportedSQLValueRef(ref)
 	}

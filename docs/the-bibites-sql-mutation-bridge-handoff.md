@@ -26,7 +26,17 @@ Implemented pieces:
 - settings value row mapping
 - zone-scoped `settings_changer_targets.number_value` mapping
 - quoted JSON path keys for `settingsBases["Zone(0).fertility"]`
-- fixture-backed smoke test that mutates the large save and installs it into The Bibites `Savefiles` directory
+- exhaustive cheap resolver coverage for the allowlisted `table.column` pairs
+- live-fixture commit/reparse coverage for observed writable refs
+- fixture-backed targeted smoke test that mutates the large save and installs it into The Bibites `Savefiles` directory
+- fixture-backed all-observed-field smoke test that writes named output zips and installs them into `Savefiles`
+
+Important distinction: there are now two installed smoke paths. The targeted
+smoke proves the direct refeed path for bibite color genes plus zone fertility
+and zone-scoped fertility changer targets. The all-observed-field smoke mirrors
+the live-fixture matrix, mutates representative rows for every observed
+writable `table.column`, writes named zips, and installs those zips. Manual
+game-load verification is still the remaining human check.
 
 ## Implemented Slice
 
@@ -165,6 +175,10 @@ Genes:
 
 Gene refs require `entry_name`, `owner_kind`, `owner_id`, and `path`.
 
+Observed live saves currently contain numeric and bool gene rows, but no string
+gene rows. `bibite_genes.string_value` and `egg_genes.string_value` are
+schema-capable resolver refs, not observed live-save refs.
+
 Brain rows:
 
 - `bibite_brain_nodes.*` modeled scalar columns
@@ -236,6 +250,23 @@ Settings value rows:
 - `settings_zone_values.string_value`
 
 Settings value refs require `entry_name`, `owner_kind`, `owner_id`, `setting_name`, `path`, `value_type`, and `wrapper_raw_json`.
+
+Observed live saves currently contain:
+
+- simulation, independent, and material settings as number/bool rows, but not string rows
+- zone settings as number/string rows, but not bool rows
+
+Therefore these refs are schema-capable but not observed in the active live save
+set:
+
+- `settings_simulation_values.string_value`
+- `settings_independent_values.string_value`
+- `settings_material_values.string_value`
+- `settings_zone_values.bool_value`
+
+Do not manufacture coverage for these by type-changing unrelated scalar rows.
+That would only prove generic scalar preservation/editing, not that the bridge
+is exercising a game-authored domain row.
 
 The resolver verifies exact table/path/owner consistency and only appends `.Value` when `wrapper_raw_json` is a JSON object containing `Value`. This matters because zone settings may be represented either as wrapped values:
 
@@ -443,6 +474,16 @@ Coverage lives mainly in:
 
 Current test coverage verifies:
 
+- Exhaustive cheap resolver tests for every allowlisted `table.column` pair:
+  - resolves to the expected archive target and JSON path
+  - builds a guarded `SQLSet`
+  - validates operation shape
+- Live-fixture path tests for observed writable refs:
+  - stage every observed writable ref shape from copied live saves
+  - commit to temp output
+  - reparse the written zip from disk
+  - assert normalized values changed at the selected rows
+  - skip only schema-capable refs that are not observed in the live save set
 - SQL refs commit and reparse for bibite energy.
 - SQL refs commit and reparse for bibite genes.
 - SQL refs commit and reparse for stomach content amount.
@@ -464,6 +505,15 @@ Current test coverage verifies:
   - all zone-scoped changer-target `fertility` base values set to `30`
   - output written to `/tmp/bibicontrol-smoke/green-fertility.zip`
   - output installed to The Bibites `Savefiles/green-fertility.zip`
+- All-observed-field installed smoke test:
+  - starts with `autosave_20260301021357.zip`
+  - selects an additional real fixture when needed for remaining observed refs, currently `dasdasd.zip` for pheromone rows
+  - mutates every observed writable `table.column` through SQL refs
+  - commits and reparses each written zip from disk
+  - asserts normalized values changed
+  - writes `/tmp/bibicontrol-smoke/all-observed-sqlref-autosave_20260301021357.zip`
+  - writes `/tmp/bibicontrol-smoke/all-observed-sqlref-dasdasd.zip`
+  - installs those outputs into `Savefiles` with the same file names
 - Installer copies to temp destination, honors `BIBITES_SAVEFILES_DIR`, and rejects unsafe destination names.
 - Unsupported refs fail instead of guessing.
 - Pellet refs require `group_pellet_index`.
@@ -474,16 +524,18 @@ Current test coverage verifies:
 Full verification command:
 
 ```bash
-GOMODCACHE=/tmp/bibicontrol-go-mod GOCACHE=/tmp/bibicontrol-go-build go test ./...
+BIBITES_SAVEFILES_DIR=/tmp/bibicontrol-savefiles GOMODCACHE=/tmp/bibicontrol-go-mod GOCACHE=/tmp/bibicontrol-go-build go test ./...
 ```
 
-This passed after the settings changer target and smoke installer changes were added.
+This passed after the all-observed-field smoke was added.
 
-The smoke test intentionally writes to The Bibites save directory. In a sandboxed environment, it may require elevated filesystem permissions or `BIBITES_SAVEFILES_DIR` pointed at a writable temp directory.
+The smoke tests intentionally write installable saves. Use
+`BIBITES_SAVEFILES_DIR` to point installs at a writable or game-visible
+`Savefiles` directory. When `BIBITES_SAVEFILES_DIR` is unset, the
+all-observed-field smoke installs to `/tmp/bibicontrol-savefiles` so the
+`savemutator/thebibites` package test remains sandbox-friendly.
 
 ## Auto-Generation Slice
-
-Implemented after this handoff was created.
 
 `saveparser/thebibites/normalize_types.go` is now the source for normalized table order, table names, row field order, DuckDB import field specs, and generated DuckDB schema. `ExtractedSave` fields carry `dbtable` tags; row structs remain the source for column order and Go-to-SQL type inference.
 
@@ -508,8 +560,16 @@ The generated migration intentionally keeps the custom `bibite_mutation_refs` vi
 
 ## Next Slices
 
-1. Add exhaustive cheap resolver tests for every allowlisted `table.column` pair.
-2. Add SQL ref support for simulation-wide `settings_changer_targets` if game testing proves it is needed.
-3. Add schema migration handling for already-existing DuckDB files.
-4. Decide whether more settings changer target types should be writable, such as bool/string or non-zone targets.
-5. Keep broader domain mutations separate: deletes, appends, count updates, corpse/pellet conversion, species/link consistency, and entry removal are not solved by this bridge.
+1. Manually/game-verify that The Bibites loads the all-observed-field smoke
+   saves.
+2. Decide whether schema-capable but unobserved refs should remain writable:
+   - `bibite_genes.string_value`
+   - `egg_genes.string_value`
+   - `settings_simulation_values.string_value`
+   - `settings_independent_values.string_value`
+   - `settings_material_values.string_value`
+   - `settings_zone_values.bool_value`
+3. Add SQL ref support for simulation-wide `settings_changer_targets` if game testing proves it is needed.
+4. Add schema migration handling for already-existing DuckDB files.
+5. Decide whether more settings changer target types should be writable, such as bool/string or non-zone targets.
+6. Keep broader domain mutations separate: deletes, appends, count updates, corpse/pellet conversion, species/link consistency, and entry removal are not solved by this bridge.
