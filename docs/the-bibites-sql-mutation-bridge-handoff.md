@@ -201,6 +201,45 @@ group_pellet_index
 
 Optionally select `zone` and pass it as a guard.
 
+## Direct Refeed Adapter
+
+The next adapter layer should convert DuckDB query rows into typed `SQLValueRef` values plus the current selected cell value.
+
+This is the direct refeed path:
+
+```text
+DuckDB query row -> SQLValueRef.WithExpected(current_cell_value) -> Session.StageSQLSet(...)
+```
+
+The adapter should not make arbitrary SQL editable. It should only populate locator fields from selected column names and then let `ResolveSQLValueRef` remain the final allowlist.
+
+Example shape:
+
+```go
+refs, err := duckdb.ScanSQLRefs(rows, duckdb.SQLRefScanSpec{
+    Table:  "bibites",
+    Column: "health",
+})
+if err != nil {
+    return err
+}
+
+for _, row := range refs {
+    if err := session.StageSQLSet(row.Ref.WithExpected(row.CurrentValue), 0); err != nil {
+        return err
+    }
+}
+```
+
+Queries must select every locator column required by the target table/column pair. For example:
+
+- `bibites.health` needs `entry_name`, `body_id`, and `has_body_id`.
+- `bibite_stomach_contents.amount` needs `entry_name`, `body_id`, `has_body_id`, and `content_index`.
+- `pellets.amount` needs `entry_name`, `group_index`, and `group_pellet_index`; `zone` is optional as an extra guard.
+- `settings_zones.name` needs `entry_name` and `zone_index`; `zone_id` plus `has_zone_id` is optional as an extra guard.
+
+The scanner may infer `SQLValueRef` fields from returned column names, but it must not infer archive JSON paths. Path resolution stays in `savemutator/thebibites/sqlref.go`.
+
 ## Example Query
 
 ```sql
@@ -298,7 +337,7 @@ The generated migration intentionally keeps the custom `bibite_mutation_refs` vi
 
 ## Next Slices
 
-1. Add a typed DuckDB scanner helper that converts selected rows into `SQLValueRef` structs.
+1. Add the typed DuckDB direct refeed adapter that scans selected query rows into `SQLValueRef` values plus current cell values.
 2. Add fixture-backed end-to-end tests: parse largest fixture, import to DuckDB, query candidates, stage SQL refs, commit, reparse, and assert normalized values changed.
 3. Decide whether settings value rows should be writable through `SQLValueRef`; wrapper `.Value` handling needs explicit mapping.
 4. Add schema migration handling for already-existing DuckDB files.
