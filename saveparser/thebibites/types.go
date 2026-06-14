@@ -49,6 +49,7 @@ type Archive struct {
 	FileName   string
 	Size       int64
 	SHA256     string
+	Comment    string
 
 	Entries []Entry
 
@@ -105,12 +106,21 @@ func (a *Archive) EntriesByKind(kind EntryKind) []Entry {
 type Entry struct {
 	Index            int
 	Name             string
+	Comment          string
 	Kind             EntryKind
+	CreatorVersion   uint16
+	ReaderVersion    uint16
+	Flags            uint16
+	NonUTF8          bool
 	Method           uint16
 	CRC32            uint32
 	CompressedSize   uint64
 	UncompressedSize uint64
 	Modified         time.Time
+	ModifiedTime     uint16
+	ModifiedDate     uint16
+	Extra            []byte
+	ExternalAttrs    uint32
 	SHA256           string
 	HasUTF8BOM       bool
 	Raw              []byte

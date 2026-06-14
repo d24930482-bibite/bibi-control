@@ -47,6 +47,7 @@ func ParseFile(path string, options *Options) (*Archive, error) {
 		FileName:   filepath.Base(path),
 		Size:       info.Size(),
 		SHA256:     archiveHash,
+		Comment:    reader.Comment,
 		Entries:    make([]Entry, 0, len(reader.File)),
 	}
 
@@ -87,12 +88,21 @@ func readZipEntry(index int, zipFile *zip.File, opts Options) (Entry, error) {
 	entry := Entry{
 		Index:            index,
 		Name:             zipFile.Name,
+		Comment:          zipFile.Comment,
 		Kind:             ClassifyEntry(zipFile.Name),
+		CreatorVersion:   zipFile.CreatorVersion,
+		ReaderVersion:    zipFile.ReaderVersion,
+		Flags:            zipFile.Flags,
+		NonUTF8:          zipFile.NonUTF8,
 		Method:           zipFile.Method,
 		CRC32:            zipFile.CRC32,
 		CompressedSize:   zipFile.CompressedSize64,
 		UncompressedSize: zipFile.UncompressedSize64,
 		Modified:         zipFile.Modified,
+		ModifiedTime:     zipFile.ModifiedTime,
+		ModifiedDate:     zipFile.ModifiedDate,
+		Extra:            append([]byte(nil), zipFile.Extra...),
+		ExternalAttrs:    zipFile.ExternalAttrs,
 	}
 	if entry.Kind == EntryDirectory {
 		return entry, nil
