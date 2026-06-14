@@ -11,4 +11,4 @@ But "x agent" can code anything, so why do this?:
 At code base sizes larger than a few k lines, AI will produce an unmaintainable mess. Some of these issues have subtle failure modes that an AI will miss completely
 
 
-
+Please checkout a brain for any PRs, no more direct to main
