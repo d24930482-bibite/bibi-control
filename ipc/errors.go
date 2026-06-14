@@ -3,6 +3,7 @@ package ipc
 import "errors"
 
 var (
-	ErrProtocolUnavailable = errors.New("ipc: protocol unavailable")
-	ErrProcessExited       = errors.New("ipc: process exited")
+	ErrClosed       = errors.New("ipc: closed")
+	ErrNoProcess    = errors.New("ipc: process not started")
+	ErrRequestFailed = errors.New("ipc: request failed")
 )
