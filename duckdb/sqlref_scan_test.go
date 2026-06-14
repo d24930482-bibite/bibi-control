@@ -144,10 +144,91 @@ func TestScanSQLRefsStagesFixtureMutation(t *testing.T) {
 	}
 }
 
+func TestScanSQLRefsStagesFixtureSettingsValueMutation(t *testing.T) {
+	ctx := context.Background()
+	const saveID = "sql-ref-settings-refeed-fixture"
+	fixturePath := filepath.Join(repoRoot(t), "testdata", "saves", "the-bibites", "autosave_20260301021357.zip")
+
+	archive, err := tb.ParseFile(fixturePath, nil)
+	if err != nil {
+		t.Fatalf("ParseFile(%q) error = %v", fixturePath, err)
+	}
+	save := tb.ExtractTables(saveID, archive)
+
+	db, err := OpenAndImport(ctx, "", save)
+	if err != nil {
+		t.Fatalf("OpenAndImport() error = %v", err)
+	}
+	defer db.Close()
+
+	rows, err := db.QueryContext(ctx, `
+		SELECT entry_name,
+		       owner_kind,
+		       owner_id,
+		       setting_name,
+		       path,
+		       value_type,
+		       wrapper_raw_json,
+		       number_value
+		FROM settings_simulation_values
+		WHERE save_id = ?
+		  AND value_type = 'number'
+		ORDER BY setting_name
+		LIMIT 1
+	`, saveID)
+	if err != nil {
+		t.Fatalf("query settings value refs: %v", err)
+	}
+	defer rows.Close()
+
+	refs, err := ScanSQLRefs(rows, SQLRefScanSpec{
+		Table:  "settings_simulation_values",
+		Column: "number_value",
+	})
+	if err != nil {
+		t.Fatalf("ScanSQLRefs() error = %v", err)
+	}
+	if len(refs) != 1 {
+		t.Fatalf("SQL refs = %d, want 1", len(refs))
+	}
+	current, ok := refs[0].CurrentValue.(float64)
+	if !ok {
+		t.Fatalf("current value = %T, want float64", refs[0].CurrentValue)
+	}
+	next := current + 1.25
+
+	session := mutator.NewSession(archive)
+	if err := session.StageSQLSet(refs[0].Ref.WithExpected(refs[0].CurrentValue), next); err != nil {
+		t.Fatalf("StageSQLSet() error = %v", err)
+	}
+	fresh, err := session.Commit(filepath.Join(t.TempDir(), "mutated.zip"))
+	if err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+
+	mutated := tb.ExtractTables("mutated", fresh)
+	got, ok := settingNumberByPath(mutated.SettingsSimulationValues, refs[0].Ref.Path)
+	if !ok {
+		t.Fatalf("mutated setting path %q not found", refs[0].Ref.Path)
+	}
+	if got != next {
+		t.Fatalf("mutated setting = %v, want %v", got, next)
+	}
+}
+
 func bibiteHealth(rows []tb.BibiteRow, entryName string, bodyID int64) (float64, bool) {
 	for _, row := range rows {
 		if row.EntryName == entryName && row.HasBodyID && row.BodyID == bodyID {
 			return row.Health, true
+		}
+	}
+	return 0, false
+}
+
+func settingNumberByPath(rows []tb.SettingValueRow, path string) (float64, bool) {
+	for _, row := range rows {
+		if row.Path == path && row.Type == tb.ScalarNumber {
+			return row.NumberValue, true
 		}
 	}
 	return 0, false

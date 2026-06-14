@@ -163,6 +163,21 @@ func sqlRefFromRow(spec SQLRefScanSpec, columns map[string]int, values []any) (m
 	} else if ok {
 		ref.Path = value
 	}
+	if value, ok, err := rowString(columns, values, "setting_name"); err != nil {
+		return ref, err
+	} else if ok {
+		ref.SettingName = value
+	}
+	if value, ok, err := rowString(columns, values, "value_type"); err != nil {
+		return ref, err
+	} else if ok {
+		ref.ValueType = value
+	}
+	if value, ok, err := rowString(columns, values, "wrapper_raw_json"); err != nil {
+		return ref, err
+	} else if ok {
+		ref.WrapperRawJSON = value
+	}
 
 	if value, ok, err := rowInt(columns, values, "content_index"); err != nil {
 		return ref, err

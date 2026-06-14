@@ -1,8 +1,10 @@
 package thebibites
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 
 	tb "github.com/asemones/bibicontrol/saveparser/thebibites"
 )
@@ -25,6 +27,10 @@ type SQLValueRef struct {
 	OwnerKind string
 	OwnerID   string
 	Path      string
+
+	SettingName    string
+	ValueType      string
+	WrapperRawJSON string
 
 	ContentIndex    int
 	HasContentIndex bool
@@ -120,6 +126,8 @@ func ResolveSQLValueRef(ref SQLValueRef) (Target, string, error) {
 		return resolvePelletColumn(ref)
 	case "pheromones":
 		return resolvePheromoneColumn(ref)
+	case "settings_simulation_values", "settings_independent_values", "settings_material_values", "settings_zone_values":
+		return resolveSettingsValueColumn(ref)
 	case "settings_zones":
 		return resolveSettingsZoneColumn(ref)
 	default:
@@ -377,6 +385,161 @@ func resolvePheromoneColumn(ref SQLValueRef) (Target, string, error) {
 		return Target{}, "", fmt.Errorf("%s.%s requires pheromone_index", ref.Table, ref.Column)
 	}
 	return EntryTarget(ref.EntryName, tb.EntryPheromones), fmt.Sprintf("pheromones[%d].%s", ref.PheromoneIndex, field), nil
+}
+
+func resolveSettingsValueColumn(ref SQLValueRef) (Target, string, error) {
+	wantType, ok := map[string]string{
+		"number_value": string(tb.ScalarNumber),
+		"string_value": string(tb.ScalarString),
+		"bool_value":   string(tb.ScalarBool),
+	}[ref.Column]
+	if !ok {
+		return Target{}, "", unsupportedSQLValueRef(ref)
+	}
+	if ref.EntryName == "" {
+		return Target{}, "", fmt.Errorf("%s.%s requires entry_name", ref.Table, ref.Column)
+	}
+	if ref.Path == "" {
+		return Target{}, "", fmt.Errorf("%s.%s requires path", ref.Table, ref.Column)
+	}
+	if ref.SettingName == "" {
+		return Target{}, "", fmt.Errorf("%s.%s requires setting_name", ref.Table, ref.Column)
+	}
+	if ref.ValueType == "" {
+		return Target{}, "", fmt.Errorf("%s.%s requires value_type", ref.Table, ref.Column)
+	}
+	if ref.ValueType != wantType {
+		return Target{}, "", fmt.Errorf("%s.%s value_type = %q, want %q", ref.Table, ref.Column, ref.ValueType, wantType)
+	}
+	if ref.WrapperRawJSON == "" {
+		return Target{}, "", fmt.Errorf("%s.%s requires wrapper_raw_json", ref.Table, ref.Column)
+	}
+
+	path, zoneIndex, hasZoneIndex, err := settingsValueArchivePath(ref)
+	if err != nil {
+		return Target{}, "", err
+	}
+	wrapped, err := settingValueUsesWrapper(ref.WrapperRawJSON)
+	if err != nil {
+		return Target{}, "", fmt.Errorf("%s.%s wrapper_raw_json: %w", ref.Table, ref.Column, err)
+	}
+	if wrapped {
+		path += ".Value"
+	}
+
+	guards := make([]Guard, 0, 1)
+	if hasZoneIndex {
+		if ref.HasZoneIndex && ref.ZoneIndex != zoneIndex {
+			return Target{}, "", fmt.Errorf("%s.%s zone_index = %d, want %d from path", ref.Table, ref.Column, ref.ZoneIndex, zoneIndex)
+		}
+		if ref.HasZoneID {
+			guards = append(guards, Require(fmt.Sprintf("zones[%d].id", zoneIndex), ref.ZoneID))
+		}
+	}
+	return EntryTarget(ref.EntryName, tb.EntrySettings, guards...), path, nil
+}
+
+func settingsValueArchivePath(ref SQLValueRef) (path string, zoneIndex int, hasZoneIndex bool, err error) {
+	if !safeSettingsPathSegment(ref.SettingName) {
+		return "", 0, false, fmt.Errorf("%s.%s setting_name %q is not a safe path segment", ref.Table, ref.Column, ref.SettingName)
+	}
+
+	switch ref.Table {
+	case "settings_simulation_values":
+		if ref.OwnerKind != "settings" {
+			return "", 0, false, fmt.Errorf("%s.%s owner_kind = %q, want settings", ref.Table, ref.Column, ref.OwnerKind)
+		}
+		if ref.OwnerID != "settings" {
+			return "", 0, false, fmt.Errorf("%s.%s owner_id = %q, want settings", ref.Table, ref.Column, ref.OwnerID)
+		}
+		expected := "settings." + ref.SettingName
+		if ref.Path != expected {
+			return "", 0, false, fmt.Errorf("%s.%s path = %q, want %q", ref.Table, ref.Column, ref.Path, expected)
+		}
+		return ref.SettingName, 0, false, nil
+
+	case "settings_independent_values":
+		if ref.OwnerKind != "settings_independent" {
+			return "", 0, false, fmt.Errorf("%s.%s owner_kind = %q, want settings_independent", ref.Table, ref.Column, ref.OwnerKind)
+		}
+		if ref.OwnerID != "independents" {
+			return "", 0, false, fmt.Errorf("%s.%s owner_id = %q, want independents", ref.Table, ref.Column, ref.OwnerID)
+		}
+		expected := "settings.independents." + ref.SettingName
+		if ref.Path != expected {
+			return "", 0, false, fmt.Errorf("%s.%s path = %q, want %q", ref.Table, ref.Column, ref.Path, expected)
+		}
+		return "independents." + ref.SettingName, 0, false, nil
+
+	case "settings_material_values":
+		if ref.OwnerKind != "settings_material" {
+			return "", 0, false, fmt.Errorf("%s.%s owner_kind = %q, want settings_material", ref.Table, ref.Column, ref.OwnerKind)
+		}
+		if !safeSettingsPathSegment(ref.OwnerID) {
+			return "", 0, false, fmt.Errorf("%s.%s owner_id %q is not a safe path segment", ref.Table, ref.Column, ref.OwnerID)
+		}
+		expected := "settings.materials." + ref.OwnerID + "." + ref.SettingName
+		if ref.Path != expected {
+			return "", 0, false, fmt.Errorf("%s.%s path = %q, want %q", ref.Table, ref.Column, ref.Path, expected)
+		}
+		return "materials." + ref.OwnerID + "." + ref.SettingName, 0, false, nil
+
+	case "settings_zone_values":
+		if ref.OwnerKind != "settings_zone" {
+			return "", 0, false, fmt.Errorf("%s.%s owner_kind = %q, want settings_zone", ref.Table, ref.Column, ref.OwnerKind)
+		}
+		if ref.OwnerID == "" {
+			return "", 0, false, fmt.Errorf("%s.%s requires owner_id", ref.Table, ref.Column)
+		}
+		index, err := settingsZoneValuePathIndex(ref.Path, ref.SettingName)
+		if err != nil {
+			return "", 0, false, fmt.Errorf("%s.%s %w", ref.Table, ref.Column, err)
+		}
+		return fmt.Sprintf("zones[%d].%s", index, ref.SettingName), index, true, nil
+
+	default:
+		return "", 0, false, unsupportedSQLValueRef(ref)
+	}
+}
+
+func settingValueUsesWrapper(raw string) (bool, error) {
+	var value any
+	if err := json.Unmarshal([]byte(raw), &value); err != nil {
+		return false, err
+	}
+	if object, ok := value.(map[string]any); ok {
+		if _, ok := object["Value"]; ok {
+			return true, nil
+		}
+		return false, fmt.Errorf("object does not contain Value")
+	}
+	return false, nil
+}
+
+func settingsZoneValuePathIndex(path, settingName string) (int, error) {
+	const prefix = "settings.zones["
+	if !strings.HasPrefix(path, prefix) {
+		return 0, fmt.Errorf("path = %q, want %sN].%s", path, prefix, settingName)
+	}
+	rest := strings.TrimPrefix(path, prefix)
+	end := strings.IndexByte(rest, ']')
+	if end < 0 {
+		return 0, fmt.Errorf("path = %q has unterminated zone index", path)
+	}
+	rawIndex := rest[:end]
+	index, err := strconv.Atoi(rawIndex)
+	if err != nil || index < 0 {
+		return 0, fmt.Errorf("path = %q has invalid zone index %q", path, rawIndex)
+	}
+	expectedSuffix := "]." + settingName
+	if rest[end:] != expectedSuffix {
+		return 0, fmt.Errorf("path = %q, want settings.zones[%d].%s", path, index, settingName)
+	}
+	return index, nil
+}
+
+func safeSettingsPathSegment(segment string) bool {
+	return segment != "" && !strings.ContainsAny(segment, ".[]")
 }
 
 func resolveSettingsZoneColumn(ref SQLValueRef) (Target, string, error) {

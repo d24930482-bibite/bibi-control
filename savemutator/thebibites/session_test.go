@@ -331,7 +331,7 @@ func parseSyntheticArchive(t *testing.T) *tb.Archive {
 	rawScene := append([]byte(nil), utf8BOM...)
 	rawScene = append(rawScene, []byte(`{"nBibites":1}`)...)
 	rawSettings := append([]byte(nil), utf8BOM...)
-	rawSettings = append(rawSettings, []byte(`{"pelletEnergy":{"Value":20},"independents":{"worldSize":{"Value":1000}},"materials":{},"zones":[{"id":7,"name":"Zone A","material":"Plant","distribution":"uniform","posX":1,"posY":2,"radius":10,"radiusIsRelative":false,"fertility":{"Value":0.4},"size":5}],"zoneGroups":[],"bibites":[],"settingsChangers":[]}`)...)
+	rawSettings = append(rawSettings, []byte(`{"pelletEnergy":{"Value":20},"debugFlag":{"Value":true},"worldLabel":{"Value":"alpha"},"independents":{"worldSize":{"Value":1000}},"materials":{"Plant":{"energy":{"Value":2}}},"zones":[{"id":7,"name":"Zone A","material":"Plant","distribution":"uniform","posX":1,"posY":2,"radius":10,"radiusIsRelative":false,"fertility":{"Value":0.4},"size":5}],"zoneGroups":[],"bibites":[],"settingsChangers":[]}`)...)
 	rawPellets := append([]byte(nil), utf8BOM...)
 	rawPellets = append(rawPellets, []byte(`{"pellets":[{"zone":"Zone A","pellets":[{"transform":{"position":[3,4],"rotation":0,"scale":1},"rb2d":{"px":3,"py":4,"vx":0,"vy":0,"r":0},"pellet":{"material":"Plant","amount":5},"matterDecay":{"timeAlive":1,"rotAmount":2}}]}]}`)...)
 
@@ -388,6 +388,30 @@ func settingNumber(t *testing.T, rows []tb.SettingValueRow, name string) float64
 	}
 	t.Fatalf("missing setting %q", name)
 	return 0
+}
+
+func settingBool(t *testing.T, rows []tb.SettingValueRow, name string) bool {
+	t.Helper()
+
+	for _, row := range rows {
+		if row.SettingName == name {
+			return row.BoolValue
+		}
+	}
+	t.Fatalf("missing setting %q", name)
+	return false
+}
+
+func settingString(t *testing.T, rows []tb.SettingValueRow, name string) string {
+	t.Helper()
+
+	for _, row := range rows {
+		if row.SettingName == name {
+			return row.StringValue
+		}
+	}
+	t.Fatalf("missing setting %q", name)
+	return ""
 }
 
 func geneNumber(t *testing.T, rows []tb.GeneRow, name string) float64 {
