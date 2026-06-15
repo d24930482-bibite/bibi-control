@@ -15,29 +15,33 @@ import (
 	tb "github.com/asemones/bibicontrol/saveparser/thebibites"
 )
 
+func stageSQLRefSet(t *testing.T, session *Session, ref SQLValueRef, expected, value any) {
+	t.Helper()
+
+	if err := session.StageSQLSet(ref.WithExpected(expected), value); err != nil {
+		t.Fatalf("StageSQLSet(%s.%s) error = %v", ref.Table, ref.Column, err)
+	}
+}
+
 func TestStageSQLSetStagesResolvesAndCommits(t *testing.T) {
 	session := NewSession(parseSyntheticArchive(t))
 
-	if err := session.StageSQLSet(SQLValueRef{
+	stageSQLRefSet(t, session, SQLValueRef{
 		Table:     "bibites",
 		Column:    "energy",
 		EntryName: "bibites/bibite_0.bb8",
 		BodyID:    42,
 		HasBodyID: true,
-	}.WithExpected(12.5), 33.25); err != nil {
-		t.Fatalf("StageSQLSet(bibites.energy) error = %v", err)
-	}
-	if err := session.StageSQLSet(SQLValueRef{
+	}, 12.5, 33.25)
+	stageSQLRefSet(t, session, SQLValueRef{
 		Table:     "bibite_genes",
 		Column:    "number_value",
 		EntryName: "bibites/bibite_0.bb8",
 		OwnerKind: "bibite",
 		OwnerID:   "42",
 		Path:      "genes.genes.Diet",
-	}.WithExpected(0.1), 0.55); err != nil {
-		t.Fatalf("StageSQLSet(bibite_genes.number_value) error = %v", err)
-	}
-	if err := session.StageSQLSet(SQLValueRef{
+	}, 0.1, 0.55)
+	stageSQLRefSet(t, session, SQLValueRef{
 		Table:           "bibite_stomach_contents",
 		Column:          "amount",
 		EntryName:       "bibites/bibite_0.bb8",
@@ -45,10 +49,8 @@ func TestStageSQLSetStagesResolvesAndCommits(t *testing.T) {
 		HasBodyID:       true,
 		ContentIndex:    0,
 		HasContentIndex: true,
-	}.WithExpected(2.5), 8.75); err != nil {
-		t.Fatalf("StageSQLSet(bibite_stomach_contents.amount) error = %v", err)
-	}
-	if err := session.StageSQLSet(SQLValueRef{
+	}, 2.5, 8.75)
+	stageSQLRefSet(t, session, SQLValueRef{
 		Table:               "pellets",
 		Column:              "amount",
 		EntryName:           PelletsEntryName,
@@ -58,10 +60,8 @@ func TestStageSQLSetStagesResolvesAndCommits(t *testing.T) {
 		HasGroupPelletIndex: true,
 		Zone:                "Zone A",
 		HasZone:             true,
-	}.WithExpected(5.0), 9.5); err != nil {
-		t.Fatalf("StageSQLSet(pellets.amount) error = %v", err)
-	}
-	if err := session.StageSQLSet(SQLValueRef{
+	}, 5.0, 9.5)
+	stageSQLRefSet(t, session, SQLValueRef{
 		Table:        "settings_zones",
 		Column:       "name",
 		EntryName:    SettingsEntryName,
@@ -69,9 +69,7 @@ func TestStageSQLSetStagesResolvesAndCommits(t *testing.T) {
 		HasZoneIndex: true,
 		ZoneID:       7,
 		HasZoneID:    true,
-	}.WithExpected("Zone A"), "SQL Zone"); err != nil {
-		t.Fatalf("StageSQLSet(settings_zones.name) error = %v", err)
-	}
+	}, "Zone A", "SQL Zone")
 
 	fresh, err := session.Commit(filepath.Join(t.TempDir(), "mutated.zip"))
 	if err != nil {
@@ -101,7 +99,7 @@ func TestStageSQLSetStagesResolvesAndCommits(t *testing.T) {
 func TestStageSQLSetUpdatesSettingsValueRows(t *testing.T) {
 	session := NewSession(parseSyntheticArchive(t))
 
-	if err := session.StageSQLSet(SQLValueRef{
+	stageSQLRefSet(t, session, SQLValueRef{
 		Table:          "settings_simulation_values",
 		Column:         "number_value",
 		EntryName:      SettingsEntryName,
@@ -111,10 +109,8 @@ func TestStageSQLSetUpdatesSettingsValueRows(t *testing.T) {
 		Path:           "settings.pelletEnergy",
 		ValueType:      "number",
 		WrapperRawJSON: `{"Value":20}`,
-	}.WithExpected(20.0), 33.5); err != nil {
-		t.Fatalf("StageSQLSet(settings_simulation_values.number_value) error = %v", err)
-	}
-	if err := session.StageSQLSet(SQLValueRef{
+	}, 20.0, 33.5)
+	stageSQLRefSet(t, session, SQLValueRef{
 		Table:          "settings_simulation_values",
 		Column:         "bool_value",
 		EntryName:      SettingsEntryName,
@@ -124,10 +120,8 @@ func TestStageSQLSetUpdatesSettingsValueRows(t *testing.T) {
 		Path:           "settings.debugFlag",
 		ValueType:      "bool",
 		WrapperRawJSON: `{"Value":true}`,
-	}.WithExpected(true), false); err != nil {
-		t.Fatalf("StageSQLSet(settings_simulation_values.bool_value) error = %v", err)
-	}
-	if err := session.StageSQLSet(SQLValueRef{
+	}, true, false)
+	stageSQLRefSet(t, session, SQLValueRef{
 		Table:          "settings_simulation_values",
 		Column:         "string_value",
 		EntryName:      SettingsEntryName,
@@ -137,10 +131,8 @@ func TestStageSQLSetUpdatesSettingsValueRows(t *testing.T) {
 		Path:           "settings.worldLabel",
 		ValueType:      "string",
 		WrapperRawJSON: `{"Value":"alpha"}`,
-	}.WithExpected("alpha"), "beta"); err != nil {
-		t.Fatalf("StageSQLSet(settings_simulation_values.string_value) error = %v", err)
-	}
-	if err := session.StageSQLSet(SQLValueRef{
+	}, "alpha", "beta")
+	stageSQLRefSet(t, session, SQLValueRef{
 		Table:          "settings_independent_values",
 		Column:         "number_value",
 		EntryName:      SettingsEntryName,
@@ -150,10 +142,8 @@ func TestStageSQLSetUpdatesSettingsValueRows(t *testing.T) {
 		Path:           "settings.independents.worldSize",
 		ValueType:      "number",
 		WrapperRawJSON: `{"Value":1000}`,
-	}.WithExpected(1000.0), 2000.0); err != nil {
-		t.Fatalf("StageSQLSet(settings_independent_values.number_value) error = %v", err)
-	}
-	if err := session.StageSQLSet(SQLValueRef{
+	}, 1000.0, 2000.0)
+	stageSQLRefSet(t, session, SQLValueRef{
 		Table:          "settings_material_values",
 		Column:         "number_value",
 		EntryName:      SettingsEntryName,
@@ -163,10 +153,8 @@ func TestStageSQLSetUpdatesSettingsValueRows(t *testing.T) {
 		Path:           "settings.materials.Plant.energy",
 		ValueType:      "number",
 		WrapperRawJSON: `{"Value":2}`,
-	}.WithExpected(2.0), 4.25); err != nil {
-		t.Fatalf("StageSQLSet(settings_material_values.number_value) error = %v", err)
-	}
-	if err := session.StageSQLSet(SQLValueRef{
+	}, 2.0, 4.25)
+	stageSQLRefSet(t, session, SQLValueRef{
 		Table:          "settings_zone_values",
 		Column:         "number_value",
 		EntryName:      SettingsEntryName,
@@ -180,10 +168,8 @@ func TestStageSQLSetUpdatesSettingsValueRows(t *testing.T) {
 		HasZoneIndex:   true,
 		ZoneID:         7,
 		HasZoneID:      true,
-	}.WithExpected(0.4), 0.85); err != nil {
-		t.Fatalf("StageSQLSet(settings_zone_values.number_value wrapped) error = %v", err)
-	}
-	if err := session.StageSQLSet(SQLValueRef{
+	}, 0.4, 0.85)
+	stageSQLRefSet(t, session, SQLValueRef{
 		Table:          "settings_zone_values",
 		Column:         "number_value",
 		EntryName:      SettingsEntryName,
@@ -197,10 +183,8 @@ func TestStageSQLSetUpdatesSettingsValueRows(t *testing.T) {
 		HasZoneIndex:   true,
 		ZoneID:         7,
 		HasZoneID:      true,
-	}.WithExpected(5.0), 99.0); err != nil {
-		t.Fatalf("StageSQLSet(settings_zone_values.number_value unwrapped) error = %v", err)
-	}
-	if err := session.StageSQLSet(SQLValueRef{
+	}, 5.0, 99.0)
+	stageSQLRefSet(t, session, SQLValueRef{
 		Table:           "settings_changer_targets",
 		Column:          "number_value",
 		EntryName:       SettingsEntryName,
@@ -214,9 +198,7 @@ func TestStageSQLSetUpdatesSettingsValueRows(t *testing.T) {
 		HasZoneID:       true,
 		SettingName:     "fertility",
 		ValueType:       "number",
-	}.WithExpected(0.4), 30.0); err != nil {
-		t.Fatalf("StageSQLSet(settings_changer_targets.number_value) error = %v", err)
-	}
+	}, 0.4, 30.0)
 
 	fresh, err := session.Commit(filepath.Join(t.TempDir(), "mutated.zip"))
 	if err != nil {
@@ -272,12 +254,19 @@ func TestResolveSQLValueRefsAllowlist(t *testing.T) {
 	eggTarget := EntryTarget(eggEntry, tb.EntryEgg, Require("egg.id", int64(99)))
 
 	var tests []sqlRefResolveCase
-	addSQLRefPathCases(&tests, "bibites", bibiteBase, bibiteTarget, bibiteColumnPaths, sqlRefPath)
-	addSQLRefPathCases(&tests, "bibite_body", bibiteBase, bibiteTarget, bibiteBodyColumnPaths, sqlRefPath)
-	addSQLRefPathCases(&tests, "bibite_mouth", bibiteBase, bibiteTarget, bibiteMouthColumnPaths, sqlRefPath)
-	addSQLRefPathCases(&tests, "bibite_pheromone_emitters", bibiteBase, bibiteTarget, bibitePheromoneColumnPaths, sqlRefPath)
-	addSQLRefPathCases(&tests, "bibite_egg_layers", bibiteBase, bibiteTarget, bibiteEggLayerColumnPaths, sqlRefPath)
-	addSQLRefPathCases(&tests, "bibite_control", bibiteBase, bibiteTarget, bibiteControlColumnPaths, sqlRefPath)
+	for _, table := range []struct {
+		name    string
+		columns map[string]string
+	}{
+		{name: "bibites", columns: bibiteColumnPaths},
+		{name: "bibite_body", columns: bibiteBodyColumnPaths},
+		{name: "bibite_mouth", columns: bibiteMouthColumnPaths},
+		{name: "bibite_pheromone_emitters", columns: bibitePheromoneColumnPaths},
+		{name: "bibite_egg_layers", columns: bibiteEggLayerColumnPaths},
+		{name: "bibite_control", columns: bibiteControlColumnPaths},
+	} {
+		addSQLRefPathCases(&tests, table.name, bibiteBase, bibiteTarget, table.columns, sqlRefPath)
+	}
 
 	stomachBase := bibiteBase
 	stomachBase.ContentIndex = 2
@@ -404,6 +393,50 @@ func TestResolveSQLValueRefsAllowlist(t *testing.T) {
 				t.Fatalf("validateOperationShape(SQLSet()) error = %v", err)
 			}
 		})
+	}
+}
+
+func TestWritableSQLRefCatalogMatchesNormalizedSchema(t *testing.T) {
+	columnsByTable := make(map[string]map[string]struct{}, len(tb.NormalizedTables))
+	for _, table := range tb.NormalizedTables {
+		columns := make(map[string]struct{}, len(table.Fields))
+		for _, field := range table.Fields {
+			columns[field.Column] = struct{}{}
+		}
+		columnsByTable[table.Table] = columns
+	}
+
+	seenTables := map[string]struct{}{}
+	seenRefs := map[string]struct{}{}
+	for _, spec := range writableSQLRefTables {
+		if spec.table == "" {
+			t.Fatal("writable SQL ref catalog has empty table name")
+		}
+		if _, ok := seenTables[spec.table]; ok {
+			t.Fatalf("writable SQL ref catalog has duplicate table %q", spec.table)
+		}
+		seenTables[spec.table] = struct{}{}
+
+		schemaColumns, ok := columnsByTable[spec.table]
+		if !ok {
+			t.Fatalf("writable SQL ref catalog references unknown normalized table %q", spec.table)
+		}
+		if len(spec.columns) == 0 {
+			t.Fatalf("writable SQL ref catalog table %q has no columns", spec.table)
+		}
+		for column := range spec.columns {
+			if column == "" {
+				t.Fatalf("writable SQL ref catalog table %q has empty column name", spec.table)
+			}
+			key := spec.table + "." + column
+			if _, ok := seenRefs[key]; ok {
+				t.Fatalf("writable SQL ref catalog has duplicate ref %s", key)
+			}
+			seenRefs[key] = struct{}{}
+			if _, ok := schemaColumns[column]; !ok {
+				t.Fatalf("writable SQL ref catalog references missing normalized column %s", key)
+			}
+		}
 	}
 }
 
@@ -812,12 +845,20 @@ func liveSQLRefMutationCases(t *testing.T, tables tb.ExtractedSave) []liveSQLRef
 	t.Helper()
 
 	var cases []liveSQLRefMutationCase
-	addLiveBodyIDTableCases(t, &cases, tables, "bibites", tables.Bibites, bibiteColumnPaths)
-	addLiveBodyIDTableCases(t, &cases, tables, "bibite_body", tables.BibiteBody, bibiteBodyColumnPaths)
-	addLiveBodyIDTableCases(t, &cases, tables, "bibite_mouth", tables.BibiteMouth, bibiteMouthColumnPaths)
-	addLiveBodyIDTableCases(t, &cases, tables, "bibite_pheromone_emitters", tables.BibitePheromoneEmitters, bibitePheromoneColumnPaths)
-	addLiveBodyIDTableCases(t, &cases, tables, "bibite_egg_layers", tables.BibiteEggLayers, bibiteEggLayerColumnPaths)
-	addLiveBodyIDTableCases(t, &cases, tables, "bibite_control", tables.BibiteControl, bibiteControlColumnPaths)
+	for _, table := range []struct {
+		name    string
+		rows    any
+		columns map[string]string
+	}{
+		{name: "bibites", rows: tables.Bibites, columns: bibiteColumnPaths},
+		{name: "bibite_body", rows: tables.BibiteBody, columns: bibiteBodyColumnPaths},
+		{name: "bibite_mouth", rows: tables.BibiteMouth, columns: bibiteMouthColumnPaths},
+		{name: "bibite_pheromone_emitters", rows: tables.BibitePheromoneEmitters, columns: bibitePheromoneColumnPaths},
+		{name: "bibite_egg_layers", rows: tables.BibiteEggLayers, columns: bibiteEggLayerColumnPaths},
+		{name: "bibite_control", rows: tables.BibiteControl, columns: bibiteControlColumnPaths},
+	} {
+		addLiveBodyIDTableCases(t, &cases, tables, table.name, table.rows, table.columns)
+	}
 	addLiveStomachCases(t, &cases, tables)
 	addLiveGeneCases(t, &cases, tables, "bibite_genes", tables.BibiteGenes)
 	addLiveBrainNodeCases(t, &cases, tables, "bibite_brain_nodes", tables.BibiteBrainNodes)
@@ -1647,36 +1688,6 @@ func schemaCapableUnobservedSQLRefs() map[string]struct{} {
 		"settings_material_values.string_value":    {},
 		"settings_zone_values.bool_value":          {},
 	}
-}
-
-func writableSQLRefKeys() []string {
-	var keys []string
-	appendMapKeys := func(table string, columns map[string]string) {
-		for _, column := range sortedSQLRefKeys(columns) {
-			keys = append(keys, table+"."+column)
-		}
-	}
-	appendMapKeys("bibites", bibiteColumnPaths)
-	appendMapKeys("bibite_body", bibiteBodyColumnPaths)
-	appendMapKeys("bibite_mouth", bibiteMouthColumnPaths)
-	appendMapKeys("bibite_pheromone_emitters", bibitePheromoneColumnPaths)
-	appendMapKeys("bibite_egg_layers", bibiteEggLayerColumnPaths)
-	appendMapKeys("bibite_control", bibiteControlColumnPaths)
-	appendMapKeys("bibite_stomach_contents", bibiteStomachContentColumnFields)
-	appendMapKeys("bibite_brain_nodes", brainNodeColumnKeys)
-	appendMapKeys("bibite_brain_synapses", brainSynapseColumnKeys)
-	appendMapKeys("eggs", eggColumnPaths)
-	appendMapKeys("egg_brain_nodes", brainNodeColumnKeys)
-	appendMapKeys("egg_brain_synapses", brainSynapseColumnKeys)
-	appendMapKeys("pellets", pelletColumnPaths)
-	appendMapKeys("pheromones", pheromoneColumnPaths)
-	appendMapKeys("settings_zones", settingsZoneColumnPaths)
-	for _, table := range []string{"bibite_genes", "egg_genes", "settings_simulation_values", "settings_independent_values", "settings_material_values", "settings_zone_values"} {
-		appendMapKeys(table, settingsValueColumnTypes)
-	}
-	keys = append(keys, "settings_changer_targets.number_value")
-	sort.Strings(keys)
-	return keys
 }
 
 func assertNoParseErrors(t *testing.T, archive *tb.Archive) {

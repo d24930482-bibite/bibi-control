@@ -26,6 +26,8 @@ Implemented pieces:
 - settings value row mapping
 - zone-scoped `settings_changer_targets.number_value` mapping
 - quoted JSON path keys for `settingsBases["Zone(0).fertility"]`
+- centralized writable-ref catalog in `savemutator/thebibites/sqlref_catalog.go`
+- generated SQL-column to archive-path maps from `sqlref` tags in `normalize_types.go`
 - exhaustive cheap resolver coverage for the allowlisted `table.column` pairs
 - live-fixture commit/reparse coverage for observed writable refs
 - fixture-backed targeted smoke test that mutates the large save and installs it into The Bibites `Savefiles` directory
@@ -130,6 +132,59 @@ Use `Has*` booleans for every numeric locator because zero is a valid index or I
 `WithExpected(value)` adds a stale-value guard on the resolved JSON path. Use it by default when staging edits from SQL query results.
 
 Unsupported table/column pairs return an error. This is intentional; do not add fallback path guessing.
+
+## Writable Ref Catalog
+
+`savemutator/thebibites/sqlref.go` is the public bridge API: `SQLValueRef`,
+`StageSQLSet`, `SQLSet`, and `ResolveSQLValueRef`.
+
+`savemutator/thebibites/sqlref_catalog.go` owns the writable SQL-ref catalog:
+
+```go
+var writableSQLRefTables = []sqlRefTableSpec{...}
+```
+
+That catalog now drives both:
+
+- `ResolveSQLValueRef` table dispatch
+- `writableSQLRefKeys()` coverage enumeration used by the live fixture matrix
+
+This replaced the previous test-local mirrored writable list. When adding or
+removing a writable `table.column`, update the production catalog. For direct
+normalized row fields, the SQL-column to archive-path maps are generated into:
+
+```text
+savemutator/thebibites/sqlref_generated.go
+```
+
+Those maps come from `sqlref` struct tags on writable fields in:
+
+```text
+saveparser/thebibites/normalize_types.go
+```
+
+Run this after changing those tags:
+
+```sh
+go generate ./saveparser/thebibites
+```
+
+The generator writes the parser metadata, DuckDB migration, and SQL-ref path
+maps together. Locator columns such as `entry_name`, IDs, row indexes, and
+guard-only fields should not get `sqlref` tags.
+
+Resolver logic is split by domain:
+
+- `sqlref_entities.go`: bibite, egg, brain, pellet, and pheromone refs
+- `sqlref_settings.go`: settings value rows, zones, and changer targets
+
+Dynamic EAV refs and special resolver cases should stay explicit in those
+resolver files; do not make them path guesses.
+
+`TestWritableSQLRefCatalogMatchesNormalizedSchema` checks that every catalog
+`table.column` exists in generated normalized schema metadata. The coverage
+tests should follow from the production catalog instead of maintaining their own
+list of writable refs.
 
 ## Supported Refs
 

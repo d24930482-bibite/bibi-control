@@ -153,9 +153,9 @@ type SettingsZoneRow struct {
 	ZoneIndex    int
 	ZoneID       int64
 	HasZoneID    bool
-	Name         string
-	Material     string
-	Distribution string
+	Name         string `sqlref:"name"`
+	Material     string `sqlref:"material"`
+	Distribution string `sqlref:"distribution"`
 	RawJSON      string
 }
 
@@ -279,16 +279,16 @@ type BrainNodeRow struct {
 	OwnerID        string
 	EntryName      string
 	NodeRowIndex   int
-	NodeIndex      int64
-	Innovation     int64
-	Type           int64
-	TypeName       string
-	Desc           string
-	Archetype      int64
-	BaseActivation float64
-	Value          float64
-	LastInput      float64
-	LastOutput     float64
+	NodeIndex      int64   `sqlref:"Index"`
+	Innovation     int64   `sqlref:"Inov"`
+	Type           int64   `sqlref:"Type"`
+	TypeName       string  `sqlref:"TypeName"`
+	Desc           string  `sqlref:"Desc"`
+	Archetype      int64   `sqlref:"archetype"`
+	BaseActivation float64 `sqlref:"baseActivation"`
+	Value          float64 `sqlref:"Value"`
+	LastInput      float64 `sqlref:"LastInput"`
+	LastOutput     float64 `sqlref:"LastOutput"`
 }
 
 type BrainSynapseRow struct {
@@ -297,11 +297,11 @@ type BrainSynapseRow struct {
 	OwnerID         string
 	EntryName       string
 	SynapseRowIndex int
-	Innovation      int64
-	NodeIn          int64
-	NodeOut         int64
-	Weight          float64
-	Enabled         bool
+	Innovation      int64   `sqlref:"Inov"`
+	NodeIn          int64   `sqlref:"NodeIn"`
+	NodeOut         int64   `sqlref:"NodeOut"`
+	Weight          float64 `sqlref:"Weight"`
+	Enabled         bool    `sqlref:"En"`
 }
 
 type BibiteRow struct {
@@ -309,22 +309,22 @@ type BibiteRow struct {
 	EntryName          string
 	BodyID             int64
 	HasBodyID          bool
-	SpeciesID          int64
-	Generation         int64
-	Dead               bool
-	Dying              bool
-	Health             float64
-	Energy             float64
-	TimeAlive          float64
-	TransformPositionX float64
-	TransformPositionY float64
-	TransformRotation  float64
-	TransformScale     float64
-	RB2DPX             float64
-	RB2DPY             float64
-	RB2DVX             float64
-	RB2DVY             float64
-	RB2DR              float64
+	SpeciesID          int64   `sqlref:"genes.speciesID"`
+	Generation         int64   `sqlref:"genes.gen"`
+	Dead               bool    `sqlref:"body.dead"`
+	Dying              bool    `sqlref:"body.dying"`
+	Health             float64 `sqlref:"body.health"`
+	Energy             float64 `sqlref:"body.energy"`
+	TimeAlive          float64 `sqlref:"clock.timeAlive"`
+	TransformPositionX float64 `sqlref:"transform.position[0]"`
+	TransformPositionY float64 `sqlref:"transform.position[1]"`
+	TransformRotation  float64 `sqlref:"transform.rotation"`
+	TransformScale     float64 `sqlref:"transform.scale"`
+	RB2DPX             float64 `sqlref:"rb2d.px"`
+	RB2DPY             float64 `sqlref:"rb2d.py"`
+	RB2DVX             float64 `sqlref:"rb2d.vx"`
+	RB2DVY             float64 `sqlref:"rb2d.vy"`
+	RB2DR              float64 `sqlref:"rb2d.r"`
 }
 
 type BibiteBodyRow struct {
@@ -332,15 +332,15 @@ type BibiteBodyRow struct {
 	EntryName           string
 	BodyID              int64
 	HasBodyID           bool
-	D2Size              float64
-	FatReservesAmount   float64
-	AttackedDmg         float64
-	TimesAttacked       float64
-	TotalDamageSuffered float64
-	BrainTicksCount     float64
-	VisionLookupCount   float64
-	VisionSensingCount  float64
-	CorpseEnergyOffset  float64
+	D2Size              float64 `sqlref:"body.d2Size"`
+	FatReservesAmount   float64 `sqlref:"body.fatReservesAmount"`
+	AttackedDmg         float64 `sqlref:"body.attackedDmg"`
+	TimesAttacked       float64 `sqlref:"body.timesAttacked"`
+	TotalDamageSuffered float64 `sqlref:"body.totalDamageSuffered"`
+	BrainTicksCount     float64 `sqlref:"body.brainTicksCount"`
+	VisionLookupCount   float64 `sqlref:"body.visionLookupCount"`
+	VisionSensingCount  float64 `sqlref:"body.visionSensingCount"`
+	CorpseEnergyOffset  float64 `sqlref:"body.corpseEnergyOffset"`
 }
 
 type BibiteMouthRow struct {
@@ -348,12 +348,12 @@ type BibiteMouthRow struct {
 	EntryName         string
 	BodyID            int64
 	HasBodyID         bool
-	AttackedLastFrame bool
-	BibitesBitten     float64
-	BiteProgress      float64
-	MurderedArea      float64
-	TotalDamageDealt  float64
-	TotalMurders      float64
+	AttackedLastFrame bool    `sqlref:"body.mouth.attackedLastFrame"`
+	BibitesBitten     float64 `sqlref:"body.mouth.bibitesBitten"`
+	BiteProgress      float64 `sqlref:"body.mouth.biteProgress"`
+	MurderedArea      float64 `sqlref:"body.mouth.murderedArea"`
+	TotalDamageDealt  float64 `sqlref:"body.mouth.totalDamageDealt"`
+	TotalMurders      float64 `sqlref:"body.mouth.totalMurders"`
 }
 
 type BibitePheromoneEmitterRow struct {
@@ -361,7 +361,7 @@ type BibitePheromoneEmitterRow struct {
 	EntryName string
 	BodyID    int64
 	HasBodyID bool
-	Progress  float64
+	Progress  float64 `sqlref:"body.phero.progress"`
 }
 
 type BibiteEggLayerRow struct {
@@ -369,8 +369,8 @@ type BibiteEggLayerRow struct {
 	EntryName   string
 	BodyID      int64
 	HasBodyID   bool
-	EggProgress float64
-	NEggsLaid   float64
+	EggProgress float64 `sqlref:"body.eggLayer.eggProgress"`
+	NEggsLaid   float64 `sqlref:"body.eggLayer.nEggsLaid"`
 }
 
 type BibiteControlRow struct {
@@ -378,7 +378,7 @@ type BibiteControlRow struct {
 	EntryName   string
 	BodyID      int64
 	HasBodyID   bool
-	TotalTravel float64
+	TotalTravel float64 `sqlref:"body.control.totalTravel"`
 }
 
 type StomachContentRow struct {
@@ -387,9 +387,9 @@ type StomachContentRow struct {
 	BodyID             int64
 	HasBodyID          bool
 	ContentIndex       int
-	Material           string
-	Amount             float64
-	AverageChunkAmount float64
+	Material           string  `sqlref:"material"`
+	Amount             float64 `sqlref:"amount"`
+	AverageChunkAmount float64 `sqlref:"averageChunkAmount"`
 }
 
 type BibiteChildRow struct {
@@ -406,19 +406,19 @@ type EggRow struct {
 	EntryName          string
 	EggID              int64
 	HasEggID           bool
-	SpeciesID          int64
-	Generation         int64
-	HatchProgress      float64
-	Energy             float64
-	TransformPositionX float64
-	TransformPositionY float64
-	TransformRotation  float64
-	TransformScale     float64
-	RB2DPX             float64
-	RB2DPY             float64
-	RB2DVX             float64
-	RB2DVY             float64
-	RB2DR              float64
+	SpeciesID          int64   `sqlref:"genes.speciesID"`
+	Generation         int64   `sqlref:"genes.gen"`
+	HatchProgress      float64 `sqlref:"egg.hatchProgress"`
+	Energy             float64 `sqlref:"egg.energy"`
+	TransformPositionX float64 `sqlref:"transform.position[0]"`
+	TransformPositionY float64 `sqlref:"transform.position[1]"`
+	TransformRotation  float64 `sqlref:"transform.rotation"`
+	TransformScale     float64 `sqlref:"transform.scale"`
+	RB2DPX             float64 `sqlref:"rb2d.px"`
+	RB2DPY             float64 `sqlref:"rb2d.py"`
+	RB2DVX             float64 `sqlref:"rb2d.vx"`
+	RB2DVY             float64 `sqlref:"rb2d.vy"`
+	RB2DR              float64 `sqlref:"rb2d.r"`
 }
 
 type PelletGroupRow struct {
@@ -436,37 +436,37 @@ type PelletRow struct {
 	GroupIndex           int
 	GroupPelletIndex     int
 	Zone                 string
-	Material             string
-	Amount               float64
-	MatterDecayTimeAlive float64
-	MatterDecayRotAmount float64
+	Material             string  `sqlref:"pellet.material"`
+	Amount               float64 `sqlref:"pellet.amount"`
+	MatterDecayTimeAlive float64 `sqlref:"matterDecay.timeAlive"`
+	MatterDecayRotAmount float64 `sqlref:"matterDecay.rotAmount"`
 	HasMatterDecay       bool
-	TransformPositionX   float64
-	TransformPositionY   float64
-	TransformRotation    float64
-	TransformScale       float64
-	RB2DPX               float64
-	RB2DPY               float64
-	RB2DVX               float64
-	RB2DVY               float64
-	RB2DR                float64
+	TransformPositionX   float64 `sqlref:"transform.position[0]"`
+	TransformPositionY   float64 `sqlref:"transform.position[1]"`
+	TransformRotation    float64 `sqlref:"transform.rotation"`
+	TransformScale       float64 `sqlref:"transform.scale"`
+	RB2DPX               float64 `sqlref:"rb2d.px"`
+	RB2DPY               float64 `sqlref:"rb2d.py"`
+	RB2DVX               float64 `sqlref:"rb2d.vx"`
+	RB2DVY               float64 `sqlref:"rb2d.vy"`
+	RB2DR                float64 `sqlref:"rb2d.r"`
 }
 
 type PheromoneRow struct {
 	SaveID             string
 	EntryName          string
 	PheromoneIndex     int
-	TransformPositionX float64
-	TransformPositionY float64
-	TransformRotation  float64
-	TransformScale     float64
+	TransformPositionX float64 `sqlref:"transform.position[0]"`
+	TransformPositionY float64 `sqlref:"transform.position[1]"`
+	TransformRotation  float64 `sqlref:"transform.rotation"`
+	TransformScale     float64 `sqlref:"transform.scale"`
 	HeadingRawJSON     string
-	RStrength          float64
-	GStrength          float64
-	BStrength          float64
-	NR                 float64
-	NG                 float64
-	NB                 float64
+	RStrength          float64 `sqlref:"phero.Rstrength"`
+	GStrength          float64 `sqlref:"phero.Gstrength"`
+	BStrength          float64 `sqlref:"phero.Bstrength"`
+	NR                 float64 `sqlref:"phero.nR"`
+	NG                 float64 `sqlref:"phero.nG"`
+	NB                 float64 `sqlref:"phero.nB"`
 }
 
 type ScalarRow struct {
