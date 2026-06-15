@@ -3,11 +3,12 @@
 package thebibites
 
 type NormalizedTableSpec struct {
-	SaveField string
-	Table     string
-	RowType   string
-	Optional  bool
-	Fields    []NormalizedFieldSpec
+	SaveField      string
+	Table          string
+	RowType        string
+	Optional       bool
+	SQLRefResolver SQLRefResolverKind
+	Fields         []NormalizedFieldSpec
 }
 
 type NormalizedFieldSpec struct {
@@ -84,7 +85,7 @@ var NormalizedTables = []NormalizedTableSpec{
 		{Field: "TowerIndex", Column: "tower_index", SQLType: "BIGINT"},
 		{Field: "RawJSON", Column: "raw_json", SQLType: "TEXT"},
 	}},
-	{SaveField: "SettingsSimulationValues", Table: "settings_simulation_values", RowType: "SettingValueRow", Optional: false, Fields: []NormalizedFieldSpec{
+	{SaveField: "SettingsSimulationValues", Table: "settings_simulation_values", RowType: "SettingValueRow", Optional: false, SQLRefResolver: SQLRefResolverKind("settings_value"), Fields: []NormalizedFieldSpec{
 		{Field: "SaveID", Column: "save_id", SQLType: "TEXT"},
 		{Field: "EntryName", Column: "entry_name", SQLType: "TEXT"},
 		{Field: "Scope", Column: "scope", SQLType: "TEXT"},
@@ -99,7 +100,7 @@ var NormalizedTables = []NormalizedTableSpec{
 		{Field: "RawJSON", Column: "raw_json", SQLType: "TEXT"},
 		{Field: "WrapperRawJSON", Column: "wrapper_raw_json", SQLType: "TEXT"},
 	}},
-	{SaveField: "SettingsIndependentValues", Table: "settings_independent_values", RowType: "SettingValueRow", Optional: false, Fields: []NormalizedFieldSpec{
+	{SaveField: "SettingsIndependentValues", Table: "settings_independent_values", RowType: "SettingValueRow", Optional: false, SQLRefResolver: SQLRefResolverKind("settings_value"), Fields: []NormalizedFieldSpec{
 		{Field: "SaveID", Column: "save_id", SQLType: "TEXT"},
 		{Field: "EntryName", Column: "entry_name", SQLType: "TEXT"},
 		{Field: "Scope", Column: "scope", SQLType: "TEXT"},
@@ -121,7 +122,7 @@ var NormalizedTables = []NormalizedTableSpec{
 		{Field: "MaterialName", Column: "material_name", SQLType: "TEXT"},
 		{Field: "RawJSON", Column: "raw_json", SQLType: "TEXT"},
 	}},
-	{SaveField: "SettingsMaterialValues", Table: "settings_material_values", RowType: "SettingValueRow", Optional: false, Fields: []NormalizedFieldSpec{
+	{SaveField: "SettingsMaterialValues", Table: "settings_material_values", RowType: "SettingValueRow", Optional: false, SQLRefResolver: SQLRefResolverKind("settings_value"), Fields: []NormalizedFieldSpec{
 		{Field: "SaveID", Column: "save_id", SQLType: "TEXT"},
 		{Field: "EntryName", Column: "entry_name", SQLType: "TEXT"},
 		{Field: "Scope", Column: "scope", SQLType: "TEXT"},
@@ -136,7 +137,7 @@ var NormalizedTables = []NormalizedTableSpec{
 		{Field: "RawJSON", Column: "raw_json", SQLType: "TEXT"},
 		{Field: "WrapperRawJSON", Column: "wrapper_raw_json", SQLType: "TEXT"},
 	}},
-	{SaveField: "SettingsZones", Table: "settings_zones", RowType: "SettingsZoneRow", Optional: false, Fields: []NormalizedFieldSpec{
+	{SaveField: "SettingsZones", Table: "settings_zones", RowType: "SettingsZoneRow", Optional: false, SQLRefResolver: SQLRefResolverKind("settings_zone_path_map"), Fields: []NormalizedFieldSpec{
 		{Field: "SaveID", Column: "save_id", SQLType: "TEXT"},
 		{Field: "EntryName", Column: "entry_name", SQLType: "TEXT"},
 		{Field: "ZoneIndex", Column: "zone_index", SQLType: "BIGINT"},
@@ -161,7 +162,7 @@ var NormalizedTables = []NormalizedTableSpec{
 		{Field: "RadiusIsRelative", Column: "radius_is_relative", SQLType: "BOOLEAN"},
 		{Field: "RawJSON", Column: "raw_json", SQLType: "TEXT"},
 	}},
-	{SaveField: "SettingsZoneValues", Table: "settings_zone_values", RowType: "SettingValueRow", Optional: false, Fields: []NormalizedFieldSpec{
+	{SaveField: "SettingsZoneValues", Table: "settings_zone_values", RowType: "SettingValueRow", Optional: false, SQLRefResolver: SQLRefResolverKind("settings_value"), Fields: []NormalizedFieldSpec{
 		{Field: "SaveID", Column: "save_id", SQLType: "TEXT"},
 		{Field: "EntryName", Column: "entry_name", SQLType: "TEXT"},
 		{Field: "Scope", Column: "scope", SQLType: "TEXT"},
@@ -216,7 +217,7 @@ var NormalizedTables = []NormalizedTableSpec{
 		{Field: "D", Column: "d", SQLType: "TEXT"},
 		{Field: "F", Column: "f", SQLType: "DOUBLE"},
 	}},
-	{SaveField: "SettingsChangerTargets", Table: "settings_changer_targets", RowType: "SettingsChangerTargetRow", Optional: false, Fields: []NormalizedFieldSpec{
+	{SaveField: "SettingsChangerTargets", Table: "settings_changer_targets", RowType: "SettingsChangerTargetRow", Optional: false, SQLRefResolver: SQLRefResolverKind("settings_changer_target"), Fields: []NormalizedFieldSpec{
 		{Field: "SaveID", Column: "save_id", SQLType: "TEXT"},
 		{Field: "EntryName", Column: "entry_name", SQLType: "TEXT"},
 		{Field: "ChangerIndex", Column: "changer_index", SQLType: "BIGINT"},
@@ -296,7 +297,7 @@ var NormalizedTables = []NormalizedTableSpec{
 		{Field: "Weight", Column: "weight", SQLType: "DOUBLE"},
 		{Field: "Enabled", Column: "enabled", SQLType: "BOOLEAN"},
 	}},
-	{SaveField: "Bibites", Table: "bibites", RowType: "BibiteRow", Optional: false, Fields: []NormalizedFieldSpec{
+	{SaveField: "Bibites", Table: "bibites", RowType: "BibiteRow", Optional: false, SQLRefResolver: SQLRefResolverKind("bibite_path_map"), Fields: []NormalizedFieldSpec{
 		{Field: "SaveID", Column: "save_id", SQLType: "TEXT"},
 		{Field: "EntryName", Column: "entry_name", SQLType: "TEXT"},
 		{Field: "BodyID", Column: "body_id", SQLType: "BIGINT"},
@@ -318,7 +319,7 @@ var NormalizedTables = []NormalizedTableSpec{
 		{Field: "RB2DVY", Column: "rb2d_vy", SQLType: "DOUBLE"},
 		{Field: "RB2DR", Column: "rb2d_r", SQLType: "DOUBLE"},
 	}},
-	{SaveField: "BibiteGenes", Table: "bibite_genes", RowType: "GeneRow", Optional: false, Fields: []NormalizedFieldSpec{
+	{SaveField: "BibiteGenes", Table: "bibite_genes", RowType: "GeneRow", Optional: false, SQLRefResolver: SQLRefResolverKind("bibite_gene_value"), Fields: []NormalizedFieldSpec{
 		{Field: "SaveID", Column: "save_id", SQLType: "TEXT"},
 		{Field: "OwnerKind", Column: "owner_kind", SQLType: "TEXT"},
 		{Field: "OwnerID", Column: "owner_id", SQLType: "TEXT"},
@@ -331,7 +332,7 @@ var NormalizedTables = []NormalizedTableSpec{
 		{Field: "StringValue", Column: "string_value", SQLType: "TEXT"},
 		{Field: "RawJSON", Column: "raw_json", SQLType: "TEXT"},
 	}},
-	{SaveField: "BibiteBody", Table: "bibite_body", RowType: "BibiteBodyRow", Optional: false, Fields: []NormalizedFieldSpec{
+	{SaveField: "BibiteBody", Table: "bibite_body", RowType: "BibiteBodyRow", Optional: false, SQLRefResolver: SQLRefResolverKind("bibite_path_map"), Fields: []NormalizedFieldSpec{
 		{Field: "SaveID", Column: "save_id", SQLType: "TEXT"},
 		{Field: "EntryName", Column: "entry_name", SQLType: "TEXT"},
 		{Field: "BodyID", Column: "body_id", SQLType: "BIGINT"},
@@ -346,7 +347,7 @@ var NormalizedTables = []NormalizedTableSpec{
 		{Field: "VisionSensingCount", Column: "vision_sensing_count", SQLType: "DOUBLE"},
 		{Field: "CorpseEnergyOffset", Column: "corpse_energy_offset", SQLType: "DOUBLE"},
 	}},
-	{SaveField: "BibiteMouth", Table: "bibite_mouth", RowType: "BibiteMouthRow", Optional: false, Fields: []NormalizedFieldSpec{
+	{SaveField: "BibiteMouth", Table: "bibite_mouth", RowType: "BibiteMouthRow", Optional: false, SQLRefResolver: SQLRefResolverKind("bibite_path_map"), Fields: []NormalizedFieldSpec{
 		{Field: "SaveID", Column: "save_id", SQLType: "TEXT"},
 		{Field: "EntryName", Column: "entry_name", SQLType: "TEXT"},
 		{Field: "BodyID", Column: "body_id", SQLType: "BIGINT"},
@@ -358,14 +359,14 @@ var NormalizedTables = []NormalizedTableSpec{
 		{Field: "TotalDamageDealt", Column: "total_damage_dealt", SQLType: "DOUBLE"},
 		{Field: "TotalMurders", Column: "total_murders", SQLType: "DOUBLE"},
 	}},
-	{SaveField: "BibitePheromoneEmitters", Table: "bibite_pheromone_emitters", RowType: "BibitePheromoneEmitterRow", Optional: false, Fields: []NormalizedFieldSpec{
+	{SaveField: "BibitePheromoneEmitters", Table: "bibite_pheromone_emitters", RowType: "BibitePheromoneEmitterRow", Optional: false, SQLRefResolver: SQLRefResolverKind("bibite_path_map"), Fields: []NormalizedFieldSpec{
 		{Field: "SaveID", Column: "save_id", SQLType: "TEXT"},
 		{Field: "EntryName", Column: "entry_name", SQLType: "TEXT"},
 		{Field: "BodyID", Column: "body_id", SQLType: "BIGINT"},
 		{Field: "HasBodyID", Column: "has_body_id", SQLType: "BOOLEAN"},
 		{Field: "Progress", Column: "progress", SQLType: "DOUBLE"},
 	}},
-	{SaveField: "BibiteEggLayers", Table: "bibite_egg_layers", RowType: "BibiteEggLayerRow", Optional: false, Fields: []NormalizedFieldSpec{
+	{SaveField: "BibiteEggLayers", Table: "bibite_egg_layers", RowType: "BibiteEggLayerRow", Optional: false, SQLRefResolver: SQLRefResolverKind("bibite_path_map"), Fields: []NormalizedFieldSpec{
 		{Field: "SaveID", Column: "save_id", SQLType: "TEXT"},
 		{Field: "EntryName", Column: "entry_name", SQLType: "TEXT"},
 		{Field: "BodyID", Column: "body_id", SQLType: "BIGINT"},
@@ -373,14 +374,14 @@ var NormalizedTables = []NormalizedTableSpec{
 		{Field: "EggProgress", Column: "egg_progress", SQLType: "DOUBLE"},
 		{Field: "NEggsLaid", Column: "n_eggs_laid", SQLType: "DOUBLE"},
 	}},
-	{SaveField: "BibiteControl", Table: "bibite_control", RowType: "BibiteControlRow", Optional: false, Fields: []NormalizedFieldSpec{
+	{SaveField: "BibiteControl", Table: "bibite_control", RowType: "BibiteControlRow", Optional: false, SQLRefResolver: SQLRefResolverKind("bibite_path_map"), Fields: []NormalizedFieldSpec{
 		{Field: "SaveID", Column: "save_id", SQLType: "TEXT"},
 		{Field: "EntryName", Column: "entry_name", SQLType: "TEXT"},
 		{Field: "BodyID", Column: "body_id", SQLType: "BIGINT"},
 		{Field: "HasBodyID", Column: "has_body_id", SQLType: "BOOLEAN"},
 		{Field: "TotalTravel", Column: "total_travel", SQLType: "DOUBLE"},
 	}},
-	{SaveField: "BibiteStomachContents", Table: "bibite_stomach_contents", RowType: "StomachContentRow", Optional: false, Fields: []NormalizedFieldSpec{
+	{SaveField: "BibiteStomachContents", Table: "bibite_stomach_contents", RowType: "StomachContentRow", Optional: false, SQLRefResolver: SQLRefResolverKind("bibite_stomach_content_path_map"), Fields: []NormalizedFieldSpec{
 		{Field: "SaveID", Column: "save_id", SQLType: "TEXT"},
 		{Field: "EntryName", Column: "entry_name", SQLType: "TEXT"},
 		{Field: "BodyID", Column: "body_id", SQLType: "BIGINT"},
@@ -398,7 +399,7 @@ var NormalizedTables = []NormalizedTableSpec{
 		{Field: "ChildIndex", Column: "child_index", SQLType: "BIGINT"},
 		{Field: "ChildBodyID", Column: "child_body_id", SQLType: "BIGINT"},
 	}},
-	{SaveField: "BibiteBrainNodes", Table: "bibite_brain_nodes", RowType: "BrainNodeRow", Optional: false, Fields: []NormalizedFieldSpec{
+	{SaveField: "BibiteBrainNodes", Table: "bibite_brain_nodes", RowType: "BrainNodeRow", Optional: false, SQLRefResolver: SQLRefResolverKind("bibite_brain_node_path_map"), Fields: []NormalizedFieldSpec{
 		{Field: "SaveID", Column: "save_id", SQLType: "TEXT"},
 		{Field: "OwnerKind", Column: "owner_kind", SQLType: "TEXT"},
 		{Field: "OwnerID", Column: "owner_id", SQLType: "TEXT"},
@@ -415,7 +416,7 @@ var NormalizedTables = []NormalizedTableSpec{
 		{Field: "LastInput", Column: "last_input", SQLType: "DOUBLE"},
 		{Field: "LastOutput", Column: "last_output", SQLType: "DOUBLE"},
 	}},
-	{SaveField: "BibiteBrainSynapses", Table: "bibite_brain_synapses", RowType: "BrainSynapseRow", Optional: false, Fields: []NormalizedFieldSpec{
+	{SaveField: "BibiteBrainSynapses", Table: "bibite_brain_synapses", RowType: "BrainSynapseRow", Optional: false, SQLRefResolver: SQLRefResolverKind("bibite_brain_synapse_path_map"), Fields: []NormalizedFieldSpec{
 		{Field: "SaveID", Column: "save_id", SQLType: "TEXT"},
 		{Field: "OwnerKind", Column: "owner_kind", SQLType: "TEXT"},
 		{Field: "OwnerID", Column: "owner_id", SQLType: "TEXT"},
@@ -427,7 +428,7 @@ var NormalizedTables = []NormalizedTableSpec{
 		{Field: "Weight", Column: "weight", SQLType: "DOUBLE"},
 		{Field: "Enabled", Column: "enabled", SQLType: "BOOLEAN"},
 	}},
-	{SaveField: "Eggs", Table: "eggs", RowType: "EggRow", Optional: false, Fields: []NormalizedFieldSpec{
+	{SaveField: "Eggs", Table: "eggs", RowType: "EggRow", Optional: false, SQLRefResolver: SQLRefResolverKind("egg_path_map"), Fields: []NormalizedFieldSpec{
 		{Field: "SaveID", Column: "save_id", SQLType: "TEXT"},
 		{Field: "EntryName", Column: "entry_name", SQLType: "TEXT"},
 		{Field: "EggID", Column: "egg_id", SQLType: "BIGINT"},
@@ -446,7 +447,7 @@ var NormalizedTables = []NormalizedTableSpec{
 		{Field: "RB2DVY", Column: "rb2d_vy", SQLType: "DOUBLE"},
 		{Field: "RB2DR", Column: "rb2d_r", SQLType: "DOUBLE"},
 	}},
-	{SaveField: "EggGenes", Table: "egg_genes", RowType: "GeneRow", Optional: false, Fields: []NormalizedFieldSpec{
+	{SaveField: "EggGenes", Table: "egg_genes", RowType: "GeneRow", Optional: false, SQLRefResolver: SQLRefResolverKind("egg_gene_value"), Fields: []NormalizedFieldSpec{
 		{Field: "SaveID", Column: "save_id", SQLType: "TEXT"},
 		{Field: "OwnerKind", Column: "owner_kind", SQLType: "TEXT"},
 		{Field: "OwnerID", Column: "owner_id", SQLType: "TEXT"},
@@ -459,7 +460,7 @@ var NormalizedTables = []NormalizedTableSpec{
 		{Field: "StringValue", Column: "string_value", SQLType: "TEXT"},
 		{Field: "RawJSON", Column: "raw_json", SQLType: "TEXT"},
 	}},
-	{SaveField: "EggBrainNodes", Table: "egg_brain_nodes", RowType: "BrainNodeRow", Optional: false, Fields: []NormalizedFieldSpec{
+	{SaveField: "EggBrainNodes", Table: "egg_brain_nodes", RowType: "BrainNodeRow", Optional: false, SQLRefResolver: SQLRefResolverKind("egg_brain_node_path_map"), Fields: []NormalizedFieldSpec{
 		{Field: "SaveID", Column: "save_id", SQLType: "TEXT"},
 		{Field: "OwnerKind", Column: "owner_kind", SQLType: "TEXT"},
 		{Field: "OwnerID", Column: "owner_id", SQLType: "TEXT"},
@@ -476,7 +477,7 @@ var NormalizedTables = []NormalizedTableSpec{
 		{Field: "LastInput", Column: "last_input", SQLType: "DOUBLE"},
 		{Field: "LastOutput", Column: "last_output", SQLType: "DOUBLE"},
 	}},
-	{SaveField: "EggBrainSynapses", Table: "egg_brain_synapses", RowType: "BrainSynapseRow", Optional: false, Fields: []NormalizedFieldSpec{
+	{SaveField: "EggBrainSynapses", Table: "egg_brain_synapses", RowType: "BrainSynapseRow", Optional: false, SQLRefResolver: SQLRefResolverKind("egg_brain_synapse_path_map"), Fields: []NormalizedFieldSpec{
 		{Field: "SaveID", Column: "save_id", SQLType: "TEXT"},
 		{Field: "OwnerKind", Column: "owner_kind", SQLType: "TEXT"},
 		{Field: "OwnerID", Column: "owner_id", SQLType: "TEXT"},
@@ -495,7 +496,7 @@ var NormalizedTables = []NormalizedTableSpec{
 		{Field: "Zone", Column: "zone", SQLType: "TEXT"},
 		{Field: "PelletCount", Column: "pellet_count", SQLType: "BIGINT"},
 	}},
-	{SaveField: "Pellets", Table: "pellets", RowType: "PelletRow", Optional: false, Fields: []NormalizedFieldSpec{
+	{SaveField: "Pellets", Table: "pellets", RowType: "PelletRow", Optional: false, SQLRefResolver: SQLRefResolverKind("pellet_path_map"), Fields: []NormalizedFieldSpec{
 		{Field: "SaveID", Column: "save_id", SQLType: "TEXT"},
 		{Field: "EntryName", Column: "entry_name", SQLType: "TEXT"},
 		{Field: "PelletIndex", Column: "pellet_index", SQLType: "BIGINT"},
@@ -517,7 +518,7 @@ var NormalizedTables = []NormalizedTableSpec{
 		{Field: "RB2DVY", Column: "rb2d_vy", SQLType: "DOUBLE"},
 		{Field: "RB2DR", Column: "rb2d_r", SQLType: "DOUBLE"},
 	}},
-	{SaveField: "Pheromones", Table: "pheromones", RowType: "PheromoneRow", Optional: false, Fields: []NormalizedFieldSpec{
+	{SaveField: "Pheromones", Table: "pheromones", RowType: "PheromoneRow", Optional: false, SQLRefResolver: SQLRefResolverKind("pheromone_path_map"), Fields: []NormalizedFieldSpec{
 		{Field: "SaveID", Column: "save_id", SQLType: "TEXT"},
 		{Field: "EntryName", Column: "entry_name", SQLType: "TEXT"},
 		{Field: "PheromoneIndex", Column: "pheromone_index", SQLType: "BIGINT"},

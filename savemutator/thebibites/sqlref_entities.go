@@ -23,8 +23,14 @@ func pathMapResolver(paths map[string]string, targetResolver sqlRefTargetResolve
 	}
 }
 
-func resolveBibiteStomachColumn(ref SQLValueRef) (Target, string, error) {
-	field, err := sqlRefColumnValue(ref, bibiteStomachContentColumnFields)
+func bibiteStomachColumnResolver(columns map[string]string) sqlRefResolver {
+	return func(ref SQLValueRef) (Target, string, error) {
+		return resolveBibiteStomachColumn(ref, columns)
+	}
+}
+
+func resolveBibiteStomachColumn(ref SQLValueRef, columns map[string]string) (Target, string, error) {
+	field, err := sqlRefColumnValue(ref, columns)
 	if err != nil {
 		return Target{}, "", err
 	}
@@ -38,11 +44,9 @@ func resolveBibiteStomachColumn(ref SQLValueRef) (Target, string, error) {
 	return target, fmt.Sprintf("body.stomach.content[%d].%s", ref.ContentIndex, field), nil
 }
 
-func resolveGeneColumn(ref SQLValueRef, kind tb.EntryKind) (Target, string, error) {
-	switch ref.Column {
-	case "number_value", "bool_value", "string_value":
-	default:
-		return Target{}, "", unsupportedSQLValueRef(ref)
+func resolveGeneColumn(ref SQLValueRef, kind tb.EntryKind, columns map[string]string) (Target, string, error) {
+	if _, err := sqlRefColumnValue(ref, columns); err != nil {
+		return Target{}, "", err
 	}
 	if err := requireSQLRefString(ref, ref.Path, "path"); err != nil {
 		return Target{}, "", err
@@ -66,12 +70,16 @@ func resolveGeneColumn(ref SQLValueRef, kind tb.EntryKind) (Target, string, erro
 	}
 }
 
-func resolveEntityBrainNodeColumn(ref SQLValueRef, kind tb.EntryKind) (Target, string, error) {
-	return resolveEntityBrainIndexedColumn(ref, kind, brainNodeColumnKeys, ref.NodeRowIndex, ref.HasNodeRowIndex, "node_row_index", "brain.Nodes")
+func brainNodeColumnResolver(kind tb.EntryKind, columns map[string]string) sqlRefResolver {
+	return func(ref SQLValueRef) (Target, string, error) {
+		return resolveEntityBrainIndexedColumn(ref, kind, columns, ref.NodeRowIndex, ref.HasNodeRowIndex, "node_row_index", "brain.Nodes")
+	}
 }
 
-func resolveEntityBrainSynapseColumn(ref SQLValueRef, kind tb.EntryKind) (Target, string, error) {
-	return resolveEntityBrainIndexedColumn(ref, kind, brainSynapseColumnKeys, ref.SynapseRowIndex, ref.HasSynapseRowIndex, "synapse_row_index", "brain.Synapses")
+func brainSynapseColumnResolver(kind tb.EntryKind, columns map[string]string) sqlRefResolver {
+	return func(ref SQLValueRef) (Target, string, error) {
+		return resolveEntityBrainIndexedColumn(ref, kind, columns, ref.SynapseRowIndex, ref.HasSynapseRowIndex, "synapse_row_index", "brain.Synapses")
+	}
 }
 
 func resolveEntityBrainIndexedColumn(ref SQLValueRef, kind tb.EntryKind, columns map[string]string, index int, hasIndex bool, indexField, pathPrefix string) (Target, string, error) {
@@ -89,8 +97,14 @@ func resolveEntityBrainIndexedColumn(ref SQLValueRef, kind tb.EntryKind, columns
 	return target, fmt.Sprintf("%s[%d].%s", pathPrefix, index, key), nil
 }
 
-func resolvePelletColumn(ref SQLValueRef) (Target, string, error) {
-	field, err := sqlRefColumnValue(ref, pelletColumnPaths)
+func pelletColumnResolver(columns map[string]string) sqlRefResolver {
+	return func(ref SQLValueRef) (Target, string, error) {
+		return resolvePelletColumn(ref, columns)
+	}
+}
+
+func resolvePelletColumn(ref SQLValueRef, columns map[string]string) (Target, string, error) {
+	field, err := sqlRefColumnValue(ref, columns)
 	if err != nil {
 		return Target{}, "", err
 	}
@@ -111,8 +125,14 @@ func resolvePelletColumn(ref SQLValueRef) (Target, string, error) {
 	return EntryTarget(ref.EntryName, tb.EntryPellets, guards...), path, nil
 }
 
-func resolvePheromoneColumn(ref SQLValueRef) (Target, string, error) {
-	field, err := sqlRefColumnValue(ref, pheromoneColumnPaths)
+func pheromoneColumnResolver(columns map[string]string) sqlRefResolver {
+	return func(ref SQLValueRef) (Target, string, error) {
+		return resolvePheromoneColumn(ref, columns)
+	}
+}
+
+func resolvePheromoneColumn(ref SQLValueRef, columns map[string]string) (Target, string, error) {
+	field, err := sqlRefColumnValue(ref, columns)
 	if err != nil {
 		return Target{}, "", err
 	}

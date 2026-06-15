@@ -15,18 +15,20 @@ import (
 )
 
 type tableSpec struct {
-	SaveField string
-	Table     string
-	RowType   string
-	Optional  bool
-	Fields    []field
+	SaveField      string
+	Table          string
+	RowType        string
+	Optional       bool
+	SQLRefResolver string
+	Fields         []field
 }
 
 type field struct {
-	Field      string
-	Column     string
-	SQLType    string
-	SQLRefPath string
+	Field           string
+	Column          string
+	SQLType         string
+	SQLRefPath      string
+	SQLRefValueType string
 }
 
 type rowField struct {
@@ -139,6 +141,10 @@ func parseNormalizedTables(path string) ([]tableSpec, error) {
 		if tableName == "" {
 			return nil, fmt.Errorf("ExtractedSave.%s is missing dbtable tag", astField.Names[0].Name)
 		}
+		sqlRefResolver := sqlRefResolverFromTag(astField.Tag)
+		if err := validateSQLRefResolver(sqlRefResolver); err != nil {
+			return nil, fmt.Errorf("ExtractedSave.%s: %w", astField.Names[0].Name, err)
+		}
 		rowType, optional, err := extractedRowType(astField.Type)
 		if err != nil {
 			return nil, fmt.Errorf("ExtractedSave.%s: %w", astField.Names[0].Name, err)
@@ -148,22 +154,32 @@ func parseNormalizedTables(path string) ([]tableSpec, error) {
 			return nil, fmt.Errorf("table %s: %w", tableName, err)
 		}
 		table := tableSpec{
-			SaveField: astField.Names[0].Name,
-			Table:     tableName,
-			RowType:   rowType,
-			Optional:  optional,
-			Fields:    make([]field, 0, len(rowFields)),
+			SaveField:      astField.Names[0].Name,
+			Table:          tableName,
+			RowType:        rowType,
+			Optional:       optional,
+			SQLRefResolver: sqlRefResolver,
+			Fields:         make([]field, 0, len(rowFields)),
 		}
 		for _, rf := range rowFields {
 			sqlType, err := sqlType(rf.Type)
 			if err != nil {
 				return nil, fmt.Errorf("%s.%s: %w", rowType, rf.Name, err)
 			}
+			sqlRefPath := sqlRefPathFromTag(rf.Tag)
+			sqlRefValueType := sqlRefValueTypeFromTag(rf.Tag)
+			if sqlRefPath != "" && sqlRefValueType != "" {
+				return nil, fmt.Errorf("%s.%s cannot have both sqlref and sqlrefvalue tags", rowType, rf.Name)
+			}
+			if err := validateSQLRefValueType(sqlRefValueType); err != nil {
+				return nil, fmt.Errorf("%s.%s: %w", rowType, rf.Name, err)
+			}
 			table.Fields = append(table.Fields, field{
-				Field:      rf.Name,
-				Column:     columnName(rowType, rf.Name),
-				SQLType:    sqlType,
-				SQLRefPath: sqlRefPathFromTag(rf.Tag),
+				Field:           rf.Name,
+				Column:          columnName(rowType, rf.Name),
+				SQLType:         sqlType,
+				SQLRefPath:      sqlRefPath,
+				SQLRefValueType: sqlRefValueType,
 			})
 		}
 
@@ -254,11 +270,68 @@ func tableNameFromTag(tag *ast.BasicLit) string {
 	return reflect.StructTag(strings.Trim(tag.Value, "`")).Get("dbtable")
 }
 
+func sqlRefResolverFromTag(tag *ast.BasicLit) string {
+	if tag == nil {
+		return ""
+	}
+	return reflect.StructTag(strings.Trim(tag.Value, "`")).Get("sqlrefresolver")
+}
+
+var knownSQLRefResolvers = map[string]bool{
+	"bibite_path_map":                 true,
+	"egg_path_map":                    true,
+	"bibite_stomach_content_path_map": true,
+	"bibite_brain_node_path_map":      true,
+	"bibite_brain_synapse_path_map":   true,
+	"egg_brain_node_path_map":         true,
+	"egg_brain_synapse_path_map":      true,
+	"pellet_path_map":                 true,
+	"pheromone_path_map":              true,
+	"settings_zone_path_map":          true,
+	"bibite_gene_value":               true,
+	"egg_gene_value":                  true,
+	"settings_value":                  true,
+	"settings_changer_target":         true,
+}
+
+func validateSQLRefResolver(resolver string) error {
+	if resolver == "" {
+		return nil
+	}
+	if knownSQLRefResolvers[resolver] {
+		return nil
+	}
+	return fmt.Errorf("unknown sqlrefresolver %q", resolver)
+}
+
 func sqlRefPathFromTag(tag *ast.BasicLit) string {
 	if tag == nil {
 		return ""
 	}
 	return reflect.StructTag(strings.Trim(tag.Value, "`")).Get("sqlref")
+}
+
+func sqlRefValueTypeFromTag(tag *ast.BasicLit) string {
+	if tag == nil {
+		return ""
+	}
+	return reflect.StructTag(strings.Trim(tag.Value, "`")).Get("sqlrefvalue")
+}
+
+var knownSQLRefValueTypes = map[string]bool{
+	"number": true,
+	"string": true,
+	"bool":   true,
+}
+
+func validateSQLRefValueType(valueType string) error {
+	if valueType == "" {
+		return nil
+	}
+	if knownSQLRefValueTypes[valueType] {
+		return nil
+	}
+	return fmt.Errorf("unknown sqlrefvalue %q", valueType)
 }
 
 func extractedRowType(expr ast.Expr) (string, bool, error) {
@@ -403,6 +476,7 @@ func renderParserMetadata(tables []tableSpec) []byte {
 	b.WriteString("\tTable string\n")
 	b.WriteString("\tRowType string\n")
 	b.WriteString("\tOptional bool\n")
+	b.WriteString("\tSQLRefResolver SQLRefResolverKind\n")
 	b.WriteString("\tFields []NormalizedFieldSpec\n")
 	b.WriteString("}\n\n")
 	b.WriteString("type NormalizedFieldSpec struct {\n")
@@ -412,7 +486,11 @@ func renderParserMetadata(tables []tableSpec) []byte {
 	b.WriteString("}\n\n")
 	b.WriteString("var NormalizedTables = []NormalizedTableSpec{\n")
 	for _, table := range tables {
-		fmt.Fprintf(&b, "\t{SaveField: %q, Table: %q, RowType: %q, Optional: %t, Fields: []NormalizedFieldSpec{\n", table.SaveField, table.Table, table.RowType, table.Optional)
+		fmt.Fprintf(&b, "\t{SaveField: %q, Table: %q, RowType: %q, Optional: %t", table.SaveField, table.Table, table.RowType, table.Optional)
+		if table.SQLRefResolver != "" {
+			fmt.Fprintf(&b, ", SQLRefResolver: SQLRefResolverKind(%q)", table.SQLRefResolver)
+		}
+		b.WriteString(", Fields: []NormalizedFieldSpec{\n")
 		for _, field := range table.Fields {
 			fmt.Fprintf(&b, "\t\t{Field: %q, Column: %q, SQLType: %q},\n", field.Field, field.Column, field.SQLType)
 		}
@@ -443,6 +521,23 @@ var sqlRefPathMapSpecs = []sqlRefPathMapSpec{
 	{RowType: "SettingsZoneRow", VarName: "settingsZoneColumnPaths"},
 }
 
+type sqlRefValueMapSpec struct {
+	RowType string
+	VarName string
+}
+
+var sqlRefValueMapSpecs = []sqlRefValueMapSpec{
+	{RowType: "GeneRow", VarName: "geneValueColumnTypes"},
+	{RowType: "SettingValueRow", VarName: "settingsValueColumnTypes"},
+	{RowType: "SettingsChangerTargetRow", VarName: "settingsChangerTargetColumns"},
+}
+
+type generatedWritableSQLRefTableSpec struct {
+	Table    string
+	MapVar   string
+	Resolver string
+}
+
 func renderSQLRefCatalog(tables []tableSpec) ([]byte, error) {
 	fieldsByRow := make(map[string][]field, len(tables))
 	for _, table := range tables {
@@ -457,6 +552,13 @@ func renderSQLRefCatalog(tables []tableSpec) ([]byte, error) {
 		}
 		generatedRows[spec.RowType] = spec.VarName
 	}
+	generatedValueRows := make(map[string]string, len(sqlRefValueMapSpecs))
+	for _, spec := range sqlRefValueMapSpecs {
+		if existing, ok := generatedValueRows[spec.RowType]; ok {
+			return nil, fmt.Errorf("sqlref value row type %s is configured for both %s and %s", spec.RowType, existing, spec.VarName)
+		}
+		generatedValueRows[spec.RowType] = spec.VarName
+	}
 	for _, table := range tables {
 		if _, ok := generatedRows[table.RowType]; ok {
 			continue
@@ -467,10 +569,41 @@ func renderSQLRefCatalog(tables []tableSpec) ([]byte, error) {
 			}
 		}
 	}
+	for _, table := range tables {
+		if _, ok := generatedValueRows[table.RowType]; ok {
+			continue
+		}
+		for _, field := range table.Fields {
+			if field.SQLRefValueType != "" {
+				return nil, fmt.Errorf("%s.%s has sqlrefvalue tag but row type %s has no generated sqlref value map", table.RowType, field.Field, table.RowType)
+			}
+		}
+	}
+	writableTables := make([]generatedWritableSQLRefTableSpec, 0)
+	for _, table := range tables {
+		if table.SQLRefResolver == "" {
+			continue
+		}
+		mapVar, ok := generatedRows[table.RowType]
+		if !ok {
+			mapVar, ok = generatedValueRows[table.RowType]
+		}
+		if !ok {
+			return nil, fmt.Errorf("table %s (%s) has sqlrefresolver %q but no generated sqlref map or value map", table.Table, table.RowType, table.SQLRefResolver)
+		}
+		writableTables = append(writableTables, generatedWritableSQLRefTableSpec{
+			Table:    table.Table,
+			MapVar:   mapVar,
+			Resolver: table.SQLRefResolver,
+		})
+	}
 
 	var b bytes.Buffer
 	b.WriteString("// Code generated by go generate ./saveparser/thebibites; DO NOT EDIT.\n\n")
 	b.WriteString("package thebibites\n\n")
+	if len(writableTables) > 0 {
+		b.WriteString("import tb \"github.com/asemones/bibicontrol/saveparser/thebibites\"\n\n")
+	}
 	for _, spec := range sqlRefPathMapSpecs {
 		fields, ok := fieldsByRow[spec.RowType]
 		if !ok {
@@ -491,6 +624,31 @@ func renderSQLRefCatalog(tables []tableSpec) ([]byte, error) {
 		}
 		b.WriteString("}\n\n")
 	}
+	for _, spec := range sqlRefValueMapSpecs {
+		fields, ok := fieldsByRow[spec.RowType]
+		if !ok {
+			return nil, fmt.Errorf("sqlref value map %s references unknown row type %s", spec.VarName, spec.RowType)
+		}
+		tagged := make([]field, 0, len(fields))
+		for _, field := range fields {
+			if field.SQLRefValueType != "" {
+				tagged = append(tagged, field)
+			}
+		}
+		if len(tagged) == 0 {
+			return nil, fmt.Errorf("sqlref value map %s (%s) has no sqlrefvalue-tagged fields", spec.VarName, spec.RowType)
+		}
+		fmt.Fprintf(&b, "var %s = map[string]string{\n", spec.VarName)
+		for _, field := range tagged {
+			fmt.Fprintf(&b, "\t%q: %q,\n", field.Column, field.SQLRefValueType)
+		}
+		b.WriteString("}\n\n")
+	}
+	b.WriteString("var generatedWritableSQLRefTables = []sqlRefTableSpec{\n")
+	for _, spec := range writableTables {
+		fmt.Fprintf(&b, "\tgeneratedSQLRefTable(%q, %s, tb.SQLRefResolverKind(%q)),\n", spec.Table, spec.MapVar, spec.Resolver)
+	}
+	b.WriteString("}\n")
 	return b.Bytes(), nil
 }
 

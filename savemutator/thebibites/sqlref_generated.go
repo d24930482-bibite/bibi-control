@@ -2,6 +2,8 @@
 
 package thebibites
 
+import tb "github.com/asemones/bibicontrol/saveparser/thebibites"
+
 var bibiteColumnPaths = map[string]string{
 	"species_id":           "genes.speciesID",
 	"generation":           "genes.gen",
@@ -131,4 +133,45 @@ var settingsZoneColumnPaths = map[string]string{
 	"name":         "name",
 	"material":     "material",
 	"distribution": "distribution",
+}
+
+var geneValueColumnTypes = map[string]string{
+	"number_value": "number",
+	"bool_value":   "bool",
+	"string_value": "string",
+}
+
+var settingsValueColumnTypes = map[string]string{
+	"number_value": "number",
+	"string_value": "string",
+	"bool_value":   "bool",
+}
+
+var settingsChangerTargetColumns = map[string]string{
+	"number_value": "number",
+}
+
+var generatedWritableSQLRefTables = []sqlRefTableSpec{
+	generatedSQLRefTable("settings_simulation_values", settingsValueColumnTypes, tb.SQLRefResolverKind("settings_value")),
+	generatedSQLRefTable("settings_independent_values", settingsValueColumnTypes, tb.SQLRefResolverKind("settings_value")),
+	generatedSQLRefTable("settings_material_values", settingsValueColumnTypes, tb.SQLRefResolverKind("settings_value")),
+	generatedSQLRefTable("settings_zones", settingsZoneColumnPaths, tb.SQLRefResolverKind("settings_zone_path_map")),
+	generatedSQLRefTable("settings_zone_values", settingsValueColumnTypes, tb.SQLRefResolverKind("settings_value")),
+	generatedSQLRefTable("settings_changer_targets", settingsChangerTargetColumns, tb.SQLRefResolverKind("settings_changer_target")),
+	generatedSQLRefTable("bibites", bibiteColumnPaths, tb.SQLRefResolverKind("bibite_path_map")),
+	generatedSQLRefTable("bibite_genes", geneValueColumnTypes, tb.SQLRefResolverKind("bibite_gene_value")),
+	generatedSQLRefTable("bibite_body", bibiteBodyColumnPaths, tb.SQLRefResolverKind("bibite_path_map")),
+	generatedSQLRefTable("bibite_mouth", bibiteMouthColumnPaths, tb.SQLRefResolverKind("bibite_path_map")),
+	generatedSQLRefTable("bibite_pheromone_emitters", bibitePheromoneColumnPaths, tb.SQLRefResolverKind("bibite_path_map")),
+	generatedSQLRefTable("bibite_egg_layers", bibiteEggLayerColumnPaths, tb.SQLRefResolverKind("bibite_path_map")),
+	generatedSQLRefTable("bibite_control", bibiteControlColumnPaths, tb.SQLRefResolverKind("bibite_path_map")),
+	generatedSQLRefTable("bibite_stomach_contents", bibiteStomachContentColumnFields, tb.SQLRefResolverKind("bibite_stomach_content_path_map")),
+	generatedSQLRefTable("bibite_brain_nodes", brainNodeColumnKeys, tb.SQLRefResolverKind("bibite_brain_node_path_map")),
+	generatedSQLRefTable("bibite_brain_synapses", brainSynapseColumnKeys, tb.SQLRefResolverKind("bibite_brain_synapse_path_map")),
+	generatedSQLRefTable("eggs", eggColumnPaths, tb.SQLRefResolverKind("egg_path_map")),
+	generatedSQLRefTable("egg_genes", geneValueColumnTypes, tb.SQLRefResolverKind("egg_gene_value")),
+	generatedSQLRefTable("egg_brain_nodes", brainNodeColumnKeys, tb.SQLRefResolverKind("egg_brain_node_path_map")),
+	generatedSQLRefTable("egg_brain_synapses", brainSynapseColumnKeys, tb.SQLRefResolverKind("egg_brain_synapse_path_map")),
+	generatedSQLRefTable("pellets", pelletColumnPaths, tb.SQLRefResolverKind("pellet_path_map")),
+	generatedSQLRefTable("pheromones", pheromoneColumnPaths, tb.SQLRefResolverKind("pheromone_path_map")),
 }

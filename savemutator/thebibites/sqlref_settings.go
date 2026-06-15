@@ -9,9 +9,15 @@ import (
 	tb "github.com/asemones/bibicontrol/saveparser/thebibites"
 )
 
-func resolveSettingsValueColumn(ref SQLValueRef) (Target, string, error) {
-	wantType, ok := settingsValueColumnTypes[ref.Column]
-	if !ok {
+func settingsValueColumnResolver(columns map[string]string) sqlRefResolver {
+	return func(ref SQLValueRef) (Target, string, error) {
+		return resolveSettingsValueColumn(ref, columns)
+	}
+}
+
+func resolveSettingsValueColumn(ref SQLValueRef, columns map[string]string) (Target, string, error) {
+	wantType, err := sqlRefColumnValue(ref, columns)
+	if err != nil {
 		return Target{}, "", unsupportedSQLValueRef(ref)
 	}
 	if err := requireSQLRefString(ref, ref.EntryName, "entry_name"); err != nil {
@@ -114,8 +120,15 @@ func settingsScopedValueArchivePath(ref SQLValueRef, ownerKind, ownerID, sqlPath
 	return archivePathPrefix + ref.SettingName, nil
 }
 
-func resolveSettingsChangerTargetColumn(ref SQLValueRef) (Target, string, error) {
-	if ref.Column != "number_value" {
+func settingsChangerTargetColumnResolver(columns map[string]string) sqlRefResolver {
+	return func(ref SQLValueRef) (Target, string, error) {
+		return resolveSettingsChangerTargetColumn(ref, columns)
+	}
+}
+
+func resolveSettingsChangerTargetColumn(ref SQLValueRef, columns map[string]string) (Target, string, error) {
+	wantType, err := sqlRefColumnValue(ref, columns)
+	if err != nil {
 		return Target{}, "", unsupportedSQLValueRef(ref)
 	}
 	if err := requireSQLRefString(ref, ref.EntryName, "entry_name"); err != nil {
@@ -136,7 +149,7 @@ func resolveSettingsChangerTargetColumn(ref SQLValueRef) (Target, string, error)
 	if err := requireSQLRefString(ref, ref.SettingName, "setting_name"); err != nil {
 		return Target{}, "", err
 	}
-	if err := requireSQLRefValueType(ref, string(tb.ScalarNumber)); err != nil {
+	if err := requireSQLRefValueType(ref, wantType); err != nil {
 		return Target{}, "", err
 	}
 
@@ -189,8 +202,14 @@ func safeSettingsPathSegment(segment string) bool {
 	return segment != "" && !strings.ContainsAny(segment, ".[]")
 }
 
-func resolveSettingsZoneColumn(ref SQLValueRef) (Target, string, error) {
-	field, err := sqlRefColumnValue(ref, settingsZoneColumnPaths)
+func settingsZoneColumnResolver(columns map[string]string) sqlRefResolver {
+	return func(ref SQLValueRef) (Target, string, error) {
+		return resolveSettingsZoneColumn(ref, columns)
+	}
+}
+
+func resolveSettingsZoneColumn(ref SQLValueRef, columns map[string]string) (Target, string, error) {
+	field, err := sqlRefColumnValue(ref, columns)
 	if err != nil {
 		return Target{}, "", err
 	}

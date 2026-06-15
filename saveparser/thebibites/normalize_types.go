@@ -2,6 +2,28 @@ package thebibites
 
 //go:generate go run ../../cmd/gen_thebibites_schema
 
+// SQLRefResolverKind declares how a normalized table can be resolved back to an
+// archive mutation target. It is intentionally a small shape vocabulary; the
+// mutator owns the semantics for each shape.
+type SQLRefResolverKind string
+
+const (
+	SQLRefResolverBibitePathMap               SQLRefResolverKind = "bibite_path_map"
+	SQLRefResolverEggPathMap                  SQLRefResolverKind = "egg_path_map"
+	SQLRefResolverBibiteStomachContentPathMap SQLRefResolverKind = "bibite_stomach_content_path_map"
+	SQLRefResolverBibiteBrainNodePathMap      SQLRefResolverKind = "bibite_brain_node_path_map"
+	SQLRefResolverBibiteBrainSynapsePathMap   SQLRefResolverKind = "bibite_brain_synapse_path_map"
+	SQLRefResolverEggBrainNodePathMap         SQLRefResolverKind = "egg_brain_node_path_map"
+	SQLRefResolverEggBrainSynapsePathMap      SQLRefResolverKind = "egg_brain_synapse_path_map"
+	SQLRefResolverPelletPathMap               SQLRefResolverKind = "pellet_path_map"
+	SQLRefResolverPheromonePathMap            SQLRefResolverKind = "pheromone_path_map"
+	SQLRefResolverSettingsZonePathMap         SQLRefResolverKind = "settings_zone_path_map"
+	SQLRefResolverBibiteGeneValue             SQLRefResolverKind = "bibite_gene_value"
+	SQLRefResolverEggGeneValue                SQLRefResolverKind = "egg_gene_value"
+	SQLRefResolverSettingsValue               SQLRefResolverKind = "settings_value"
+	SQLRefResolverSettingsChangerTarget       SQLRefResolverKind = "settings_changer_target"
+)
+
 type ExtractedSave struct {
 	Archive     SaveArchiveRow  `dbtable:"save_archives"`
 	Entries     []SaveEntryRow  `dbtable:"save_entries"`
@@ -13,18 +35,18 @@ type ExtractedSave struct {
 	ScenePheroTowers    []SceneTowerRow         `dbtable:"scene_phero_towers"`
 	SceneRadTowers      []SceneTowerRow         `dbtable:"scene_rad_towers"`
 
-	SettingsSimulationValues  []SettingValueRow          `dbtable:"settings_simulation_values"`
-	SettingsIndependentValues []SettingValueRow          `dbtable:"settings_independent_values"`
+	SettingsSimulationValues  []SettingValueRow          `dbtable:"settings_simulation_values" sqlrefresolver:"settings_value"`
+	SettingsIndependentValues []SettingValueRow          `dbtable:"settings_independent_values" sqlrefresolver:"settings_value"`
 	SettingsMaterials         []SettingsMaterialRow      `dbtable:"settings_materials"`
-	SettingsMaterialValues    []SettingValueRow          `dbtable:"settings_material_values"`
-	SettingsZones             []SettingsZoneRow          `dbtable:"settings_zones"`
+	SettingsMaterialValues    []SettingValueRow          `dbtable:"settings_material_values" sqlrefresolver:"settings_value"`
+	SettingsZones             []SettingsZoneRow          `dbtable:"settings_zones" sqlrefresolver:"settings_zone_path_map"`
 	SettingsZoneGeometry      []SettingsZoneGeometryRow  `dbtable:"settings_zone_geometry"`
-	SettingsZoneValues        []SettingValueRow          `dbtable:"settings_zone_values"`
+	SettingsZoneValues        []SettingValueRow          `dbtable:"settings_zone_values" sqlrefresolver:"settings_value"`
 	SettingsZoneGroups        []SettingsZoneGroupRow     `dbtable:"settings_zone_groups"`
 	SettingsBibiteSpawners    []SettingsBibiteSpawnerRow `dbtable:"settings_bibite_spawners"`
 	SettingsChangers          []SettingsChangerRow       `dbtable:"settings_changers"`
 	SettingsChangerPoints     []SettingsChangerPointRow  `dbtable:"settings_changer_points"`
-	SettingsChangerTargets    []SettingsChangerTargetRow `dbtable:"settings_changer_targets"`
+	SettingsChangerTargets    []SettingsChangerTargetRow `dbtable:"settings_changer_targets" sqlrefresolver:"settings_changer_target"`
 
 	ActiveSpecies        []ActiveSpeciesRow `dbtable:"active_species"`
 	Species              []SpeciesRow       `dbtable:"species"`
@@ -32,26 +54,26 @@ type ExtractedSave struct {
 	SpeciesBrainNodes    []BrainNodeRow     `dbtable:"species_brain_nodes"`
 	SpeciesBrainSynapses []BrainSynapseRow  `dbtable:"species_brain_synapses"`
 
-	Bibites                 []BibiteRow                 `dbtable:"bibites"`
-	BibiteGenes             []GeneRow                   `dbtable:"bibite_genes"`
-	BibiteBody              []BibiteBodyRow             `dbtable:"bibite_body"`
-	BibiteMouth             []BibiteMouthRow            `dbtable:"bibite_mouth"`
-	BibitePheromoneEmitters []BibitePheromoneEmitterRow `dbtable:"bibite_pheromone_emitters"`
-	BibiteEggLayers         []BibiteEggLayerRow         `dbtable:"bibite_egg_layers"`
-	BibiteControl           []BibiteControlRow          `dbtable:"bibite_control"`
-	BibiteStomachContents   []StomachContentRow         `dbtable:"bibite_stomach_contents"`
+	Bibites                 []BibiteRow                 `dbtable:"bibites" sqlrefresolver:"bibite_path_map"`
+	BibiteGenes             []GeneRow                   `dbtable:"bibite_genes" sqlrefresolver:"bibite_gene_value"`
+	BibiteBody              []BibiteBodyRow             `dbtable:"bibite_body" sqlrefresolver:"bibite_path_map"`
+	BibiteMouth             []BibiteMouthRow            `dbtable:"bibite_mouth" sqlrefresolver:"bibite_path_map"`
+	BibitePheromoneEmitters []BibitePheromoneEmitterRow `dbtable:"bibite_pheromone_emitters" sqlrefresolver:"bibite_path_map"`
+	BibiteEggLayers         []BibiteEggLayerRow         `dbtable:"bibite_egg_layers" sqlrefresolver:"bibite_path_map"`
+	BibiteControl           []BibiteControlRow          `dbtable:"bibite_control" sqlrefresolver:"bibite_path_map"`
+	BibiteStomachContents   []StomachContentRow         `dbtable:"bibite_stomach_contents" sqlrefresolver:"bibite_stomach_content_path_map"`
 	BibiteChildren          []BibiteChildRow            `dbtable:"bibite_children"`
-	BibiteBrainNodes        []BrainNodeRow              `dbtable:"bibite_brain_nodes"`
-	BibiteBrainSynapses     []BrainSynapseRow           `dbtable:"bibite_brain_synapses"`
+	BibiteBrainNodes        []BrainNodeRow              `dbtable:"bibite_brain_nodes" sqlrefresolver:"bibite_brain_node_path_map"`
+	BibiteBrainSynapses     []BrainSynapseRow           `dbtable:"bibite_brain_synapses" sqlrefresolver:"bibite_brain_synapse_path_map"`
 
-	Eggs             []EggRow          `dbtable:"eggs"`
-	EggGenes         []GeneRow         `dbtable:"egg_genes"`
-	EggBrainNodes    []BrainNodeRow    `dbtable:"egg_brain_nodes"`
-	EggBrainSynapses []BrainSynapseRow `dbtable:"egg_brain_synapses"`
+	Eggs             []EggRow          `dbtable:"eggs" sqlrefresolver:"egg_path_map"`
+	EggGenes         []GeneRow         `dbtable:"egg_genes" sqlrefresolver:"egg_gene_value"`
+	EggBrainNodes    []BrainNodeRow    `dbtable:"egg_brain_nodes" sqlrefresolver:"egg_brain_node_path_map"`
+	EggBrainSynapses []BrainSynapseRow `dbtable:"egg_brain_synapses" sqlrefresolver:"egg_brain_synapse_path_map"`
 
 	PelletGroups []PelletGroupRow `dbtable:"pellet_groups"`
-	Pellets      []PelletRow      `dbtable:"pellets"`
-	Pheromones   []PheromoneRow   `dbtable:"pheromones"`
+	Pellets      []PelletRow      `dbtable:"pellets" sqlrefresolver:"pellet_path_map"`
+	Pheromones   []PheromoneRow   `dbtable:"pheromones" sqlrefresolver:"pheromone_path_map"`
 
 	JSONScalars []ScalarRow `dbtable:"json_scalars"`
 }
@@ -132,9 +154,9 @@ type SettingValueRow struct {
 	SettingName    string
 	Path           string
 	Type           ScalarType
-	NumberValue    float64
-	StringValue    string
-	BoolValue      bool
+	NumberValue    float64 `sqlrefvalue:"number"`
+	StringValue    string  `sqlrefvalue:"string"`
+	BoolValue      bool    `sqlrefvalue:"bool"`
 	RawJSON        string
 	WrapperRawJSON string
 }
@@ -229,7 +251,7 @@ type SettingsChangerTargetRow struct {
 	HasZoneID    bool
 	SettingName  string
 	Type         ScalarType
-	NumberValue  float64
+	NumberValue  float64 `sqlrefvalue:"number"`
 	StringValue  string
 	BoolValue    bool
 	RawJSON      string
@@ -267,9 +289,9 @@ type GeneRow struct {
 	GeneName    string
 	Path        string
 	Type        ScalarType
-	NumberValue float64
-	BoolValue   bool
-	StringValue string
+	NumberValue float64 `sqlrefvalue:"number"`
+	BoolValue   bool    `sqlrefvalue:"bool"`
+	StringValue string  `sqlrefvalue:"string"`
 	RawJSON     string
 }
 

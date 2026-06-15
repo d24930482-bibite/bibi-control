@@ -7,16 +7,6 @@ import (
 	tb "github.com/asemones/bibicontrol/saveparser/thebibites"
 )
 
-var settingsValueColumnTypes = map[string]string{
-	"number_value": string(tb.ScalarNumber),
-	"string_value": string(tb.ScalarString),
-	"bool_value":   string(tb.ScalarBool),
-}
-
-var settingsChangerTargetColumns = map[string]string{
-	"number_value": string(tb.ScalarNumber),
-}
-
 type sqlRefResolver func(SQLValueRef) (Target, string, error)
 
 type sqlRefTableSpec struct {
@@ -25,50 +15,50 @@ type sqlRefTableSpec struct {
 	resolve sqlRefResolver
 }
 
-var writableSQLRefTables = []sqlRefTableSpec{
-	pathMapSQLRefTable("bibites", bibiteColumnPaths, bibiteTargetFromSQLRef),
-	pathMapSQLRefTable("bibite_body", bibiteBodyColumnPaths, bibiteTargetFromSQLRef),
-	pathMapSQLRefTable("bibite_mouth", bibiteMouthColumnPaths, bibiteTargetFromSQLRef),
-	pathMapSQLRefTable("bibite_pheromone_emitters", bibitePheromoneColumnPaths, bibiteTargetFromSQLRef),
-	pathMapSQLRefTable("bibite_egg_layers", bibiteEggLayerColumnPaths, bibiteTargetFromSQLRef),
-	pathMapSQLRefTable("bibite_control", bibiteControlColumnPaths, bibiteTargetFromSQLRef),
-	{table: "bibite_stomach_contents", columns: bibiteStomachContentColumnFields, resolve: resolveBibiteStomachColumn},
-	{table: "bibite_genes", columns: settingsValueColumnTypes, resolve: geneColumnResolver(tb.EntryBibite)},
-	{table: "bibite_brain_nodes", columns: brainNodeColumnKeys, resolve: brainNodeColumnResolver(tb.EntryBibite)},
-	{table: "bibite_brain_synapses", columns: brainSynapseColumnKeys, resolve: brainSynapseColumnResolver(tb.EntryBibite)},
-	pathMapSQLRefTable("eggs", eggColumnPaths, eggTargetFromSQLRef),
-	{table: "egg_genes", columns: settingsValueColumnTypes, resolve: geneColumnResolver(tb.EntryEgg)},
-	{table: "egg_brain_nodes", columns: brainNodeColumnKeys, resolve: brainNodeColumnResolver(tb.EntryEgg)},
-	{table: "egg_brain_synapses", columns: brainSynapseColumnKeys, resolve: brainSynapseColumnResolver(tb.EntryEgg)},
-	{table: "pellets", columns: pelletColumnPaths, resolve: resolvePelletColumn},
-	{table: "pheromones", columns: pheromoneColumnPaths, resolve: resolvePheromoneColumn},
-	{table: "settings_simulation_values", columns: settingsValueColumnTypes, resolve: resolveSettingsValueColumn},
-	{table: "settings_independent_values", columns: settingsValueColumnTypes, resolve: resolveSettingsValueColumn},
-	{table: "settings_material_values", columns: settingsValueColumnTypes, resolve: resolveSettingsValueColumn},
-	{table: "settings_zone_values", columns: settingsValueColumnTypes, resolve: resolveSettingsValueColumn},
-	{table: "settings_changer_targets", columns: settingsChangerTargetColumns, resolve: resolveSettingsChangerTargetColumn},
-	{table: "settings_zones", columns: settingsZoneColumnPaths, resolve: resolveSettingsZoneColumn},
+var writableSQLRefTables = generatedWritableSQLRefTables
+
+func generatedSQLRefTable(table string, columns map[string]string, resolver tb.SQLRefResolverKind) sqlRefTableSpec {
+	switch resolver {
+	case tb.SQLRefResolverBibitePathMap:
+		return pathMapSQLRefTable(table, columns, bibiteTargetFromSQLRef)
+	case tb.SQLRefResolverEggPathMap:
+		return pathMapSQLRefTable(table, columns, eggTargetFromSQLRef)
+	case tb.SQLRefResolverBibiteStomachContentPathMap:
+		return sqlRefTableSpec{table: table, columns: columns, resolve: bibiteStomachColumnResolver(columns)}
+	case tb.SQLRefResolverBibiteBrainNodePathMap:
+		return sqlRefTableSpec{table: table, columns: columns, resolve: brainNodeColumnResolver(tb.EntryBibite, columns)}
+	case tb.SQLRefResolverBibiteBrainSynapsePathMap:
+		return sqlRefTableSpec{table: table, columns: columns, resolve: brainSynapseColumnResolver(tb.EntryBibite, columns)}
+	case tb.SQLRefResolverEggBrainNodePathMap:
+		return sqlRefTableSpec{table: table, columns: columns, resolve: brainNodeColumnResolver(tb.EntryEgg, columns)}
+	case tb.SQLRefResolverEggBrainSynapsePathMap:
+		return sqlRefTableSpec{table: table, columns: columns, resolve: brainSynapseColumnResolver(tb.EntryEgg, columns)}
+	case tb.SQLRefResolverPelletPathMap:
+		return sqlRefTableSpec{table: table, columns: columns, resolve: pelletColumnResolver(columns)}
+	case tb.SQLRefResolverPheromonePathMap:
+		return sqlRefTableSpec{table: table, columns: columns, resolve: pheromoneColumnResolver(columns)}
+	case tb.SQLRefResolverSettingsZonePathMap:
+		return sqlRefTableSpec{table: table, columns: columns, resolve: settingsZoneColumnResolver(columns)}
+	case tb.SQLRefResolverBibiteGeneValue:
+		return sqlRefTableSpec{table: table, columns: columns, resolve: geneColumnResolver(tb.EntryBibite, columns)}
+	case tb.SQLRefResolverEggGeneValue:
+		return sqlRefTableSpec{table: table, columns: columns, resolve: geneColumnResolver(tb.EntryEgg, columns)}
+	case tb.SQLRefResolverSettingsValue:
+		return sqlRefTableSpec{table: table, columns: columns, resolve: settingsValueColumnResolver(columns)}
+	case tb.SQLRefResolverSettingsChangerTarget:
+		return sqlRefTableSpec{table: table, columns: columns, resolve: settingsChangerTargetColumnResolver(columns)}
+	default:
+		panic(fmt.Sprintf("unsupported generated SQL ref resolver %q for table %q", resolver, table))
+	}
 }
 
 func pathMapSQLRefTable(table string, columns map[string]string, targetResolver sqlRefTargetResolver) sqlRefTableSpec {
 	return sqlRefTableSpec{table: table, columns: columns, resolve: pathMapResolver(columns, targetResolver)}
 }
 
-func geneColumnResolver(kind tb.EntryKind) sqlRefResolver {
+func geneColumnResolver(kind tb.EntryKind, columns map[string]string) sqlRefResolver {
 	return func(ref SQLValueRef) (Target, string, error) {
-		return resolveGeneColumn(ref, kind)
-	}
-}
-
-func brainNodeColumnResolver(kind tb.EntryKind) sqlRefResolver {
-	return func(ref SQLValueRef) (Target, string, error) {
-		return resolveEntityBrainNodeColumn(ref, kind)
-	}
-}
-
-func brainSynapseColumnResolver(kind tb.EntryKind) sqlRefResolver {
-	return func(ref SQLValueRef) (Target, string, error) {
-		return resolveEntityBrainSynapseColumn(ref, kind)
+		return resolveGeneColumn(ref, kind, columns)
 	}
 }
 
