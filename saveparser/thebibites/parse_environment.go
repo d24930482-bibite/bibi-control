@@ -74,28 +74,8 @@ func parsePellet(entryName, zone string, groupIndex, groupPelletIndex, pelletInd
 		Raw:              raw,
 		Scalars:          collectScalars(entryName, "pellet", ownerID, fmt.Sprintf("pellets.groups[%d].pellets[%d]", groupIndex, groupPelletIndex), raw),
 	}
-	if transform, ok := mapAt(raw, "transform"); ok {
-		pellet.Transform = parseTransform(transform)
-	}
-	if rb2d, ok := mapAt(raw, "rb2d"); ok {
-		pellet.RigidBody = parseRigidBody(rb2d)
-	}
-	if pelletState, ok := mapAt(raw, "pellet"); ok {
-		if v, ok := stringAt(pelletState, "material"); ok {
-			pellet.Material = v
-		}
-		if v, ok := floatAt(pelletState, "amount"); ok {
-			pellet.Amount = v
-		}
-	}
-	if matterDecay, ok := mapAt(raw, "matterDecay"); ok {
+	if _, ok := mapAt(raw, "matterDecay"); ok {
 		pellet.HasMatterDecay = true
-		if v, ok := floatAt(matterDecay, "timeAlive"); ok {
-			pellet.MatterDecayTimeAlive = v
-		}
-		if v, ok := floatAt(matterDecay, "rotAmount"); ok {
-			pellet.MatterDecayRotAmount = v
-		}
 	}
 	return pellet
 }
@@ -123,30 +103,9 @@ func parsePheromones(ctx *parserContext, entry *Entry) ([]Pheromone, []Scalar) {
 			Raw:       itemRaw,
 			Scalars:   collectScalars(entry.Name, "pheromone", fmt.Sprintf("%d", i), fmt.Sprintf("pheromones[%d]", i), itemRaw),
 		}
-		if transform, ok := mapAt(itemRaw, "transform"); ok {
-			pheromone.Transform = parseTransform(transform)
-		}
 		if phero, ok := mapAt(itemRaw, "phero"); ok {
 			if heading, ok := phero["heading"]; ok {
 				pheromone.HeadingRawJSON = rawJSON(heading)
-			}
-			if v, ok := floatAt(phero, "Rstrength"); ok {
-				pheromone.RStrength = v
-			}
-			if v, ok := floatAt(phero, "Gstrength"); ok {
-				pheromone.GStrength = v
-			}
-			if v, ok := floatAt(phero, "Bstrength"); ok {
-				pheromone.BStrength = v
-			}
-			if v, ok := floatAt(phero, "nR"); ok {
-				pheromone.NR = v
-			}
-			if v, ok := floatAt(phero, "nG"); ok {
-				pheromone.NG = v
-			}
-			if v, ok := floatAt(phero, "nB"); ok {
-				pheromone.NB = v
 			}
 		}
 		pheromones = append(pheromones, pheromone)

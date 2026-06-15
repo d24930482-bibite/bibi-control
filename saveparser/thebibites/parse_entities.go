@@ -24,12 +24,6 @@ func parseBibite(ctx *parserContext, entry *Entry) *Bibite {
 		ctx.addDiagnostic(SeverityWarning, "bibite_missing_body_id", entry.Name, "bibite body.id is missing or not numeric")
 	}
 
-	if transform, ok := mapAt(raw, "transform"); ok {
-		bibite.Transform = parseTransform(transform)
-	}
-	if rb2d, ok := mapAt(raw, "rb2d"); ok {
-		bibite.RigidBody = parseRigidBody(rb2d)
-	}
 	parseBibiteGenes(entry.Name, ownerID, raw, bibite)
 	parseBibiteBody(entry.Name, id, hasID, ownerID, body, bibite)
 	parseBibiteClock(entry.Name, ownerID, raw, bibite)
@@ -41,12 +35,6 @@ func parseBibiteGenes(entryName, ownerID string, raw map[string]any, bibite *Bib
 	genes, ok := mapAt(raw, "genes")
 	if !ok {
 		return
-	}
-	if v, ok := intAt(genes, "speciesID"); ok {
-		bibite.SpeciesID = v
-	}
-	if v, ok := intAt(genes, "gen"); ok {
-		bibite.Generation = v
 	}
 	bibite.GeneScalars = collectScalars(entryName, "bibite_genes", ownerID, "genes", genes)
 }
@@ -61,97 +49,15 @@ func parseBibiteBody(entryName string, id int64, hasID bool, ownerID string, bod
 	if v, ok := boolAt(body, "dying"); ok {
 		bibite.Dying = v
 	}
-	if v, ok := floatAt(body, "health"); ok {
-		bibite.Health = v
-	}
-	if v, ok := floatAt(body, "energy"); ok {
-		bibite.Energy = v
-	}
-	parseBibiteBodyDetails(body, bibite)
 	bibite.BodyScalars = collectScalars(entryName, "bibite_body", ownerID, "body", body)
 	bibite.StomachContents = parseStomachContents(entryName, id, hasID, body)
 	bibite.Children = parseChildLinks(entryName, id, hasID, body)
-}
-
-func parseBibiteBodyDetails(body map[string]any, bibite *Bibite) {
-	if v, ok := floatAt(body, "d2Size"); ok {
-		bibite.BodyDetails.D2Size = v
-	}
-	if v, ok := floatAt(body, "fatReservesAmount"); ok {
-		bibite.BodyDetails.FatReservesAmount = v
-	}
-	if v, ok := floatAt(body, "attackedDmg"); ok {
-		bibite.BodyDetails.AttackedDmg = v
-	}
-	if v, ok := floatAt(body, "timesAttacked"); ok {
-		bibite.BodyDetails.TimesAttacked = v
-	}
-	if v, ok := floatAt(body, "totalDamageSuffered"); ok {
-		bibite.BodyDetails.TotalDamageSuffered = v
-	}
-	if v, ok := floatAt(body, "brainTicksCount"); ok {
-		bibite.BodyDetails.BrainTicksCount = v
-	}
-	if v, ok := floatAt(body, "visionLookupCount"); ok {
-		bibite.BodyDetails.VisionLookupCount = v
-	}
-	if v, ok := floatAt(body, "visionSensingCount"); ok {
-		bibite.BodyDetails.VisionSensingCount = v
-	}
-	if v, ok := floatAt(body, "corpseEnergyOffset"); ok {
-		bibite.BodyDetails.CorpseEnergyOffset = v
-	}
-	if mouth, ok := mapAt(body, "mouth"); ok {
-		parseBibiteMouth(mouth, bibite)
-	}
-	if phero, ok := mapAt(body, "phero"); ok {
-		if v, ok := floatAt(phero, "progress"); ok {
-			bibite.Pheromone.Progress = v
-		}
-	}
-	if eggLayer, ok := mapAt(body, "eggLayer"); ok {
-		if v, ok := floatAt(eggLayer, "eggProgress"); ok {
-			bibite.EggLayer.EggProgress = v
-		}
-		if v, ok := floatAt(eggLayer, "nEggsLaid"); ok {
-			bibite.EggLayer.NEggsLaid = v
-		}
-	}
-	if control, ok := mapAt(body, "control"); ok {
-		if v, ok := floatAt(control, "totalTravel"); ok {
-			bibite.Control.TotalTravel = v
-		}
-	}
-}
-
-func parseBibiteMouth(mouth map[string]any, bibite *Bibite) {
-	if v, ok := boolAt(mouth, "attackedLastFrame"); ok {
-		bibite.Mouth.AttackedLastFrame = v
-	}
-	if v, ok := floatAt(mouth, "bibitesBitten"); ok {
-		bibite.Mouth.BibitesBitten = v
-	}
-	if v, ok := floatAt(mouth, "biteProgress"); ok {
-		bibite.Mouth.BiteProgress = v
-	}
-	if v, ok := floatAt(mouth, "murderedArea"); ok {
-		bibite.Mouth.MurderedArea = v
-	}
-	if v, ok := floatAt(mouth, "totalDamageDealt"); ok {
-		bibite.Mouth.TotalDamageDealt = v
-	}
-	if v, ok := floatAt(mouth, "totalMurders"); ok {
-		bibite.Mouth.TotalMurders = v
-	}
 }
 
 func parseBibiteClock(entryName, ownerID string, raw map[string]any, bibite *Bibite) {
 	clock, ok := mapAt(raw, "clock")
 	if !ok {
 		return
-	}
-	if v, ok := floatAt(clock, "timeAlive"); ok {
-		bibite.TimeAlive = v
 	}
 	bibite.ClockScalars = collectScalars(entryName, "bibite_clock", ownerID, "clock", clock)
 }
@@ -236,12 +142,6 @@ func parseEgg(ctx *parserContext, entry *Entry) *Egg {
 		HasID:     hasID,
 		Scalars:   collectScalars(entry.Name, "egg", ownerID, "egg_entity", raw),
 	}
-	if transform, ok := mapAt(raw, "transform"); ok {
-		egg.Transform = parseTransform(transform)
-	}
-	if rb2d, ok := mapAt(raw, "rb2d"); ok {
-		egg.RigidBody = parseRigidBody(rb2d)
-	}
 	parseEggGenes(entry.Name, ownerID, raw, egg)
 	parseEggState(entry.Name, ownerID, eggState, egg)
 	parseEntityBrain(entry.Name, "egg", ownerID, raw, &egg.BrainNodes, &egg.BrainSynapses)
@@ -253,24 +153,12 @@ func parseEggGenes(entryName, ownerID string, raw map[string]any, egg *Egg) {
 	if !ok {
 		return
 	}
-	if v, ok := intAt(genes, "speciesID"); ok {
-		egg.SpeciesID = v
-	}
-	if v, ok := intAt(genes, "gen"); ok {
-		egg.Generation = v
-	}
 	egg.GeneScalars = collectScalars(entryName, "egg_genes", ownerID, "genes", genes)
 }
 
 func parseEggState(entryName, ownerID string, eggState map[string]any, egg *Egg) {
 	if eggState == nil {
 		return
-	}
-	if v, ok := floatAt(eggState, "hatchProgress"); ok {
-		egg.HatchProgress = v
-	}
-	if v, ok := floatAt(eggState, "energy"); ok {
-		egg.Energy = v
 	}
 	egg.EggScalars = collectScalars(entryName, "egg_state", ownerID, "egg", eggState)
 }

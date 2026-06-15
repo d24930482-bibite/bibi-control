@@ -236,16 +236,13 @@ type SettingsMaterial struct {
 }
 
 type SettingsZone struct {
-	Index        int
-	Name         string
-	ID           int64
-	HasID        bool
-	Material     string
-	Distribution string
-	Raw          map[string]any
-	Scalars      []Scalar
-	Geometry     []SettingsZoneGeometry
-	Values       []SettingValue
+	Index    int
+	ID       int64
+	HasID    bool
+	Raw      map[string]any
+	Scalars  []Scalar
+	Geometry []SettingsZoneGeometry
+	Values   []SettingValue
 }
 
 type SettingsZoneGeometry struct {
@@ -340,21 +337,12 @@ type SpeciesRecord struct {
 	TemplateBrainSynapses     []BrainSynapse
 }
 
-type Transform struct {
-	PositionX float64
-	PositionY float64
-	Rotation  float64
-	Scale     float64
-}
-
-type RigidBody struct {
-	PX float64
-	PY float64
-	VX float64
-	VY float64
-	R  float64
-}
-
+// Bibite holds the parser-internal view of a bibite entry. Flat scalar fields
+// (health, energy, transform, body/mouth/etc. details) are no longer mirrored
+// here: the normalized rows read those directly from Raw via the generated
+// sqlref path metadata (see populateSQLRefFields), so the sqlref tag is the sole
+// declaration of each field's JSON location. Dead/Dying remain because
+// archive_counts derives alive/dead/dying counts from them.
 type Bibite struct {
 	EntryName string
 	FileIndex int
@@ -364,63 +352,16 @@ type Bibite struct {
 	ID    int64
 	HasID bool
 
-	SpeciesID  int64
-	Generation int64
-	Dead       bool
-	Dying      bool
-	Health     float64
-	Energy     float64
-	TimeAlive  float64
-
-	Transform Transform
-	RigidBody RigidBody
+	Dead  bool
+	Dying bool
 
 	GeneScalars     []Scalar
 	BodyScalars     []Scalar
 	ClockScalars    []Scalar
-	BodyDetails     BibiteBodyDetails
-	Mouth           BibiteMouth
-	Pheromone       BibitePheromoneEmitter
-	EggLayer        BibiteEggLayer
-	Control         BibiteControl
 	StomachContents []StomachContent
 	Children        []ChildLink
 	BrainNodes      []BrainNode
 	BrainSynapses   []BrainSynapse
-}
-
-type BibiteBodyDetails struct {
-	D2Size              float64
-	FatReservesAmount   float64
-	AttackedDmg         float64
-	TimesAttacked       float64
-	TotalDamageSuffered float64
-	BrainTicksCount     float64
-	VisionLookupCount   float64
-	VisionSensingCount  float64
-	CorpseEnergyOffset  float64
-}
-
-type BibiteMouth struct {
-	AttackedLastFrame bool
-	BibitesBitten     float64
-	BiteProgress      float64
-	MurderedArea      float64
-	TotalDamageDealt  float64
-	TotalMurders      float64
-}
-
-type BibitePheromoneEmitter struct {
-	Progress float64
-}
-
-type BibiteEggLayer struct {
-	EggProgress float64
-	NEggsLaid   float64
-}
-
-type BibiteControl struct {
-	TotalTravel float64
 }
 
 type Egg struct {
@@ -431,14 +372,6 @@ type Egg struct {
 
 	ID    int64
 	HasID bool
-
-	SpeciesID     int64
-	Generation    int64
-	HatchProgress float64
-	Energy        float64
-
-	Transform Transform
-	RigidBody RigidBody
 
 	GeneScalars   []Scalar
 	EggScalars    []Scalar
@@ -528,13 +461,7 @@ type Pellet struct {
 	Raw              map[string]any
 	Scalars          []Scalar
 
-	Transform            Transform
-	RigidBody            RigidBody
-	Material             string
-	Amount               float64
-	MatterDecayTimeAlive float64
-	MatterDecayRotAmount float64
-	HasMatterDecay       bool
+	HasMatterDecay bool
 }
 
 type Pheromone struct {
@@ -542,12 +469,5 @@ type Pheromone struct {
 	EntryName      string
 	Raw            map[string]any
 	Scalars        []Scalar
-	Transform      Transform
 	HeadingRawJSON string
-	RStrength      float64
-	GStrength      float64
-	BStrength      float64
-	NR             float64
-	NG             float64
-	NB             float64
 }

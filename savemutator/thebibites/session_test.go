@@ -18,7 +18,7 @@ func TestSessionStagesAppliesAndCommitsSet(t *testing.T) {
 	originalBibiteRaw := append([]byte(nil), bibite.Raw...)
 	originalSceneHash := scene.SHA256
 
-	if got := archive.Bibites[0].Energy; got != 12.5 {
+	if got := tb.ExtractTables("init", archive).Bibites[0].Energy; got != 12.5 {
 		t.Fatalf("initial parsed energy = %v, want 12.5", got)
 	}
 
@@ -60,7 +60,7 @@ func TestSessionStagesAppliesAndCommitsSet(t *testing.T) {
 	if scene.SHA256 != originalSceneHash {
 		t.Fatalf("unrelated scene hash changed")
 	}
-	if got := archive.Bibites[0].Energy; got != 12.5 {
+	if got := tb.ExtractTables("precommit", archive).Bibites[0].Energy; got != 12.5 {
 		t.Fatalf("parsed projection energy changed before commit: %v", got)
 	}
 
@@ -78,12 +78,9 @@ func TestSessionStagesAppliesAndCommitsSet(t *testing.T) {
 	if len(session.DirtyEntries()) != 0 {
 		t.Fatalf("dirty entries were not cleared after commit")
 	}
-	if got := fresh.Bibites[0].Energy; got != 99.25 {
-		t.Fatalf("committed parsed energy = %v, want 99.25", got)
-	}
 	tables := tb.ExtractTables("mutated", fresh)
 	if got := tables.Bibites[0].Energy; got != 99.25 {
-		t.Fatalf("normalized energy = %v, want 99.25", got)
+		t.Fatalf("committed normalized energy = %v, want 99.25", got)
 	}
 	if got := fresh.Entry("scene.bb8scene").SHA256; got != originalSceneHash {
 		t.Fatalf("committed unrelated scene hash = %s, want %s", got, originalSceneHash)

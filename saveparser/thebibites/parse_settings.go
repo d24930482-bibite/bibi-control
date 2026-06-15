@@ -153,18 +153,9 @@ func parseSettingsZones(entryName string, settings map[string]any) []SettingsZon
 			Raw:     raw,
 			Scalars: collectScalars(entryName, "settings_zone", fmt.Sprintf("%d", i), fmt.Sprintf("settings.zones[%d]", i), raw),
 		}
-		if v, ok := stringAt(raw, "name"); ok {
-			zone.Name = v
-		}
 		if v, ok := intAt(raw, "id"); ok {
 			zone.ID = v
 			zone.HasID = true
-		}
-		if v, ok := stringAt(raw, "material"); ok {
-			zone.Material = v
-		}
-		if v, ok := stringAt(raw, "distribution"); ok {
-			zone.Distribution = v
 		}
 		ownerID := ownerIDFromInt(zone.ID, zone.HasID, fmt.Sprintf("%d", i))
 		zone.Geometry = parseSettingsZoneGeometry(raw)

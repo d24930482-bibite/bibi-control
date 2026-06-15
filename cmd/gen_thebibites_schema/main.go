@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -102,6 +103,11 @@ func parseNormalizedTables(path string) ([]tableSpec, error) {
 		return nil, err
 	}
 
+	knownSQLRefResolvers, err := parseSQLRefResolverKinds(file)
+	if err != nil {
+		return nil, err
+	}
+
 	// Store every declared struct as its raw AST node so embedded fields can be
 	// resolved and flattened on demand (fix 2). ExtractedSave is handled
 	// separately because its fields carry dbtable tags and container types.
@@ -142,7 +148,7 @@ func parseNormalizedTables(path string) ([]tableSpec, error) {
 			return nil, fmt.Errorf("ExtractedSave.%s is missing dbtable tag", astField.Names[0].Name)
 		}
 		sqlRefResolver := sqlRefResolverFromTag(astField.Tag)
-		if err := validateSQLRefResolver(sqlRefResolver); err != nil {
+		if err := validateSQLRefResolver(sqlRefResolver, knownSQLRefResolvers); err != nil {
 			return nil, fmt.Errorf("ExtractedSave.%s: %w", astField.Names[0].Name, err)
 		}
 		rowType, optional, err := extractedRowType(astField.Type)
@@ -277,28 +283,54 @@ func sqlRefResolverFromTag(tag *ast.BasicLit) string {
 	return reflect.StructTag(strings.Trim(tag.Value, "`")).Get("sqlrefresolver")
 }
 
-var knownSQLRefResolvers = map[string]bool{
-	"bibite_path_map":                 true,
-	"egg_path_map":                    true,
-	"bibite_stomach_content_path_map": true,
-	"bibite_brain_node_path_map":      true,
-	"bibite_brain_synapse_path_map":   true,
-	"egg_brain_node_path_map":         true,
-	"egg_brain_synapse_path_map":      true,
-	"pellet_path_map":                 true,
-	"pheromone_path_map":              true,
-	"settings_zone_path_map":          true,
-	"bibite_gene_value":               true,
-	"egg_gene_value":                  true,
-	"settings_value":                  true,
-	"settings_changer_target":         true,
+// parseSQLRefResolverKinds extracts the allowlist of resolver-kind strings from
+// the SQLRefResolverKind const block in normalize_types.go. The const block is
+// the single source of truth; the generator's validation allowlist is derived
+// from it rather than duplicated by hand, so a new constant cannot be tagged on
+// a table without also being a recognized resolver here.
+func parseSQLRefResolverKinds(file *ast.File) (map[string]bool, error) {
+	known := make(map[string]bool)
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
+		}
+		var lastType string
+		for _, spec := range gen.Specs {
+			valueSpec, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			if ident, ok := valueSpec.Type.(*ast.Ident); ok {
+				lastType = ident.Name
+			}
+			if lastType != "SQLRefResolverKind" {
+				continue
+			}
+			for _, value := range valueSpec.Values {
+				lit, ok := value.(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					return nil, fmt.Errorf("SQLRefResolverKind constant has non-string value %v", value)
+				}
+				kind, err := strconv.Unquote(lit.Value)
+				if err != nil {
+					return nil, fmt.Errorf("unquote SQLRefResolverKind value %q: %w", lit.Value, err)
+				}
+				known[kind] = true
+			}
+		}
+	}
+	if len(known) == 0 {
+		return nil, fmt.Errorf("no SQLRefResolverKind constants found")
+	}
+	return known, nil
 }
 
-func validateSQLRefResolver(resolver string) error {
+func validateSQLRefResolver(resolver string, known map[string]bool) error {
 	if resolver == "" {
 		return nil
 	}
-	if knownSQLRefResolvers[resolver] {
+	if known[resolver] {
 		return nil
 	}
 	return fmt.Errorf("unknown sqlrefresolver %q", resolver)
@@ -483,6 +515,10 @@ func renderParserMetadata(tables []tableSpec) []byte {
 	b.WriteString("\tField string\n")
 	b.WriteString("\tColumn string\n")
 	b.WriteString("\tSQLType string\n")
+	b.WriteString("\t// SQLRefPath is the entity-relative JSON path this field is read from\n")
+	b.WriteString("\t// and written to (from the field's sqlref tag). Empty for locator,\n")
+	b.WriteString("\t// index, and value-typed (sqlrefvalue) columns.\n")
+	b.WriteString("\tSQLRefPath string\n")
 	b.WriteString("}\n\n")
 	b.WriteString("var NormalizedTables = []NormalizedTableSpec{\n")
 	for _, table := range tables {
@@ -492,7 +528,11 @@ func renderParserMetadata(tables []tableSpec) []byte {
 		}
 		b.WriteString(", Fields: []NormalizedFieldSpec{\n")
 		for _, field := range table.Fields {
-			fmt.Fprintf(&b, "\t\t{Field: %q, Column: %q, SQLType: %q},\n", field.Field, field.Column, field.SQLType)
+			if field.SQLRefPath != "" {
+				fmt.Fprintf(&b, "\t\t{Field: %q, Column: %q, SQLType: %q, SQLRefPath: %q},\n", field.Field, field.Column, field.SQLType, field.SQLRefPath)
+			} else {
+				fmt.Fprintf(&b, "\t\t{Field: %q, Column: %q, SQLType: %q},\n", field.Field, field.Column, field.SQLType)
+			}
 		}
 		b.WriteString("\t}},\n")
 	}

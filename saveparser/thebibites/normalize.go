@@ -132,17 +132,16 @@ func normalizeSettings(saveID string, settings *SettingsState, out *ExtractedSav
 		out.SettingsMaterialValues = appendSettingValueRows(out.SettingsMaterialValues, saveID, settings.EntryName, material.Values)
 	}
 	for _, zone := range settings.Zones {
-		out.SettingsZones = append(out.SettingsZones, SettingsZoneRow{
-			SaveID:       saveID,
-			EntryName:    settings.EntryName,
-			ZoneIndex:    zone.Index,
-			ZoneID:       zone.ID,
-			HasZoneID:    zone.HasID,
-			Name:         zone.Name,
-			Material:     zone.Material,
-			Distribution: zone.Distribution,
-			RawJSON:      rawJSON(zone.Raw),
-		})
+		zoneRow := SettingsZoneRow{
+			SaveID:    saveID,
+			EntryName: settings.EntryName,
+			ZoneIndex: zone.Index,
+			ZoneID:    zone.ID,
+			HasZoneID: zone.HasID,
+			RawJSON:   rawJSON(zone.Raw),
+		}
+		populateSQLRefFields(&zoneRow, zone.Raw, "settings_zones")
+		out.SettingsZones = append(out.SettingsZones, zoneRow)
 		for _, geometry := range zone.Geometry {
 			out.SettingsZoneGeometry = append(out.SettingsZoneGeometry, SettingsZoneGeometryRow{
 				SaveID:           saveID,
@@ -293,28 +292,14 @@ func normalizeSpecies(saveID string, species *SpeciesData, out *ExtractedSave) {
 func normalizeBibites(saveID string, bibites []Bibite, out *ExtractedSave) {
 	for _, bibite := range bibites {
 		ownerID := ownerIDFromInt(bibite.ID, bibite.HasID, bibite.EntryName)
-		out.Bibites = append(out.Bibites, BibiteRow{
-			SaveID:             saveID,
-			EntryName:          bibite.EntryName,
-			BodyID:             bibite.ID,
-			HasBodyID:          bibite.HasID,
-			SpeciesID:          bibite.SpeciesID,
-			Generation:         bibite.Generation,
-			Dead:               bibite.Dead,
-			Dying:              bibite.Dying,
-			Health:             bibite.Health,
-			Energy:             bibite.Energy,
-			TimeAlive:          bibite.TimeAlive,
-			TransformPositionX: bibite.Transform.PositionX,
-			TransformPositionY: bibite.Transform.PositionY,
-			TransformRotation:  bibite.Transform.Rotation,
-			TransformScale:     bibite.Transform.Scale,
-			RB2DPX:             bibite.RigidBody.PX,
-			RB2DPY:             bibite.RigidBody.PY,
-			RB2DVX:             bibite.RigidBody.VX,
-			RB2DVY:             bibite.RigidBody.VY,
-			RB2DR:              bibite.RigidBody.R,
-		})
+		row := BibiteRow{
+			SaveID:    saveID,
+			EntryName: bibite.EntryName,
+			BodyID:    bibite.ID,
+			HasBodyID: bibite.HasID,
+		}
+		populateSQLRefFields(&row, bibite.Raw, "bibites")
+		out.Bibites = append(out.Bibites, row)
 		if genes, ok := mapAt(bibite.Raw, "genes"); ok {
 			appendGeneRowsFromEntityGenes(&out.BibiteGenes, saveID, bibite.EntryName, "bibite", ownerID, genes)
 		}
@@ -349,87 +334,43 @@ func normalizeBibites(saveID string, bibites []Bibite, out *ExtractedSave) {
 }
 
 func appendBibiteBodyRows(saveID string, bibite Bibite, body map[string]any, out *ExtractedSave) {
-	out.BibiteBody = append(out.BibiteBody, BibiteBodyRow{
-		SaveID:              saveID,
-		EntryName:           bibite.EntryName,
-		BodyID:              bibite.ID,
-		HasBodyID:           bibite.HasID,
-		D2Size:              bibite.BodyDetails.D2Size,
-		FatReservesAmount:   bibite.BodyDetails.FatReservesAmount,
-		AttackedDmg:         bibite.BodyDetails.AttackedDmg,
-		TimesAttacked:       bibite.BodyDetails.TimesAttacked,
-		TotalDamageSuffered: bibite.BodyDetails.TotalDamageSuffered,
-		BrainTicksCount:     bibite.BodyDetails.BrainTicksCount,
-		VisionLookupCount:   bibite.BodyDetails.VisionLookupCount,
-		VisionSensingCount:  bibite.BodyDetails.VisionSensingCount,
-		CorpseEnergyOffset:  bibite.BodyDetails.CorpseEnergyOffset,
-	})
+	bodyRow := BibiteBodyRow{SaveID: saveID, EntryName: bibite.EntryName, BodyID: bibite.ID, HasBodyID: bibite.HasID}
+	populateSQLRefFields(&bodyRow, bibite.Raw, "bibite_body")
+	out.BibiteBody = append(out.BibiteBody, bodyRow)
+
 	if _, ok := mapAt(body, "mouth"); ok {
-		out.BibiteMouth = append(out.BibiteMouth, BibiteMouthRow{
-			SaveID:            saveID,
-			EntryName:         bibite.EntryName,
-			BodyID:            bibite.ID,
-			HasBodyID:         bibite.HasID,
-			AttackedLastFrame: bibite.Mouth.AttackedLastFrame,
-			BibitesBitten:     bibite.Mouth.BibitesBitten,
-			BiteProgress:      bibite.Mouth.BiteProgress,
-			MurderedArea:      bibite.Mouth.MurderedArea,
-			TotalDamageDealt:  bibite.Mouth.TotalDamageDealt,
-			TotalMurders:      bibite.Mouth.TotalMurders,
-		})
+		mouthRow := BibiteMouthRow{SaveID: saveID, EntryName: bibite.EntryName, BodyID: bibite.ID, HasBodyID: bibite.HasID}
+		populateSQLRefFields(&mouthRow, bibite.Raw, "bibite_mouth")
+		out.BibiteMouth = append(out.BibiteMouth, mouthRow)
 	}
 	if _, ok := mapAt(body, "phero"); ok {
-		out.BibitePheromoneEmitters = append(out.BibitePheromoneEmitters, BibitePheromoneEmitterRow{
-			SaveID:    saveID,
-			EntryName: bibite.EntryName,
-			BodyID:    bibite.ID,
-			HasBodyID: bibite.HasID,
-			Progress:  bibite.Pheromone.Progress,
-		})
+		pheroRow := BibitePheromoneEmitterRow{SaveID: saveID, EntryName: bibite.EntryName, BodyID: bibite.ID, HasBodyID: bibite.HasID}
+		populateSQLRefFields(&pheroRow, bibite.Raw, "bibite_pheromone_emitters")
+		out.BibitePheromoneEmitters = append(out.BibitePheromoneEmitters, pheroRow)
 	}
 	if _, ok := mapAt(body, "eggLayer"); ok {
-		out.BibiteEggLayers = append(out.BibiteEggLayers, BibiteEggLayerRow{
-			SaveID:      saveID,
-			EntryName:   bibite.EntryName,
-			BodyID:      bibite.ID,
-			HasBodyID:   bibite.HasID,
-			EggProgress: bibite.EggLayer.EggProgress,
-			NEggsLaid:   bibite.EggLayer.NEggsLaid,
-		})
+		eggLayerRow := BibiteEggLayerRow{SaveID: saveID, EntryName: bibite.EntryName, BodyID: bibite.ID, HasBodyID: bibite.HasID}
+		populateSQLRefFields(&eggLayerRow, bibite.Raw, "bibite_egg_layers")
+		out.BibiteEggLayers = append(out.BibiteEggLayers, eggLayerRow)
 	}
 	if _, ok := mapAt(body, "control"); ok {
-		out.BibiteControl = append(out.BibiteControl, BibiteControlRow{
-			SaveID:      saveID,
-			EntryName:   bibite.EntryName,
-			BodyID:      bibite.ID,
-			HasBodyID:   bibite.HasID,
-			TotalTravel: bibite.Control.TotalTravel,
-		})
+		controlRow := BibiteControlRow{SaveID: saveID, EntryName: bibite.EntryName, BodyID: bibite.ID, HasBodyID: bibite.HasID}
+		populateSQLRefFields(&controlRow, bibite.Raw, "bibite_control")
+		out.BibiteControl = append(out.BibiteControl, controlRow)
 	}
 }
 
 func normalizeEggs(saveID string, eggs []Egg, out *ExtractedSave) {
 	for _, egg := range eggs {
 		ownerID := ownerIDFromInt(egg.ID, egg.HasID, egg.EntryName)
-		out.Eggs = append(out.Eggs, EggRow{
-			SaveID:             saveID,
-			EntryName:          egg.EntryName,
-			EggID:              egg.ID,
-			HasEggID:           egg.HasID,
-			SpeciesID:          egg.SpeciesID,
-			Generation:         egg.Generation,
-			HatchProgress:      egg.HatchProgress,
-			Energy:             egg.Energy,
-			TransformPositionX: egg.Transform.PositionX,
-			TransformPositionY: egg.Transform.PositionY,
-			TransformRotation:  egg.Transform.Rotation,
-			TransformScale:     egg.Transform.Scale,
-			RB2DPX:             egg.RigidBody.PX,
-			RB2DPY:             egg.RigidBody.PY,
-			RB2DVX:             egg.RigidBody.VX,
-			RB2DVY:             egg.RigidBody.VY,
-			RB2DR:              egg.RigidBody.R,
-		})
+		eggRow := EggRow{
+			SaveID:    saveID,
+			EntryName: egg.EntryName,
+			EggID:     egg.ID,
+			HasEggID:  egg.HasID,
+		}
+		populateSQLRefFields(&eggRow, egg.Raw, "eggs")
+		out.Eggs = append(out.Eggs, eggRow)
 		if genes, ok := mapAt(egg.Raw, "genes"); ok {
 			appendGeneRowsFromEntityGenes(&out.EggGenes, saveID, egg.EntryName, "egg", ownerID, genes)
 		}
@@ -450,47 +391,28 @@ func normalizeEnvironment(saveID string, archive *Archive, out *ExtractedSave) {
 			})
 		}
 		for _, pellet := range archive.PelletData.Pellets {
-			out.Pellets = append(out.Pellets, PelletRow{
-				SaveID:               saveID,
-				EntryName:            pellet.EntryName,
-				PelletIndex:          pellet.Index,
-				GroupIndex:           pellet.GroupIndex,
-				GroupPelletIndex:     pellet.GroupPelletIndex,
-				Zone:                 pellet.Zone,
-				Material:             pellet.Material,
-				Amount:               pellet.Amount,
-				MatterDecayTimeAlive: pellet.MatterDecayTimeAlive,
-				MatterDecayRotAmount: pellet.MatterDecayRotAmount,
-				HasMatterDecay:       pellet.HasMatterDecay,
-				TransformPositionX:   pellet.Transform.PositionX,
-				TransformPositionY:   pellet.Transform.PositionY,
-				TransformRotation:    pellet.Transform.Rotation,
-				TransformScale:       pellet.Transform.Scale,
-				RB2DPX:               pellet.RigidBody.PX,
-				RB2DPY:               pellet.RigidBody.PY,
-				RB2DVX:               pellet.RigidBody.VX,
-				RB2DVY:               pellet.RigidBody.VY,
-				RB2DR:                pellet.RigidBody.R,
-			})
+			pelletRow := PelletRow{
+				SaveID:           saveID,
+				EntryName:        pellet.EntryName,
+				PelletIndex:      pellet.Index,
+				GroupIndex:       pellet.GroupIndex,
+				GroupPelletIndex: pellet.GroupPelletIndex,
+				Zone:             pellet.Zone,
+				HasMatterDecay:   pellet.HasMatterDecay,
+			}
+			populateSQLRefFields(&pelletRow, pellet.Raw, "pellets")
+			out.Pellets = append(out.Pellets, pelletRow)
 		}
 	}
 	for _, pheromone := range archive.Pheromones {
-		out.Pheromones = append(out.Pheromones, PheromoneRow{
-			SaveID:             saveID,
-			EntryName:          pheromone.EntryName,
-			PheromoneIndex:     pheromone.Index,
-			TransformPositionX: pheromone.Transform.PositionX,
-			TransformPositionY: pheromone.Transform.PositionY,
-			TransformRotation:  pheromone.Transform.Rotation,
-			TransformScale:     pheromone.Transform.Scale,
-			HeadingRawJSON:     pheromone.HeadingRawJSON,
-			RStrength:          pheromone.RStrength,
-			GStrength:          pheromone.GStrength,
-			BStrength:          pheromone.BStrength,
-			NR:                 pheromone.NR,
-			NG:                 pheromone.NG,
-			NB:                 pheromone.NB,
-		})
+		pheromoneRow := PheromoneRow{
+			SaveID:         saveID,
+			EntryName:      pheromone.EntryName,
+			PheromoneIndex: pheromone.Index,
+			HeadingRawJSON: pheromone.HeadingRawJSON,
+		}
+		populateSQLRefFields(&pheromoneRow, pheromone.Raw, "pheromones")
+		out.Pheromones = append(out.Pheromones, pheromoneRow)
 	}
 }
 

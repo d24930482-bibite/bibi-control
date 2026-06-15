@@ -238,6 +238,85 @@ with a read-only filesystem error for:
 /home/asemones/.config/unity3d/The Bibites/The Bibites/Savefiles
 ```
 
+## Drift-Hardening Pass (2026-06)
+
+A maintainability pass concluded the save-mutator/SQL-bridge layer is sound and
+does not need a refactor. The real, silent brittleness is in the parser: a
+field's JSON location is declared twice (the hand-written `floatAt(obj,"key")`
+extraction in `saveparser/thebibites/parse_*.go` and the `sqlref:"..."` tag on
+the normalized Row) with nothing linking them, so a game-schema change can desync
+the read path (parser) from the write path (sqlref-driven mutator) silently. The
+chosen investment was seams that make per-version save-format drift loud and
+localized, not a rewrite (the game itself is rewritten version to version, so a
+big-bang internal rewrite would re-pay its cost every release).
+
+Delivered:
+
+- Generated allowlist dedup: `knownSQLRefResolvers` in
+  `cmd/gen_thebibites_schema/main.go` is now derived from the `SQLRefResolverKind`
+  const block in `normalize_types.go` (`parseSQLRefResolverKinds`) instead of a
+  hand-kept parallel map. Generated outputs are byte-identical.
+- Tag↔data consistency harness:
+  `savemutator/thebibites/sqlref_consistency_test.go`
+  (`TestSQLRefTagsMatchParsedValues`). For every writable `table.column`, it
+  resolves the sqlref tag path in the raw archive and asserts it equals the
+  parser-extracted Row value. A parser/tag desync is now a loud red test (verified
+  by simulating a renamed key) instead of silent corruption.
+- Schema fingerprint baseline:
+  `saveparser/thebibites/tests/schema_fingerprint_test.go`
+  (`TestSaveSchemaFingerprint`) + checked-in
+  `saveparser/thebibites/tests/save_schema_fingerprint.golden`. Captures every
+  distinct JSON path-shape (array indices collapsed to `[*]`, keyed by entry
+  kind) across fixtures and diffs against the baseline. Drop a new game version's
+  save into `testdata/saves` and run it: ADDED/REMOVED shapes print immediately.
+  Regenerate the baseline with `UPDATE_SCHEMA_FINGERPRINT=1` after reviewing.
+  NOTE: the golden lives beside the test, not under `testdata/` (which
+  `.gitignore` excludes), so it stays tracked.
+- Redundancy-list guard:
+  `saveparser/thebibites/scalar_redundancy_test.go`
+  (`TestScalarRedundancyListsStayLive`) locks `isRedundantScalar`'s hand-kept
+  `typedEntityPrefixes`/`scalarKeepSuffixes` against rot (each keep-suffix must
+  still be produced by fixtures; under a typed prefix only keep-suffixes may
+  survive into `json_scalars`).
+
+Then the foundational gap itself was closed for the regular flat-field subset
+(the "single source of truth" work, originally deferred):
+
+- The generator now emits each writable field's entity-relative JSON path into
+  `NormalizedTables` (`NormalizedFieldSpec.SQLRefPath`), so the parser package has
+  the path metadata too.
+- `saveparser/thebibites/sqlref_populate.go` adds `lookupJSONPath` (dotted keys +
+  `[index]`) and `populateSQLRefFields(rowPtr, raw, table)`, which fills every
+  sqlref-tagged Row field directly from the entity's raw JSON, matching the old
+  `floatAt/intAt/boolAt/stringAt` coercion exactly.
+- `normalize.go` now populates bibites, bibite_body/mouth/pheromone_emitters/
+  egg_layers/control, eggs, pellets, pheromones, and settings_zones via
+  `populateSQLRefFields`. The hand-written per-field extraction in
+  `parse_entities.go`/`parse_environment.go`/`parse_settings.go`, the domain flat
+  fields/types in `archive.go` (BibiteBodyDetails, BibiteMouth, …, Transform,
+  RigidBody), and `parse_components.go` were removed (~260 net lines). Each flat
+  JSON key now lives ONLY in its sqlref tag — the parser and mutator both consume
+  it, so a rename is one edit and can no longer desync read vs write.
+- Behavior is byte-preserving: the round-trip, consistency, fingerprint, and
+  DuckDB table-content tests all pass unchanged. `bibite.Dead`/`Dying` are kept as
+  domain fields because `archive_counts` derives alive/dead/dying counts from them.
+
+Still deliberately NOT done (low value or needs more foundation):
+
+- Generated `sqlRefPathMapSpecs`/`sqlRefValueMapSpecs`: their map var names
+  (`brainNodeColumnKeys`, `bibiteStomachContentColumnFields`, …) are irregular and
+  referenced by `sqlref_test.go`; full derivation needs renames that churn tests,
+  and generate-time validation already fails loudly on a missing entry.
+- Replacing `isRedundantScalar`'s lists with a derived modeled-path set: still no
+  formal full modeled-path set (only the writable/sqlref subset is formalized),
+  and a naive replacement changes EAV output; the guard test locks it instead.
+- Scattered parse-time missing-field diagnostics: the high-value detection (a core
+  field renamed/removed) is covered by the consistency harness and the fingerprint.
+
+Remaining irregular extraction that is intentionally still explicit (not a simple
+path map from one entity root): genes, brain nodes/synapses, stomach contents,
+settings values, settings changer targets, zone geometry, and the scalar/EAV walk.
+
 ## Next Good Step
 
 The writable catalog itself is now generated. The next useful step is generated
