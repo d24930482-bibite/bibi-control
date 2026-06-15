@@ -452,7 +452,17 @@ err := session.StageSQLSet(mutator.SQLValueRef{
 - Prefer `WithExpected` for every SQL-selected edit.
 - Keep the resolver allowlisted.
 - Do not infer JSON paths from column names at runtime.
-- Do not add delete, append, or entry removal through this bridge yet.
+- Append and delete are now supported, but only for the strictly typed zones:
+  brain synapses, pellets, and settings zones (in-entry JSON arrays), plus
+  whole bibite/egg entries. Use `Session.StageSQLDelete` / `Session.StageSQLAppend`
+  (or `SQLDelete` / `SQLAppend`) — array/entry mutability is derived from the
+  same generated `SQLRefResolverKind` as SET, so any other table still rejects
+  these ops. Single-save `query -> store -> delete` works today.
+- Cross-save `query -> store -> append` (graft an element from save A into save
+  B) is only half-built: the destination-side primitives exist
+  (`StageAppend`, `StageAppendBibite`), but the multi-save `Workspace` seam in
+  `savemutator/thebibites/workspace.go` is intentionally unimplemented.
+  Entry-level `SQLAppend` therefore errors in a single-save session.
 - After `Apply`, parser projections on the in-memory archive are invalid until `Commit` reparses the written archive.
 - Treat settings changer targets as separate from static settings values. The game can use `settingsChangers[*].settingsBases` to override or repopulate values such as World fertility.
 
@@ -630,4 +640,14 @@ The generated migration intentionally keeps the custom `bibite_mutation_refs` vi
 3. Add SQL ref support for simulation-wide `settings_changer_targets` if game testing proves it is needed.
 4. Add schema migration handling for already-existing DuckDB files.
 5. Decide whether more settings changer target types should be writable, such as bool/string or non-zone targets.
-6. Keep broader domain mutations separate: deletes, appends, count updates, corpse/pellet conversion, species/link consistency, and entry removal are not solved by this bridge.
+6. Typed-zone deletes/appends and bibite/egg entry removal are now solved
+   (`savemutator/thebibites` operation kinds `append`/`delete`/`delete_entry`/
+   `append_entry`, resolved through `SQLDelete`/`SQLAppend`). Scene `nBibites` is
+   maintained on entry add/remove, and bibite delete refuses to orphan a
+   `body.eggLayer.children` parent link unless `DeleteOptions.PruneParentLinks`
+   is set. Pellet add/remove reconciles scene `nPellets` (carried on the op via
+   `Operation.SceneCount`, derived from the pellet resolver kind);
+   `PelletGroup.Count` needs no reconciliation because the parser derives it from
+   the pellet array length (`parse_environment.go`). Still separate:
+   corpse/pellet conversion, species-record consistency, and cross-save append
+   orchestration.

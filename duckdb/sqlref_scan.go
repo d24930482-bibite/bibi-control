@@ -12,11 +12,14 @@ import (
 
 // SQLRefScanSpec describes the normalized SQL cell being read from query rows.
 // Table and Column identify the target cell; ValueColumn defaults to Column
-// when the current value is selected under the same name.
+// when the current value is selected under the same name. Op selects the
+// mutation the rows are scanned for (set, delete, or append); the empty value
+// is treated as set.
 type SQLRefScanSpec struct {
 	Table       string
 	Column      string
 	ValueColumn string
+	Op          mutator.SQLRefOp
 }
 
 // SQLRefRow is one query result converted into a mutator ref and the current
@@ -36,7 +39,13 @@ func ScanSQLRefs(rows *sql.Rows, spec SQLRefScanSpec) ([]SQLRefRow, error) {
 	if spec.Table == "" {
 		return nil, fmt.Errorf("duckdb: SQL ref table is required")
 	}
-	if spec.Column == "" {
+	op := spec.Op
+	if op == "" {
+		op = mutator.SQLRefOpSet
+	}
+	// A writable column identifies the SET cell, and is also used as a stale
+	// guard for DELETE; APPEND targets the array container and needs no column.
+	if spec.Column == "" && op != mutator.SQLRefOpAppend {
 		return nil, fmt.Errorf("duckdb: SQL ref column is required")
 	}
 
@@ -49,13 +58,22 @@ func ScanSQLRefs(rows *sql.Rows, spec SQLRefScanSpec) ([]SQLRefRow, error) {
 		return nil, err
 	}
 
-	valueColumn := spec.ValueColumn
-	if valueColumn == "" {
-		valueColumn = spec.Column
-	}
-	valueIndex, ok := columnIndex[sqlColumnKey(valueColumn)]
-	if !ok {
-		return nil, fmt.Errorf("duckdb: current value column %q is required", valueColumn)
+	// Capture the current cell value (used as an expected-value guard) when a
+	// column is selected. It is required for SET, optional otherwise.
+	valueIndex := -1
+	if spec.Column != "" {
+		valueColumn := spec.ValueColumn
+		if valueColumn == "" {
+			valueColumn = spec.Column
+		}
+		idx, ok := columnIndex[sqlColumnKey(valueColumn)]
+		if !ok {
+			if op == mutator.SQLRefOpSet {
+				return nil, fmt.Errorf("duckdb: current value column %q is required", valueColumn)
+			}
+		} else {
+			valueIndex = idx
+		}
 	}
 
 	values := make([]any, len(columns))
@@ -75,14 +93,15 @@ func ScanSQLRefs(rows *sql.Rows, spec SQLRefScanSpec) ([]SQLRefRow, error) {
 		if err != nil {
 			return nil, fmt.Errorf("duckdb: SQL ref row %d: %w", rowIndex, err)
 		}
-		if _, _, err := mutator.ResolveSQLValueRef(ref); err != nil {
+		if err := mutator.ValidateSQLRefForOp(ref, op); err != nil {
 			return nil, fmt.Errorf("duckdb: SQL ref row %d: %w", rowIndex, err)
 		}
 
-		out = append(out, SQLRefRow{
-			Ref:          ref,
-			CurrentValue: normalizeSQLScanValue(values[valueIndex]),
-		})
+		row := SQLRefRow{Ref: ref}
+		if valueIndex >= 0 {
+			row.CurrentValue = normalizeSQLScanValue(values[valueIndex])
+		}
+		out = append(out, row)
 		rowIndex++
 	}
 	if err := rows.Err(); err != nil {

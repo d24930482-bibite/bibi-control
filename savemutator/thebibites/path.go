@@ -196,6 +196,142 @@ func setJSONPath(root any, path string, value any, options SetOptions) error {
 	return nil
 }
 
+// containerRef identifies one slot (a map key or an array index) inside a
+// parent container so callers can read, then write back, the value at that slot.
+// Array append/delete change a slice header, so the new slice must be written
+// back into its parent; setJSONPath never needs this because it mutates a slot
+// in place.
+type containerRef struct {
+	parentMap   map[string]any
+	parentSlice []any
+	key         string
+	index       int
+	isIndex     bool
+}
+
+func (c containerRef) get() (any, bool) {
+	if c.isIndex {
+		if c.index < 0 || c.index >= len(c.parentSlice) {
+			return nil, false
+		}
+		return c.parentSlice[c.index], true
+	}
+	value, ok := c.parentMap[c.key]
+	return value, ok
+}
+
+func (c containerRef) set(value any) {
+	if c.isIndex {
+		c.parentSlice[c.index] = value
+		return
+	}
+	c.parentMap[c.key] = value
+}
+
+// resolveContainer walks parts[:len-1] from root and returns a containerRef for
+// the slot named by the final part. It does not require the final slot to exist.
+func resolveContainer(root any, parts []pathPart) (containerRef, error) {
+	if len(parts) == 0 {
+		return containerRef{}, fmt.Errorf("path is empty")
+	}
+	current := root
+	for i := 0; i < len(parts)-1; i++ {
+		part := parts[i]
+		if part.isIndex {
+			values, ok := current.([]any)
+			if !ok {
+				return containerRef{}, fmt.Errorf("%s expected array", renderPath(parts[:i+1]))
+			}
+			if part.index >= len(values) {
+				return containerRef{}, fmt.Errorf("%s index out of range", renderPath(parts[:i+1]))
+			}
+			current = values[part.index]
+			continue
+		}
+		values, ok := current.(map[string]any)
+		if !ok {
+			return containerRef{}, fmt.Errorf("%s expected object", renderPath(parts[:i+1]))
+		}
+		next, ok := values[part.key]
+		if !ok {
+			return containerRef{}, fmt.Errorf("%s is missing", renderPath(parts[:i+1]))
+		}
+		current = next
+	}
+
+	last := parts[len(parts)-1]
+	if last.isIndex {
+		values, ok := current.([]any)
+		if !ok {
+			return containerRef{}, fmt.Errorf("%s expected array", renderPath(parts))
+		}
+		return containerRef{parentSlice: values, index: last.index, isIndex: true}, nil
+	}
+	values, ok := current.(map[string]any)
+	if !ok {
+		return containerRef{}, fmt.Errorf("%s expected object", renderPath(parts))
+	}
+	return containerRef{parentMap: values, key: last.key}, nil
+}
+
+// appendJSONArray appends value to the array at containerPath, writing the grown
+// slice back into its parent slot.
+func appendJSONArray(root any, containerPath string, value any) error {
+	parts, err := parsePath(containerPath)
+	if err != nil {
+		return err
+	}
+	ref, err := resolveContainer(root, parts)
+	if err != nil {
+		return err
+	}
+	existing, ok := ref.get()
+	if !ok {
+		return fmt.Errorf("%s is missing", containerPath)
+	}
+	array, ok := existing.([]any)
+	if !ok {
+		return fmt.Errorf("%s expected array", containerPath)
+	}
+	ref.set(append(array, normalizeJSONValue(value)))
+	return nil
+}
+
+// deleteJSONArrayElement removes the element addressed by elementPath, which must
+// end in an array index, writing the shortened slice back into its parent slot.
+func deleteJSONArrayElement(root any, elementPath string) error {
+	parts, err := parsePath(elementPath)
+	if err != nil {
+		return err
+	}
+	last := parts[len(parts)-1]
+	if !last.isIndex {
+		return fmt.Errorf("delete path %q must end in an array index", elementPath)
+	}
+	arrayParts := parts[:len(parts)-1]
+	if len(arrayParts) == 0 {
+		return fmt.Errorf("delete path %q cannot delete the root", elementPath)
+	}
+
+	ref, err := resolveContainer(root, arrayParts)
+	if err != nil {
+		return err
+	}
+	existing, ok := ref.get()
+	if !ok {
+		return fmt.Errorf("%s is missing", renderPath(arrayParts))
+	}
+	array, ok := existing.([]any)
+	if !ok {
+		return fmt.Errorf("%s expected array", renderPath(arrayParts))
+	}
+	if last.index < 0 || last.index >= len(array) {
+		return fmt.Errorf("%s index out of range", elementPath)
+	}
+	ref.set(append(array[:last.index], array[last.index+1:]...))
+	return nil
+}
+
 func renderPath(parts []pathPart) string {
 	var out strings.Builder
 	for i, part := range parts {

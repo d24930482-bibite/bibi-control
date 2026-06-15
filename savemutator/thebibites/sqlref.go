@@ -98,3 +98,119 @@ func ResolveSQLValueRef(ref SQLValueRef) (Target, string, error) {
 	}
 	return spec.resolve(ref)
 }
+
+// SQLRefOp names the kind of mutation a SQL ref is being resolved for.
+type SQLRefOp string
+
+const (
+	SQLRefOpSet    SQLRefOp = "set"
+	SQLRefOpDelete SQLRefOp = "delete"
+	SQLRefOpAppend SQLRefOp = "append"
+)
+
+// StageSQLDelete resolves ref into a delete operation and stages it.
+func (s *Session) StageSQLDelete(ref SQLValueRef) error {
+	op, err := SQLDelete(ref)
+	if err != nil {
+		return err
+	}
+	return s.Stage(op)
+}
+
+// StageSQLAppend resolves ref into an append operation for value and stages it.
+func (s *Session) StageSQLAppend(ref SQLValueRef, value any) error {
+	op, err := SQLAppend(ref, value)
+	if err != nil {
+		return err
+	}
+	return s.Stage(op)
+}
+
+// SQLDelete resolves ref into a delete operation: an array-element delete for
+// synapse/pellet/zone refs, or a whole-entry delete for bibite/egg refs. The
+// entry form refuses to orphan parent/child references; use StageDeleteBibite
+// with options for prune control.
+func SQLDelete(ref SQLValueRef) (Operation, error) {
+	spec, err := mutableSQLRefTable(ref)
+	if err != nil {
+		return Operation{}, err
+	}
+	if spec.deleteArray != nil {
+		target, elementPath, err := spec.deleteArray(ref)
+		if err != nil {
+			return Operation{}, err
+		}
+		if ref.HasExpected {
+			if field, err := sqlRefColumnValue(ref, spec.columns); err == nil {
+				target.Guards = append(target.Guards, Require(elementPath+"."+field, ref.Expected))
+			}
+		}
+		op := Delete(target, elementPath)
+		op.SceneCount = spec.sceneCount
+		return op, nil
+	}
+	if spec.entry != nil {
+		target, err := spec.entry(ref)
+		if err != nil {
+			return Operation{}, err
+		}
+		return DeleteEntry(target), nil
+	}
+	return Operation{}, unsupportedSQLRefOp(ref, SQLRefOpDelete)
+}
+
+// SQLAppend resolves ref into an append operation that appends value to the
+// referenced array. Entry-level append (a whole bibite/egg) requires a
+// cross-save workspace and is not supported through a single-save ref.
+func SQLAppend(ref SQLValueRef, value any) (Operation, error) {
+	spec, err := mutableSQLRefTable(ref)
+	if err != nil {
+		return Operation{}, err
+	}
+	if spec.appendArray != nil {
+		target, container, err := spec.appendArray(ref)
+		if err != nil {
+			return Operation{}, err
+		}
+		op := Append(target, container, value)
+		op.SceneCount = spec.sceneCount
+		return op, nil
+	}
+	if spec.entry != nil {
+		return Operation{}, fmt.Errorf("sql value ref %s entry-level append requires a cross-save workspace and is not supported in a single-save session", ref.Table)
+	}
+	return Operation{}, unsupportedSQLRefOp(ref, SQLRefOpAppend)
+}
+
+// ValidateSQLRefForOp reports whether ref resolves for op, without building a
+// staged operation. Used by query-result scanners to fail fast.
+func ValidateSQLRefForOp(ref SQLValueRef, op SQLRefOp) error {
+	switch op {
+	case SQLRefOpSet:
+		_, _, err := ResolveSQLValueRef(ref)
+		return err
+	case SQLRefOpDelete:
+		_, err := SQLDelete(ref)
+		return err
+	case SQLRefOpAppend:
+		_, err := SQLAppend(ref, nil)
+		return err
+	default:
+		return fmt.Errorf("unsupported sql ref op %q", op)
+	}
+}
+
+func mutableSQLRefTable(ref SQLValueRef) (sqlRefTableSpec, error) {
+	if ref.Table == "" {
+		return sqlRefTableSpec{}, fmt.Errorf("sql value ref table is required")
+	}
+	spec, ok := writableSQLRefTable(ref.Table)
+	if !ok {
+		return sqlRefTableSpec{}, unsupportedSQLValueRef(ref)
+	}
+	return spec, nil
+}
+
+func unsupportedSQLRefOp(ref SQLValueRef, op SQLRefOp) error {
+	return fmt.Errorf("sql value ref table %s does not support %s", ref.Table, op)
+}

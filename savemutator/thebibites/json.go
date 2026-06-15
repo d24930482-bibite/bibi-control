@@ -91,6 +91,27 @@ func normalizeJSONValue(value any) any {
 	}
 }
 
+func jsonNumberToInt64(value any) (int64, bool) {
+	switch v := value.(type) {
+	case json.Number:
+		if i, err := v.Int64(); err == nil {
+			return i, true
+		}
+		if f, err := v.Float64(); err == nil {
+			return int64(f), true
+		}
+		return 0, false
+	case int:
+		return int64(v), true
+	case int64:
+		return v, true
+	case float64:
+		return int64(v), true
+	default:
+		return 0, false
+	}
+}
+
 func jsonValuesEqual(a, b any) bool {
 	if ar, ok := numberRat(a); ok {
 		if br, ok := numberRat(b); ok {

@@ -12,6 +12,18 @@ type OperationKind string
 const (
 	// OperationSet updates an existing JSON value at Path.
 	OperationSet OperationKind = "set"
+	// OperationAppend appends Value to the JSON array at Path (the array
+	// container, e.g. brain.Synapses).
+	OperationAppend OperationKind = "append"
+	// OperationDelete removes the JSON array element at Path. Path must end in
+	// an array index, e.g. brain.Synapses[3].
+	OperationDelete OperationKind = "delete"
+	// OperationDeleteEntry removes a whole bibite/egg archive entry identified
+	// by Target and maintains the scene bibite count.
+	OperationDeleteEntry OperationKind = "delete_entry"
+	// OperationAppendEntry adds a whole bibite/egg archive entry from
+	// EntryPayload and maintains the scene bibite count.
+	OperationAppendEntry OperationKind = "append_entry"
 )
 
 const (
@@ -45,7 +57,14 @@ type Operation struct {
 	Path   string
 	Value  any
 
-	SetOptions SetOptions
+	SetOptions    SetOptions
+	DeleteOptions DeleteOptions
+	EntryPayload  EntryPayload
+
+	// SceneCount names a scene integer field to reconcile when this append/delete
+	// changes a counted collection (e.g. "nPellets"). Append adds one, delete
+	// subtracts one. Empty means the op touches no scene count.
+	SceneCount string
 }
 
 // SetOptions controls set operation behavior.
@@ -53,6 +72,21 @@ type SetOptions struct {
 	// CreateMissing permits missing object keys on the final path segment.
 	// Intermediate creation is intentionally not implemented yet.
 	CreateMissing bool
+}
+
+// DeleteOptions controls delete_entry behavior.
+type DeleteOptions struct {
+	// PruneParentLinks removes the deleted bibite/egg id from any other bibite's
+	// body.eggLayer.children array instead of refusing the delete. Without it, a
+	// delete that would orphan a parent/child reference is rejected.
+	PruneParentLinks bool
+}
+
+// EntryPayload carries a whole archive entry for OperationAppendEntry.
+type EntryPayload struct {
+	Name string
+	Kind tb.EntryKind
+	JSON any
 }
 
 // BibiteRef is a stable locator for a bibite entity inside an archive entry.
@@ -126,12 +160,52 @@ func SetWithOptions(target Target, path string, value any, options SetOptions) O
 	}
 }
 
+// Append returns an operation that appends value to the JSON array at the
+// container path inside target.
+func Append(target Target, containerPath string, value any) Operation {
+	return Operation{
+		Kind:   OperationAppend,
+		Target: target,
+		Path:   containerPath,
+		Value:  value,
+	}
+}
+
+// Delete returns an operation that removes the JSON array element at
+// elementPath (which must end in an array index) inside target.
+func Delete(target Target, elementPath string) Operation {
+	return Operation{
+		Kind:   OperationDelete,
+		Target: target,
+		Path:   elementPath,
+	}
+}
+
+// DeleteEntry returns an operation that removes a whole bibite/egg entry.
+func DeleteEntry(target Target) Operation {
+	return DeleteEntryWithOptions(target, DeleteOptions{})
+}
+
+// DeleteEntryWithOptions is DeleteEntry with explicit options.
+func DeleteEntryWithOptions(target Target, options DeleteOptions) Operation {
+	return Operation{
+		Kind:          OperationDeleteEntry,
+		Target:        target,
+		DeleteOptions: options,
+	}
+}
+
+// AppendEntry returns an operation that adds a whole bibite/egg entry.
+func AppendEntry(payload EntryPayload) Operation {
+	return Operation{
+		Kind:         OperationAppendEntry,
+		EntryPayload: payload,
+	}
+}
+
 func validateOperationShape(op Operation) error {
 	if op.Kind == "" {
 		return fmt.Errorf("operation kind is required")
-	}
-	if op.Target.EntryName == "" {
-		return fmt.Errorf("%s operation target entry name is required", op.Kind)
 	}
 	for _, guard := range op.Target.Guards {
 		if guard.Path == "" {
@@ -143,12 +217,36 @@ func validateOperationShape(op Operation) error {
 	}
 
 	switch op.Kind {
-	case OperationSet:
-		if op.Path == "" {
-			return fmt.Errorf("set operation path is required")
+	case OperationSet, OperationAppend, OperationDelete:
+		if op.Target.EntryName == "" {
+			return fmt.Errorf("%s operation target entry name is required", op.Kind)
 		}
-		if _, err := parsePath(op.Path); err != nil {
-			return fmt.Errorf("set operation path %q: %w", op.Path, err)
+		if op.Path == "" {
+			return fmt.Errorf("%s operation path is required", op.Kind)
+		}
+		parts, err := parsePath(op.Path)
+		if err != nil {
+			return fmt.Errorf("%s operation path %q: %w", op.Kind, op.Path, err)
+		}
+		if op.Kind == OperationDelete && !parts[len(parts)-1].isIndex {
+			return fmt.Errorf("delete operation path %q must end in an array index", op.Path)
+		}
+	case OperationDeleteEntry:
+		if op.Target.EntryName == "" {
+			return fmt.Errorf("%s operation target entry name is required", op.Kind)
+		}
+		if op.Target.Kind != tb.EntryBibite && op.Target.Kind != tb.EntryEgg {
+			return fmt.Errorf("delete_entry operation target kind = %q, want bibite or egg", op.Target.Kind)
+		}
+	case OperationAppendEntry:
+		if op.EntryPayload.Name == "" {
+			return fmt.Errorf("append_entry operation payload name is required")
+		}
+		if op.EntryPayload.Kind != tb.EntryBibite && op.EntryPayload.Kind != tb.EntryEgg {
+			return fmt.Errorf("append_entry operation payload kind = %q, want bibite or egg", op.EntryPayload.Kind)
+		}
+		if op.EntryPayload.JSON == nil {
+			return fmt.Errorf("append_entry operation payload JSON is required")
 		}
 	default:
 		return fmt.Errorf("unsupported operation kind %q", op.Kind)

@@ -213,11 +213,30 @@ func resolveSettingsZoneColumn(ref SQLValueRef, columns map[string]string) (Targ
 	if err != nil {
 		return Target{}, "", err
 	}
+	target, element, err := settingsZoneDeleteTarget(ref)
+	if err != nil {
+		return Target{}, "", err
+	}
+	return target, element + "." + field, nil
+}
+
+// settingsZoneAppendTarget resolves the settings zones array container for an
+// append (no zone guard, since the appended zone does not yet exist);
+// settingsZoneDeleteTarget extends it with the zone index and id guard for an
+// element delete/set. SET, DELETE, and APPEND share this locator core.
+func settingsZoneAppendTarget(ref SQLValueRef) (Target, string, error) {
+	if err := requireSQLRefString(ref, ref.EntryName, "entry_name"); err != nil {
+		return Target{}, "", err
+	}
+	return EntryTarget(ref.EntryName, tb.EntrySettings), "zones", nil
+}
+
+func settingsZoneDeleteTarget(ref SQLValueRef) (Target, string, error) {
 	if err := requireSQLRefString(ref, ref.EntryName, "entry_name"); err != nil {
 		return Target{}, "", err
 	}
 	if err := requireSQLRefFlag(ref, ref.HasZoneIndex, "zone_index"); err != nil {
 		return Target{}, "", err
 	}
-	return EntryTarget(ref.EntryName, tb.EntrySettings, zoneIDGuards(ref, ref.ZoneIndex)...), fmt.Sprintf("zones[%d].%s", ref.ZoneIndex, field), nil
+	return EntryTarget(ref.EntryName, tb.EntrySettings, zoneIDGuards(ref, ref.ZoneIndex)...), fmt.Sprintf("zones[%d]", ref.ZoneIndex), nil
 }

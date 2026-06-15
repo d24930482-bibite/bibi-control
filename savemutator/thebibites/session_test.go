@@ -353,7 +353,7 @@ func parseSyntheticArchive(t *testing.T) *tb.Archive {
 	rawBibite := append([]byte(nil), utf8BOM...)
 	rawBibite = append(rawBibite, []byte(`{"transform":{"position":[1,2],"rotation":0,"scale":1},"rb2d":{"px":1,"py":2,"vx":0,"vy":0,"r":0},"body":{"id":42,"energy":12.5,"stomach":{"content":[{"material":"Plant","amount":2.5,"averageChunkAmount":1.25}]}},"genes":{"speciesID":3,"gen":4,"genes":{"Diet":0.1,"Speed":1.1}},"brain":{"Nodes":[],"Synapses":[]}}`)...)
 	rawScene := append([]byte(nil), utf8BOM...)
-	rawScene = append(rawScene, []byte(`{"nBibites":1}`)...)
+	rawScene = append(rawScene, []byte(`{"nBibites":1,"nPellets":1}`)...)
 	rawSettings := append([]byte(nil), utf8BOM...)
 	rawSettings = append(rawSettings, []byte(`{"pelletEnergy":{"Value":20},"debugFlag":{"Value":true},"worldLabel":{"Value":"alpha"},"independents":{"worldSize":{"Value":1000}},"materials":{"Plant":{"energy":{"Value":2}}},"zones":[{"id":7,"name":"Zone A","material":"Plant","distribution":"uniform","posX":1,"posY":2,"radius":10,"radiusIsRelative":false,"fertility":{"Value":0.4},"size":5}],"zoneGroups":[],"bibites":[],"settingsChangers":[{"name":"season","repeat":true,"start":0,"settingsBases":{"Zone(0).fertility":0.4}}]}`)...)
 	rawPellets := append([]byte(nil), utf8BOM...)

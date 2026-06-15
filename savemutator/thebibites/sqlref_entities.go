@@ -78,8 +78,38 @@ func brainNodeColumnResolver(kind tb.EntryKind, columns map[string]string) sqlRe
 
 func brainSynapseColumnResolver(kind tb.EntryKind, columns map[string]string) sqlRefResolver {
 	return func(ref SQLValueRef) (Target, string, error) {
-		return resolveEntityBrainIndexedColumn(ref, kind, columns, ref.SynapseRowIndex, ref.HasSynapseRowIndex, "synapse_row_index", "brain.Synapses")
+		key, err := sqlRefColumnValue(ref, columns)
+		if err != nil {
+			return Target{}, "", err
+		}
+		target, element, err := entitySynapseDeleteTarget(ref, kind)
+		if err != nil {
+			return Target{}, "", err
+		}
+		return target, element + "." + key, nil
 	}
+}
+
+// entitySynapseAppendTarget resolves the brain.Synapses array container for an
+// append; entitySynapseDeleteTarget extends it with the row index for an element
+// delete/set. SET, DELETE, and APPEND all share this locator core.
+func entitySynapseAppendTarget(ref SQLValueRef, kind tb.EntryKind) (Target, string, error) {
+	target, err := entityTargetFromSQLRef(ref, kind)
+	if err != nil {
+		return Target{}, "", err
+	}
+	return target, "brain.Synapses", nil
+}
+
+func entitySynapseDeleteTarget(ref SQLValueRef, kind tb.EntryKind) (Target, string, error) {
+	if err := requireSQLRefFlag(ref, ref.HasSynapseRowIndex, "synapse_row_index"); err != nil {
+		return Target{}, "", err
+	}
+	target, container, err := entitySynapseAppendTarget(ref, kind)
+	if err != nil {
+		return Target{}, "", err
+	}
+	return target, fmt.Sprintf("%s[%d]", container, ref.SynapseRowIndex), nil
 }
 
 func resolveEntityBrainIndexedColumn(ref SQLValueRef, kind tb.EntryKind, columns map[string]string, index int, hasIndex bool, indexField, pathPrefix string) (Target, string, error) {
@@ -108,21 +138,39 @@ func resolvePelletColumn(ref SQLValueRef, columns map[string]string) (Target, st
 	if err != nil {
 		return Target{}, "", err
 	}
+	target, element, err := pelletDeleteTarget(ref)
+	if err != nil {
+		return Target{}, "", err
+	}
+	return target, element + "." + field, nil
+}
+
+// pelletAppendTarget resolves the pellets[g].pellets array container for an
+// append; pelletDeleteTarget extends it with the in-group index for an element
+// delete/set. SET, DELETE, and APPEND all share this locator/guard core.
+func pelletAppendTarget(ref SQLValueRef) (Target, string, error) {
 	if err := requireSQLRefString(ref, ref.EntryName, "entry_name"); err != nil {
 		return Target{}, "", err
 	}
 	if err := requireSQLRefFlag(ref, ref.HasGroupIndex, "group_index"); err != nil {
 		return Target{}, "", err
 	}
-	if err := requireSQLRefFlag(ref, ref.HasGroupPelletIndex, "group_pellet_index"); err != nil {
-		return Target{}, "", err
-	}
 	guards := make([]Guard, 0, 1)
 	if ref.HasZone {
 		guards = append(guards, Require(fmt.Sprintf("pellets[%d].zone", ref.GroupIndex), ref.Zone))
 	}
-	path := fmt.Sprintf("pellets[%d].pellets[%d].%s", ref.GroupIndex, ref.GroupPelletIndex, field)
-	return EntryTarget(ref.EntryName, tb.EntryPellets, guards...), path, nil
+	return EntryTarget(ref.EntryName, tb.EntryPellets, guards...), fmt.Sprintf("pellets[%d].pellets", ref.GroupIndex), nil
+}
+
+func pelletDeleteTarget(ref SQLValueRef) (Target, string, error) {
+	target, container, err := pelletAppendTarget(ref)
+	if err != nil {
+		return Target{}, "", err
+	}
+	if err := requireSQLRefFlag(ref, ref.HasGroupPelletIndex, "group_pellet_index"); err != nil {
+		return Target{}, "", err
+	}
+	return target, fmt.Sprintf("%s[%d]", container, ref.GroupPelletIndex), nil
 }
 
 func pheromoneColumnResolver(columns map[string]string) sqlRefResolver {

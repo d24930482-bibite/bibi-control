@@ -9,15 +9,63 @@ import (
 
 type sqlRefResolver func(SQLValueRef) (Target, string, error)
 
+// sqlRefArrayResolver resolves a ref to a target plus a JSON path: the array
+// container (for append) or the array element (for delete).
+type sqlRefArrayResolver func(SQLValueRef) (Target, string, error)
+
+// sqlRefEntryResolver resolves a ref to a whole-entry target (for entry
+// delete/append).
+type sqlRefEntryResolver func(SQLValueRef) (Target, error)
+
 type sqlRefTableSpec struct {
 	table   string
 	columns map[string]string
 	resolve sqlRefResolver
+
+	// Array/entry mutation capability is derived from the resolver kind, not a
+	// separate allowlist. nil means the table is not array/entry-mutable.
+	appendArray sqlRefArrayResolver // container path for OperationAppend
+	deleteArray sqlRefArrayResolver // element path for OperationDelete
+	entry       sqlRefEntryResolver // target for OperationDeleteEntry/AppendEntry
+
+	// sceneCount names the scene count reconciled when an array append/delete on
+	// this table changes a counted collection. Empty for most tables.
+	sceneCount string
 }
 
 var writableSQLRefTables = generatedWritableSQLRefTables
 
 func generatedSQLRefTable(table string, columns map[string]string, resolver tb.SQLRefResolverKind) sqlRefTableSpec {
+	spec := baseGeneratedSQLRefTable(table, columns, resolver)
+	switch resolver {
+	case tb.SQLRefResolverBibiteBrainSynapsePathMap:
+		spec.appendArray = synapseArrayResolver(tb.EntryBibite, entitySynapseAppendTarget)
+		spec.deleteArray = synapseArrayResolver(tb.EntryBibite, entitySynapseDeleteTarget)
+	case tb.SQLRefResolverEggBrainSynapsePathMap:
+		spec.appendArray = synapseArrayResolver(tb.EntryEgg, entitySynapseAppendTarget)
+		spec.deleteArray = synapseArrayResolver(tb.EntryEgg, entitySynapseDeleteTarget)
+	case tb.SQLRefResolverPelletPathMap:
+		spec.appendArray = pelletAppendTarget
+		spec.deleteArray = pelletDeleteTarget
+		spec.sceneCount = sceneCountPellets
+	case tb.SQLRefResolverSettingsZonePathMap:
+		spec.appendArray = settingsZoneAppendTarget
+		spec.deleteArray = settingsZoneDeleteTarget
+	case tb.SQLRefResolverBibitePathMap:
+		spec.entry = bibiteTargetFromSQLRef
+	case tb.SQLRefResolverEggPathMap:
+		spec.entry = eggTargetFromSQLRef
+	}
+	return spec
+}
+
+func synapseArrayResolver(kind tb.EntryKind, resolve func(SQLValueRef, tb.EntryKind) (Target, string, error)) sqlRefArrayResolver {
+	return func(ref SQLValueRef) (Target, string, error) {
+		return resolve(ref, kind)
+	}
+}
+
+func baseGeneratedSQLRefTable(table string, columns map[string]string, resolver tb.SQLRefResolverKind) sqlRefTableSpec {
 	switch resolver {
 	case tb.SQLRefResolverBibitePathMap:
 		return pathMapSQLRefTable(table, columns, bibiteTargetFromSQLRef)
