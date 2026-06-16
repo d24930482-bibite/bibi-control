@@ -243,7 +243,7 @@ func (e *ArrayElement) deleteBuiltin(thread *starlark.Thread, b *starlark.Builti
 		if err != nil {
 			return nil, fmt.Errorf("%s.delete: %w", e.spec.attr, err)
 		}
-		ref.Column = e.spec.guardColumn
+		ref.Column = guardSpec.sourceColumn
 		ref = ref.WithExpected(cur)
 	}
 	if err := e.ls.session.StageSQLDelete(ref); err != nil {

@@ -6,14 +6,28 @@ import (
 	"strings"
 )
 
-// mirror.go is the T6 in-run consistency core: a deferred buffer of scalar
-// mutations that DuckDB has not yet observed. Each set is staged on the Session
-// for the eventual single write AND recorded here; the buffer is flushed into the
-// open DuckDB as one batched UPDATE per (table, column) the next time a query or
+// mirror.go is the in-run consistency core: a deferred buffer of scalar mutations
+// that DuckDB has not yet observed. Each set is staged on the Session for the
+// eventual single write AND recorded here; the buffer is flushed into the open
+// DuckDB as one batched UPDATE per (table, column) the next time a query or
 // aggregate runs (see flushMirror in loadedsave.go). This is what lets an in-run
 // `query -> set -> query` observe its own mutation with no reparse and no
-// re-import — only incremental UPDATEs. Structural ops (T11) will mark the buffer
-// "structurally deferred" instead of mirroring; T6 mirrors scalar sets only.
+// re-import — only incremental UPDATEs. Structural ops (append/delete) are NOT
+// mirrored — they become visible only after commit (the consistency contract).
+//
+// A pending write is keyed by an ordered list of discriminator columns
+// (mirrorLocator) so any cell can be addressed: entity scalars by entry_name
+// alone, genes by (entry_name, gene_name), settings by (entry_name, path). The
+// flush emits those discriminators into the VALUES relation and AND-joins them in
+// the WHERE, so the single batched UPDATE per (table, column) is preserved
+// regardless of how many discriminators a surface needs.
+
+// mirrorLocator is one discriminator column = value pair. Together with the other
+// locators recorded for a (table, column), it uniquely identifies the DuckDB row.
+type mirrorLocator struct {
+	column string
+	value  any
+}
 
 // mirrorKey identifies a normalized (table, column) cell family. All values for
 // one key share a SQL type, so a flush emits one type-homogeneous UPDATE per key.
@@ -22,11 +36,21 @@ type mirrorKey struct {
 	column string
 }
 
-// mirrorColumn buffers pending writes for one (table, column): entry_name -> new
-// value, last-write-wins, plus the column's DuckDB type for the flush CAST.
+// mirrorRow is one pending write: the discriminator values (aligned positionally
+// with the owning mirrorColumn.locatorCols) and the new value.
+type mirrorRow struct {
+	locators []any
+	value    any
+}
+
+// mirrorColumn buffers pending writes for one (table, column): a composite locator
+// key -> pending row, last-write-wins. It carries the ordered discriminator column
+// names (consistent across all rows for this key) and the column's DuckDB type for
+// the flush CAST.
 type mirrorColumn struct {
-	sqlType string
-	rows    map[string]any // entry_name -> value
+	sqlType     string
+	locatorCols []string
+	rows        map[string]mirrorRow
 }
 
 // mirrorBuffer accumulates pending scalar mutations grouped by (table, column).
@@ -34,37 +58,58 @@ type mirrorBuffer struct {
 	cols map[mirrorKey]*mirrorColumn
 }
 
-// record buffers one scalar set, keyed by entry_name within its (table, column)
-// so N row-by-row sets of the same cell collapse to a single VALUES tuple.
-func (b *mirrorBuffer) record(table, column, sqlType, entryName string, value any) {
+// record buffers one scalar set, keyed within its (table, column) by the composite
+// of its discriminator values so N row-by-row sets of the same cell collapse to a
+// single VALUES tuple (last-write-wins).
+func (b *mirrorBuffer) record(table, column, sqlType string, locators []mirrorLocator, value any) {
 	if b.cols == nil {
 		b.cols = make(map[mirrorKey]*mirrorColumn)
 	}
 	key := mirrorKey{table: table, column: column}
 	col := b.cols[key]
 	if col == nil {
-		col = &mirrorColumn{sqlType: sqlType, rows: make(map[string]any)}
+		cols := make([]string, len(locators))
+		for i, l := range locators {
+			cols[i] = l.column
+		}
+		col = &mirrorColumn{sqlType: sqlType, locatorCols: cols, rows: make(map[string]mirrorRow)}
 		b.cols[key] = col
 	}
-	col.rows[entryName] = value
+	vals := make([]any, len(locators))
+	var rowKey strings.Builder
+	for i, l := range locators {
+		vals[i] = l.value
+		if i > 0 {
+			rowKey.WriteByte(0)
+		}
+		fmt.Fprintf(&rowKey, "%v", l.value)
+	}
+	col.rows[rowKey.String()] = mirrorRow{locators: vals, value: value}
 }
 
 func (b *mirrorBuffer) empty() bool { return len(b.cols) == 0 }
 
 func (b *mirrorBuffer) reset() { b.cols = nil }
 
-// recordMirror buffers a pending scalar mutation and marks DuckDB dirty so the
-// next query/aggregate flushes it.
+// recordMirror buffers a pending scalar mutation keyed by entry_name alone — the
+// convenience wrapper for entity-scalar and bulk sets, whose entry_name is unique
+// per entity within a save. Marks DuckDB dirty so the next query/aggregate flushes.
 func (ls *LoadedSave) recordMirror(table, column, sqlType, entryName string, value any) {
-	ls.mirror.record(table, column, sqlType, entryName, value)
+	ls.recordMirrorRow(table, column, sqlType, []mirrorLocator{{column: "entry_name", value: entryName}}, value)
+}
+
+// recordMirrorRow buffers a pending scalar mutation keyed by an arbitrary set of
+// discriminator columns (genes, settings) and marks DuckDB dirty.
+func (ls *LoadedSave) recordMirrorRow(table, column, sqlType string, locators []mirrorLocator, value any) {
+	ls.mirror.record(table, column, sqlType, locators, value)
 	ls.mirrorDirty = true
 }
 
 // flushMirrorColumn applies one (table, column)'s buffered writes as a single
 // set-based UPDATE: the new values arrive as an inline VALUES relation joined on
-// entry_name, so the whole column updates in one statement regardless of row
-// count. The val is CAST to the column's DuckDB type so untyped placeholders in
-// VALUES resolve unambiguously.
+// every discriminator column, so the whole column updates in one statement
+// regardless of row count. The val is CAST to the column's DuckDB type so untyped
+// placeholders in VALUES resolve unambiguously.
 func (ls *LoadedSave) flushMirrorColumn(ctx context.Context, key mirrorKey, col *mirrorColumn) error {
 	if len(col.rows) == 0 {
 		return nil
@@ -81,20 +126,33 @@ func (ls *LoadedSave) flushMirrorColumn(ctx context.Context, key mirrorKey, col 
 	b.WriteString(quoteIdent(key.column))
 	b.WriteString(" = v.val FROM (VALUES ")
 
-	args := make([]any, 0, len(col.rows)*2+1)
+	args := make([]any, 0, len(col.rows)*(len(col.locatorCols)+1)+1)
 	i := 0
-	for entryName, val := range col.rows {
+	for _, row := range col.rows {
 		if i > 0 {
 			b.WriteString(", ")
 		}
-		b.WriteString("(?, CAST(? AS " + castType + "))")
-		args = append(args, entryName, val)
+		b.WriteByte('(')
+		for j := range col.locatorCols {
+			b.WriteString("?, ")
+			args = append(args, row.locators[j])
+		}
+		b.WriteString("CAST(? AS " + castType + "))")
+		args = append(args, row.value)
 		i++
 	}
-	b.WriteString(") AS v(entry_name, val) WHERE ")
-	b.WriteString(quoteIdent(key.table) + ".save_id = ? AND ")
-	b.WriteString(quoteIdent(key.table) + ".entry_name = v.entry_name")
+
+	b.WriteString(") AS v(")
+	for _, c := range col.locatorCols {
+		b.WriteString(quoteIdent(c))
+		b.WriteString(", ")
+	}
+	b.WriteString("val) WHERE ")
+	b.WriteString(quoteIdent(key.table) + ".save_id = ?")
 	args = append(args, ls.saveID)
+	for _, c := range col.locatorCols {
+		b.WriteString(" AND " + quoteIdent(key.table) + "." + quoteIdent(c) + " = v." + quoteIdent(c))
+	}
 
 	if _, err := ls.db.ExecContext(ctx, b.String(), args...); err != nil {
 		return fmt.Errorf("mirror %s.%s: %w", key.table, key.column, err)

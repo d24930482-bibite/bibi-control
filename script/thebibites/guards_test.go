@@ -114,20 +114,23 @@ func TestDerivedTypeRuleNoAllowlist(t *testing.T) {
 }
 
 // TestSemanticRulesReferenceLiveColumns: every hand-maintained override key must
-// resolve to a live writable column. A save-format rename/removal that orphans an
-// override fails here — loud and localized, per the churn strategy.
+// resolve to a live writable source column. semanticRules is keyed by the
+// generated source column (attrSpec.sourceColumn), so this collects those rather
+// than the friendly registry keys (which may be aliases). A save-format
+// rename/removal that orphans an override fails here — loud and localized, per the
+// churn strategy.
 func TestSemanticRulesReferenceLiveColumns(t *testing.T) {
-	reg := attrRegistry()
-	for col := range semanticRules {
-		live := false
-		for kind := range reg {
-			if spec, ok := reg[kind][col]; ok && spec.writable {
-				live = true
-				break
+	writableSources := map[string]bool{}
+	for _, attrs := range attrRegistry() {
+		for _, spec := range attrs {
+			if spec.writable {
+				writableSources[spec.sourceColumn] = true
 			}
 		}
-		if !live {
-			t.Errorf("semanticRules key %q is not a live writable column (save-format drift?)", col)
+	}
+	for col := range semanticRules {
+		if !writableSources[col] {
+			t.Errorf("semanticRules key %q is not a live writable source column (save-format drift?)", col)
 		}
 	}
 }

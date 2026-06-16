@@ -1,6 +1,10 @@
 package thebibites
 
-import "fmt"
+import (
+	"fmt"
+
+	tb "github.com/asemones/bibicontrol/saveparser/thebibites"
+)
 
 // Value-validation guards (T10). These run on a writable scalar mutation *before*
 // it is staged (Entity.SetField, the bulk where(...).set path), rejecting values
@@ -79,9 +83,11 @@ func deriveType(sqlType string) valueKind {
 var zeroMin = 0.0
 
 // nonNegativeColumns are the writable signed (DOUBLE/BIGINT) columns that are
-// physically non-negative, so a negative value is staging nonsense. Keyed by
-// friendly column name because the constraint is kind-independent (a bibite's and
-// an egg's energy are both >= 0). UBIGINT columns are non-negative by type and are
+// physically non-negative, so a negative value is staging nonsense. Keyed by the
+// generated source column (attrSpec.sourceColumn) because the constraint is a
+// property of the underlying quantity, kind-independent and alias-independent (a
+// bibite's and an egg's energy are both >= 0; an alias like hp->health still
+// inherits health's bound). UBIGINT columns are non-negative by type and are
 // intentionally absent here (no redundant entries). species_id is included as the
 // chosen "shape-only" rule — a non-negative id; full referential existence (must
 // match a species row) is a deliberate seam, not implemented here.
@@ -102,9 +108,10 @@ var nonNegativeColumns = []string{
 }
 
 // semanticRules holds the few value constraints generated metadata cannot express,
-// keyed by friendly column name. Type and read-only are NOT here — they are
-// derived. Today it is exactly the non-negative set; explicit Min/Max/Enum entries
-// for special columns can be added later by extending this map.
+// keyed by the generated source column (attrSpec.sourceColumn). Type and read-only
+// are NOT here — they are derived. Today it is exactly the non-negative set;
+// explicit Min/Max/Enum entries for special columns can be added later by
+// extending this map.
 var semanticRules = func() map[string]Rule {
 	m := make(map[string]Rule, len(nonNegativeColumns))
 	for _, col := range nonNegativeColumns {
@@ -114,7 +121,9 @@ var semanticRules = func() map[string]Rule {
 }()
 
 // ruleFor builds the effective Rule for a column: its derived Type merged with any
-// semantic override (bounds/enum). Keyed by the friendly column name.
+// semantic override (bounds/enum). The column argument is the generated source
+// column (attrSpec.sourceColumn), so semantic bounds follow the real quantity
+// regardless of any friendly alias.
 func ruleFor(column, sqlType string) Rule {
 	r := Rule{Type: deriveType(sqlType)}
 	if o, ok := semanticRules[column]; ok {
@@ -127,7 +136,25 @@ func ruleFor(column, sqlType string) Rule {
 // fromStarlark) against the column's effective Rule, before staging. Callers wrap
 // the returned reason with the "%s.%s: %w" attribute context they already use.
 func validateSet(spec attrSpec, goVal any) error {
-	return validateValue(ruleFor(spec.column, spec.sqlType), goVal)
+	return validateValue(ruleFor(spec.sourceColumn, spec.sqlType), goVal)
+}
+
+// scalarTypeRule is the value-validation Rule for a gene or settings value, keyed
+// by its parsed ScalarType (type only — these carry no semantic bounds; a gene or
+// setting may legitimately be negative). It lets gene/settings writes reuse
+// validateValue exactly as entity scalars do. Null/unknown yields kindUnknown (no
+// type check); scalarValueColumn separately rejects the unsettable null cell.
+func scalarTypeRule(t tb.ScalarType) Rule {
+	switch t {
+	case tb.ScalarNumber:
+		return Rule{Type: kindNumber}
+	case tb.ScalarBool:
+		return Rule{Type: kindBool}
+	case tb.ScalarString:
+		return Rule{Type: kindString}
+	default:
+		return Rule{Type: kindUnknown}
+	}
 }
 
 // validateValue is the pure check: type, then range (numeric), then enum (string).

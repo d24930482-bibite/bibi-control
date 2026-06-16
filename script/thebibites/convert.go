@@ -201,6 +201,54 @@ func asInt64(v any) (int64, bool) {
 	}
 }
 
+// scalarValueColumn names, for a ScalarType, the typed DuckDB value column and its
+// SQL type. Shared by gene and settings-value writes, whose rows both carry
+// number/bool/string value columns selected by a ScalarType. Null/unknown is not
+// settable (the JSON cell holds no scalar to guard or replace).
+func scalarValueColumn(t tb.ScalarType) (column, sqlType string, err error) {
+	switch t {
+	case tb.ScalarNumber:
+		return "number_value", "DOUBLE", nil
+	case tb.ScalarBool:
+		return "bool_value", "BOOLEAN", nil
+	case tb.ScalarString:
+		return "string_value", "TEXT", nil
+	default:
+		return "", "", fmt.Errorf("value of type %q is not settable", t)
+	}
+}
+
+// applyScalarValue coerces goVal (from fromStarlark) to the type named by t,
+// captures the current value (for the stale-value guard), writes the new value
+// through the supplied gene/settings field pointers, and returns the old + staged
+// values. validateValue(scalarTypeRule(t), …) must run first; the ok-checks here
+// are the same memory-safety belt setRowField provides for entity scalars.
+func applyScalarValue(t tb.ScalarType, goVal any, num *float64, bl *bool, str *string) (old, staged any, err error) {
+	switch t {
+	case tb.ScalarNumber:
+		f, ok := asFloat64(goVal)
+		if !ok {
+			return nil, nil, fmt.Errorf("cannot assign %s to a number value", goScalarName(goVal))
+		}
+		old, *num, staged = *num, f, f
+	case tb.ScalarBool:
+		b, ok := goVal.(bool)
+		if !ok {
+			return nil, nil, fmt.Errorf("cannot assign %s to a boolean value", goScalarName(goVal))
+		}
+		old, *bl, staged = *bl, b, b
+	case tb.ScalarString:
+		s, ok := goVal.(string)
+		if !ok {
+			return nil, nil, fmt.Errorf("cannot assign %s to a string value", goScalarName(goVal))
+		}
+		old, *str, staged = *str, s, s
+	default:
+		return nil, nil, fmt.Errorf("value of type %q is not settable", t)
+	}
+	return old, staged, nil
+}
+
 // geneValueToStarlark converts a typed gene cell into a Starlark value following
 // the gene's ScalarType. Null genes read as None.
 func geneValueToStarlark(g tb.GeneRow) starlark.Value {

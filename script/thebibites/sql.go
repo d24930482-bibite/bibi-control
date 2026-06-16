@@ -120,16 +120,15 @@ type aggCall struct {
 // resolveColumn maps a friendly column name to its qualified DuckDB reference
 // "<table>"."<column>" via the generated-metadata registry — the same resolution
 // table that powers reads. It returns the owning table so the caller can JOIN it.
-// Unknown column -> clean diagnostic.
-//
-// NOTE: spec.column is the canonical DuckDB column. (overrides aliases are empty
-// today; if added, the registry would need to retain the source column for SQL.)
+// Unknown column -> clean diagnostic. The friendly name (the registry key, which
+// may be an alias) resolves to spec.sourceColumn — the real generated DuckDB
+// column — so an aliased column queries the column that actually exists.
 func resolveColumn(kind, col string) (qualified, table string, err error) {
 	spec, ok := attrRegistry()[kind][col]
 	if !ok {
 		return "", "", fmt.Errorf("unknown column %q for %s", col, kind)
 	}
-	return quoteIdent(spec.table) + "." + quoteIdent(spec.column), spec.table, nil
+	return quoteIdent(spec.table) + "." + quoteIdent(spec.sourceColumn), spec.table, nil
 }
 
 // aggExpr builds the SQL aggregate expression and reports the sub-table (if any)
@@ -359,7 +358,7 @@ func (ls *LoadedSave) bulkSet(kind, where, column string, value starlark.Value) 
 	if err != nil {
 		return 0, wrapWhere(where, err)
 	}
-	refs, err := duckdb.ScanSQLRefs(rows, duckdb.SQLRefScanSpec{Table: spec.table, Column: spec.column})
+	refs, err := duckdb.ScanSQLRefs(rows, duckdb.SQLRefScanSpec{Table: spec.table, Column: spec.sourceColumn})
 	rows.Close()
 	if err != nil {
 		return 0, wrapWhere(where, err)
@@ -378,7 +377,7 @@ func (ls *LoadedSave) bulkSet(kind, where, column string, value starlark.Value) 
 			return 0, fmt.Errorf("%s.%s: %w", kind, column, err)
 		}
 		ls.stagedOps++
-		ls.recordMirror(spec.table, spec.column, spec.sqlType, r.Ref.EntryName, staged)
+		ls.recordMirror(spec.table, spec.sourceColumn, spec.sqlType, r.Ref.EntryName, staged)
 	}
 	return len(refs), nil
 }
@@ -413,7 +412,7 @@ func (ls *LoadedSave) bulkSetQuery(kind, where string, spec attrSpec) (string, [
 	if err != nil {
 		return "", nil, err
 	}
-	valueCol := quoteIdent(spec.table) + "." + quoteIdent(spec.column) + " AS " + quoteIdent(spec.column)
+	valueCol := quoteIdent(spec.table) + "." + quoteIdent(spec.sourceColumn) + " AS " + quoteIdent(spec.sourceColumn)
 	q := "SELECT " + locators + ", " + valueCol + " " + from + " " + whereSQL
 	return q, args, nil
 }
@@ -524,7 +523,7 @@ func (ls *LoadedSave) rewritePredicate(kind, expr string) (string, map[string]bo
 			isCall := k < len(s) && s[k] == '('
 			if !dotted && !isCall {
 				if spec, ok := reg[strings.ToLower(word)]; ok {
-					writeStr(quoteIdent(spec.table) + "." + quoteIdent(spec.column))
+					writeStr(quoteIdent(spec.table) + "." + quoteIdent(spec.sourceColumn))
 					tables[spec.table] = true
 					i = j
 					continue

@@ -49,6 +49,14 @@ type LoadedSave struct {
 	geneOnce sync.Once
 	geneIdx  map[string]map[string]*geneSet // kind -> entry_name -> genes
 
+	// settingsIdx indexes the per-scope settings value tables by (owner_id,
+	// setting_name) into their backing slices, so a named settings read/write is
+	// O(1) and writes through to ls.tables. owner_id is the scope discriminator:
+	// "settings" for simulation, "independents" for independent, the material name
+	// for material. Built lazily, modeled on the gene index.
+	settingsOnce sync.Once
+	settingsIdx  map[string]map[string]map[string]int // table -> owner_id -> setting_name -> backing index
+
 	// subRowIdx indexes 1:many sub-collection tables (brain synapses/nodes,
 	// stomach contents) by entry_name, holding each entity's element rows in array
 	// order (T11b). Built lazily; reads served in-memory like genes.
@@ -85,11 +93,15 @@ type LoadedSave struct {
 	reparseCount      int
 }
 
-// geneSet holds one entity's genes both in save order (for iteration) and by
-// name (for gene() lookup).
+// geneSet indexes one entity's genes into the kind's underlying gene slice
+// (backing): order holds the slice indices in save order (for iteration), byName
+// maps gene name -> slice index (for gene() lookup). Both point into backing so a
+// gene write (setGeneValue) through backing[idx] is observed by every read path
+// without a second copy.
 type geneSet struct {
-	order  []tb.GeneRow
-	byName map[string]tb.GeneRow
+	backing []tb.GeneRow   // ls.tables.BibiteGenes or EggGenes
+	order   []int          // indices into backing for this entity, in save order
+	byName  map[string]int // gene name -> index into backing
 }
 
 // Load parses and normalizes a save file once and prepares it for scripting. It
@@ -251,14 +263,73 @@ func (ls *LoadedSave) buildSubRowIndex() {
 
 func indexGenes(rows []tb.GeneRow) map[string]*geneSet {
 	out := make(map[string]*geneSet)
-	for _, g := range rows {
+	for i := range rows {
+		g := rows[i]
 		set := out[g.EntryName]
 		if set == nil {
-			set = &geneSet{byName: make(map[string]tb.GeneRow)}
+			set = &geneSet{backing: rows, byName: make(map[string]int)}
 			out[g.EntryName] = set
 		}
-		set.order = append(set.order, g)
-		set.byName[g.GeneName] = g
+		set.order = append(set.order, i)
+		set.byName[g.GeneName] = i
+	}
+	return out
+}
+
+// settingsBacking returns the live row slice backing one settings-value table, so
+// settingRow can hand out a pointer that writes through to ls.tables.
+func (ls *LoadedSave) settingsBacking(table string) []tb.SettingValueRow {
+	switch table {
+	case "settings_simulation_values":
+		return ls.tables.SettingsSimulationValues
+	case "settings_independent_values":
+		return ls.tables.SettingsIndependentValues
+	case "settings_material_values":
+		return ls.tables.SettingsMaterialValues
+	default:
+		return nil
+	}
+}
+
+// settingRow returns a pointer to the SettingValueRow for one (table, owner_id,
+// setting_name), building the per-table index lazily. The pointer is into the
+// backing slice, so a caller's write-through is observed by later reads and the
+// DuckDB import. Returns nil when the setting is absent.
+func (ls *LoadedSave) settingRow(table, ownerID, name string) (*tb.SettingValueRow, bool) {
+	ls.settingsOnce.Do(ls.buildSettingsIndex)
+	idx, ok := ls.settingsIdx[table][ownerID][name]
+	if !ok {
+		return nil, false
+	}
+	backing := ls.settingsBacking(table)
+	if idx < 0 || idx >= len(backing) {
+		return nil, false
+	}
+	return &backing[idx], true
+}
+
+func (ls *LoadedSave) buildSettingsIndex() {
+	ls.settingsIdx = map[string]map[string]map[string]int{
+		"settings_simulation_values":  indexSettings(ls.tables.SettingsSimulationValues),
+		"settings_independent_values": indexSettings(ls.tables.SettingsIndependentValues),
+		"settings_material_values":    indexSettings(ls.tables.SettingsMaterialValues),
+	}
+}
+
+// indexSettings groups a settings-value slice by (owner_id, setting_name) into
+// backing indices. owner_id is constant within the flat scopes (simulation,
+// independent) and the material name for material values, so this one shape serves
+// every scope.
+func indexSettings(rows []tb.SettingValueRow) map[string]map[string]int {
+	out := make(map[string]map[string]int)
+	for i := range rows {
+		r := rows[i]
+		byName := out[r.OwnerID]
+		if byName == nil {
+			byName = make(map[string]int)
+			out[r.OwnerID] = byName
+		}
+		byName[r.SettingName] = i
 	}
 	return out
 }

@@ -6,9 +6,10 @@ import (
 	"go.starlark.net/starlark"
 )
 
-// Save is the top-level Starlark binding (the predeclared `save` global). T4
-// exposes read-only entity collections; save.settings (T7) and save.sql (T5)
-// attach here later.
+// Save is the top-level Starlark binding (the predeclared `save` global). It
+// exposes read-only entity collections (save.bibites/save.eggs), analytics
+// (save.sql + collection push-down), the settings namespace (save.settings), and
+// commit (save.commit). save.zones/save.pellets attach here in P2.
 type Save struct {
 	ls *LoadedSave
 }
@@ -32,6 +33,8 @@ func (s *Save) Attr(name string) (starlark.Value, error) {
 		return &EntityCollection{ls: s.ls, kind: "egg"}, nil
 	case "sql":
 		return starlark.NewBuiltin("sql", s.sqlBuiltin), nil
+	case "settings":
+		return &Settings{ls: s.ls}, nil
 	case "commit":
 		return starlark.NewBuiltin("commit", s.commitBuiltin), nil
 	default:
@@ -40,7 +43,7 @@ func (s *Save) Attr(name string) (starlark.Value, error) {
 }
 
 func (s *Save) AttrNames() []string {
-	return []string{"bibites", "commit", "eggs", "sql"}
+	return []string{"bibites", "commit", "eggs", "settings", "sql"}
 }
 
 // commitBuiltin implements save.commit(path) -> staged op count. It applies the

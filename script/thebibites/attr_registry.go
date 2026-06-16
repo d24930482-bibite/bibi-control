@@ -27,14 +27,23 @@ const (
 // attrSpec describes one friendly attribute of an entity kind. Everything here
 // is derived from tb.NormalizedTables — there is no hand-maintained allowlist of
 // readable fields. writable/sqlType are recorded now and consumed by T6.
+//
+// column vs sourceColumn: column is the FRIENDLY name — the registry map key and
+// the b.<name> surface (== sourceColumn unless an entry in overrides renames it).
+// sourceColumn is the generated DuckDB/sqlref column the value actually lives in;
+// it is what every SQL query, mutator SQLValueRef, DuckDB mirror, and guard rule
+// must key on. Keeping them distinct is what makes a writable alias (e.g.
+// position_x -> transform_position_x) resolve correctly instead of querying a
+// non-existent "position_x" column.
 type attrSpec struct {
-	category   attrCategory
-	table      string // normalized table the value lives in
-	column     string // friendly (snake_case) name, == NormalizedFieldSpec.Column
-	fieldIndex []int  // reflect index path into the row struct
-	writable   bool   // field has an sqlref path (mutable) — used by T6, not T4
-	sqlType    string
-	jsonKey    string // raw JSON key (NormalizedFieldSpec.SQLRefPath); used by T11b sub-collection append
+	category     attrCategory
+	table        string // normalized table the value lives in
+	column       string // friendly (snake_case) name == registry key (alias or generated)
+	sourceColumn string // generated DuckDB/sqlref column == NormalizedFieldSpec.Column
+	fieldIndex   []int  // reflect index path into the row struct
+	writable     bool   // field has an sqlref path (mutable) — used by T6, not T4
+	sqlType      string
+	jsonKey      string // raw JSON key (NormalizedFieldSpec.SQLRefPath); used by T11b sub-collection append
 }
 
 // entityTables lists, per entity kind, the normalized tables whose columns are
@@ -62,9 +71,22 @@ var entityTables = map[string][]string{
 
 // overrides renames/aliases generated column names to friendlier ones, keyed by
 // entity kind then friendly alias -> source column. It is the only hand-edited
-// surface in the registry and is intentionally tiny. (Gene-backed aliases like
-// "diet" are not added here because genes resolve through gene(), not columns.)
-var overrides = map[string]map[string]string{}
+// surface in the registry and is intentionally tiny. The friendly alias becomes
+// the registry key + b.<name> surface; spec.sourceColumn stays the generated
+// column so SQL/mutator/mirror/guard keying is unaffected. (Gene-backed aliases
+// like "diet" are not added here because genes resolve through gene(), not columns.)
+var overrides = map[string]map[string]string{
+	"bibite": {
+		"position_x": "transform_position_x",
+		"position_y": "transform_position_y",
+		"rotation":   "transform_rotation",
+	},
+	"egg": {
+		"position_x": "transform_position_x",
+		"position_y": "transform_position_y",
+		"rotation":   "transform_rotation",
+	},
+}
 
 var (
 	registryOnce sync.Once
@@ -115,16 +137,20 @@ func buildRegistry() {
 				idx := make([]int, len(sf.Index))
 				copy(idx, sf.Index)
 				attrs[field.Column] = attrSpec{
-					category:   categoryScalar,
-					table:      table,
-					column:     field.Column,
-					fieldIndex: idx,
-					writable:   field.SQLRefPath != "",
-					sqlType:    field.SQLType,
-					jsonKey:    field.SQLRefPath,
+					category:     categoryScalar,
+					table:        table,
+					column:       field.Column,
+					sourceColumn: field.Column,
+					fieldIndex:   idx,
+					writable:     field.SQLRefPath != "",
+					sqlType:      field.SQLType,
+					jsonKey:      field.SQLRefPath,
 				}
 			}
 		}
+		// Register friendly aliases: the alias becomes the map key + display
+		// (spec.column), but spec.sourceColumn is preserved so all SQL/mutator/
+		// mirror/guard keying still targets the real generated column.
 		for alias, source := range overrides[kind] {
 			if spec, ok := attrs[source]; ok {
 				spec.column = alias
@@ -257,13 +283,14 @@ func buildSubRegistry() {
 					continue
 				}
 				sc.elementAttrs[field.Column] = attrSpec{
-					category:   categoryScalar,
-					table:      info.table,
-					column:     field.Column,
-					fieldIndex: idx,
-					writable:   field.SQLRefPath != "",
-					sqlType:    field.SQLType,
-					jsonKey:    field.SQLRefPath,
+					category:     categoryScalar,
+					table:        info.table,
+					column:       field.Column,
+					sourceColumn: field.Column,
+					fieldIndex:   idx,
+					writable:     field.SQLRefPath != "",
+					sqlType:      field.SQLType,
+					jsonKey:      field.SQLRefPath,
 				}
 				if field.SQLRefPath != "" {
 					sc.writableCols = append(sc.writableCols, field.Column)

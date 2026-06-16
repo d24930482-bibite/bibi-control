@@ -123,12 +123,12 @@ func (e *Entity) SetField(name string, val starlark.Value) error {
 	if err != nil {
 		return err
 	}
-	ref.Table, ref.Column = spec.table, spec.column
+	ref.Table, ref.Column = spec.table, spec.sourceColumn
 	if err := e.ls.session.StageSQLSet(ref.WithExpected(old), staged); err != nil {
 		return fmt.Errorf("%s.%s: %w", e.kind, name, err)
 	}
 	e.ls.stagedOps++
-	e.ls.recordMirror(spec.table, spec.column, spec.sqlType, e.entryName, staged)
+	e.ls.recordMirror(spec.table, spec.sourceColumn, spec.sqlType, e.entryName, staged)
 	return nil
 }
 
@@ -142,11 +142,11 @@ func (e *Entity) geneBuiltin(thread *starlark.Thread, b *starlark.Builtin, args 
 	if genes == nil {
 		return starlark.None, nil
 	}
-	g, ok := genes.byName[name]
+	idx, ok := genes.byName[name]
 	if !ok {
 		return starlark.None, nil
 	}
-	return geneValueToStarlark(g), nil
+	return geneValueToStarlark(genes.backing[idx]), nil
 }
 
 // deleteBuiltin implements b.delete(prune=False): stage a whole-entity delete.
