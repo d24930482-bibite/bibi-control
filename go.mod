@@ -6,6 +6,7 @@ toolchain go1.24.5
 
 require (
 	github.com/duckdb/duckdb-go/v2 v2.10503.1
+	go.starlark.net v0.0.0-20260324133313-ffb3f39dd27a
 	gocloud.dev v0.45.0
 	modernc.org/sqlite v1.45.0
 )
