@@ -196,3 +196,187 @@ func TestPelletSetFieldRejects(t *testing.T) {
 		t.Errorf("stagedOps = %d after rejected sets, want 0", ls.stagedOps)
 	}
 }
+
+// clonePellet drives save.pellets.clone(i) and asserts a *PendingPellet.
+func clonePellet(t *testing.T, ls *LoadedSave, i int) *PendingPellet {
+	t.Helper()
+	cv, err := callMethod(t, &Pellets{ls: ls}, "clone", starlark.MakeInt(i))
+	if err != nil {
+		t.Fatalf("clone(%d): %v", i, err)
+	}
+	pp, ok := cv.(*PendingPellet)
+	if !ok {
+		t.Fatalf("clone(%d) returned %T, want *PendingPellet", i, cv)
+	}
+	return pp
+}
+
+// TestPelletCloneAppendPersists: clone a pellet, edit a few scalars, append to a
+// group, and confirm the reparsed save gained the pellet — with the edited scalars
+// AND the template's physics (rb2d) inherited verbatim by the deep copy.
+func TestPelletCloneAppendPersists(t *testing.T) {
+	ls := loadFixture(t)
+	if len(ls.tables.Pellets) == 0 {
+		t.Skip("fixture has no pellets")
+	}
+	tmpl := ls.tables.Pellets[0]
+	group := tmpl.GroupIndex
+	before := len(ls.tables.Pellets)
+	inGroup := 0 // current size of the target group == the appended element's gpi
+	for _, r := range ls.tables.Pellets {
+		if r.EntryName == tmpl.EntryName && r.GroupIndex == group {
+			inGroup++
+		}
+	}
+
+	pp := clonePellet(t, ls, 0)
+	const (
+		wantMat = "ClonedMeat"
+		wantAmt = 42.5
+		wantX   = 123.5
+		wantY   = -67.25
+	)
+	edits := []struct {
+		name string
+		val  starlark.Value
+	}{
+		{"material", starlark.String(wantMat)},
+		{"amount", starlark.Float(wantAmt)},
+		{"position_x", starlark.Float(wantX)},
+		{"position_y", starlark.Float(wantY)},
+	}
+	for _, e := range edits {
+		if err := pp.SetField(e.name, e.val); err != nil {
+			t.Fatalf("SetField(%s): %v", e.name, err)
+		}
+	}
+	if _, err := callMethod(t, pp, "append", starlark.String(tmpl.Zone)); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if ls.stagedOps != 1 {
+		t.Errorf("stagedOps = %d, want 1", ls.stagedOps)
+	}
+
+	tmp := filepath.Join(t.TempDir(), "out.zip")
+	if err := ls.WriteSave(tmp); err != nil {
+		t.Fatalf("WriteSave: %v", err)
+	}
+	re, err := tb.ParseFile(tmp, nil)
+	if err != nil {
+		t.Fatalf("reparse: %v", err)
+	}
+	tables := tb.ExtractTables(re.SHA256, re)
+	if len(tables.Pellets) != before+1 {
+		t.Errorf("pellet count after append = %d, want %d", len(tables.Pellets), before+1)
+	}
+	got, ok := findPellet(tables.Pellets, group, inGroup)
+	if !ok {
+		t.Fatalf("appended pellet (group %d, gpi %d) missing after reparse", group, inGroup)
+	}
+	if got.Material != wantMat {
+		t.Errorf("material = %q, want %q", got.Material, wantMat)
+	}
+	if got.Amount != wantAmt {
+		t.Errorf("amount = %v, want %v", got.Amount, wantAmt)
+	}
+	if got.TransformPositionX != wantX || got.TransformPositionY != wantY {
+		t.Errorf("position = (%v,%v), want (%v,%v)", got.TransformPositionX, got.TransformPositionY, wantX, wantY)
+	}
+	if got.RB2DPX != tmpl.RB2DPX {
+		t.Errorf("inherited rb2d_px = %v, want %v (template copied verbatim)", got.RB2DPX, tmpl.RB2DPX)
+	}
+
+	// Churn DoD: a clone-append commit does exactly one archive write, no reparse.
+	if ls.writeArchiveCount > 1 {
+		t.Errorf("writeArchiveCount = %d, want <= 1", ls.writeArchiveCount)
+	}
+	if ls.reparseCount != 0 {
+		t.Errorf("reparseCount = %d, want 0", ls.reparseCount)
+	}
+}
+
+// TestPelletCloneEditReadBack: editing a nested scalar on a pending pellet is
+// observable through a read (the local nested setter+getter round trip), and no op
+// is staged until append().
+func TestPelletCloneEditReadBack(t *testing.T) {
+	ls := loadFixture(t)
+	if len(ls.tables.Pellets) == 0 {
+		t.Skip("fixture has no pellets")
+	}
+	pp := clonePellet(t, ls, 0)
+	if err := pp.SetField("position_x", starlark.Float(314.0)); err != nil {
+		t.Fatalf("SetField(position_x): %v", err)
+	}
+	if err := pp.SetField("material", starlark.String("Glass")); err != nil {
+		t.Fatalf("SetField(material): %v", err)
+	}
+	if gx, _ := pp.Attr("position_x"); mustFloat(t, gx) != 314.0 {
+		t.Errorf("read-back position_x = %v, want 314 (transform.position[0])", mustFloat(t, gx))
+	}
+	if gm, _ := pp.Attr("material"); mustString(t, gm) != "Glass" {
+		t.Errorf("read-back material = %q, want Glass (pellet.material)", mustString(t, gm))
+	}
+	if ls.stagedOps != 0 {
+		t.Errorf("stagedOps = %d before append, want 0 (edits only mutate the copy)", ls.stagedOps)
+	}
+}
+
+// TestPelletCloneAppendNotMirrored: a clone-append is structural — staged but not
+// mirrored, so it is invisible to in-run reads/queries until commit.
+func TestPelletCloneAppendNotMirrored(t *testing.T) {
+	ls := loadFixture(t)
+	if len(ls.tables.Pellets) == 0 {
+		t.Skip("fixture has no pellets")
+	}
+	before := len(ls.tables.Pellets)
+	zone := ls.tables.Pellets[0].Zone
+	pp := clonePellet(t, ls, 0)
+	if _, err := callMethod(t, pp, "append", starlark.String(zone)); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if len(ls.tables.Pellets) != before {
+		t.Errorf("tables.Pellets grew to %d, want %d (append is structural)", len(ls.tables.Pellets), before)
+	}
+	rows, err := ls.query("SELECT count(*) FROM pellets WHERE save_id = ?", ls.saveID)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		t.Fatal("no count row")
+	}
+	var n int
+	if err := rows.Scan(&n); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if n != before {
+		t.Errorf("in-run pellet count = %d, want %d (append must not be mirrored)", n, before)
+	}
+}
+
+// TestPelletCloneRejects: out-of-range clone, editing a read-only locator on a
+// pending pellet, append to a missing group, and a second append are each rejected.
+func TestPelletCloneRejects(t *testing.T) {
+	ls := loadFixture(t)
+	if len(ls.tables.Pellets) == 0 {
+		t.Skip("fixture has no pellets")
+	}
+	ps := &Pellets{ls: ls}
+	if _, err := callMethod(t, ps, "clone", starlark.MakeInt(len(ls.tables.Pellets))); err == nil {
+		t.Error("clone(out-of-range) error = nil, want rejection")
+	}
+	pp := clonePellet(t, ls, 0)
+	if err := pp.SetField("group_index", starlark.MakeInt(1)); err == nil {
+		t.Error("SetField(group_index) on pending error = nil, want read-only rejection")
+	}
+	if _, err := callMethod(t, pp, "append", starlark.String("__no_such_zone__")); err == nil {
+		t.Error("append(zone=unknown) error = nil, want unknown-zone rejection")
+	}
+	zone := ls.tables.Pellets[0].Zone
+	if _, err := callMethod(t, pp, "append", starlark.String(zone)); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if _, err := callMethod(t, pp, "append", starlark.String(zone)); err == nil {
+		t.Error("second append error = nil, want already-appended rejection")
+	}
+}

@@ -1,6 +1,6 @@
 # Plan: Completing the Bibites DSL (settings, genes, zones, pellets, aliases)
 
-> **Status:** P1 + P2 resolved 2026-06-16 (pellet *append* deferred — see the P2 block); P3 not yet implemented.
+> **Status:** P1 + P2 resolved 2026-06-16; pellet *append* added via clone (P2B) 2026-06-16; P3 not yet implemented.
 > **Follows:** `docs/DSL_tickets_plan.md` (v1 language core). This plan closes the gaps
 > between that v1 and the intended full feature set.
 
@@ -36,7 +36,7 @@ deferral reflected scope-cutting for the original PR, not a technical barrier.
 | 4 | …gene **values** | ✅ `bibite/egg_gene_value` | ✅ `gene.go` R/W (P1) | **Done (P1)** |
 | 5 | Query settings (get) | ✅ in-memory rows + DuckDB | ✅ `settings_value.go` (P1) | **Done (P1)** |
 | 5 | Query bibites + push-down | ✅ | ✅ `sql.go`/`collection.go` | none |
-| 6 | Mutate + delete pellets | ✅ `pellet_path_map` | ✅ `pellets.go` (P2; append deferred) | **Done (P2)** |
+| 6 | Mutate + delete pellets | ✅ `pellet_path_map` | ✅ `pellets.go` (P2; append via clone, P2B) | **Done (P2/P2B)** |
 | 7 | Aliases for all of the above | ✅ registry | ✅ fixed (`sourceColumn`, P1) | **Done (P1)** |
 | 8 | Cross-save query→insert | seam `workspace.go` | ❌ | **Documented stub (P3)** |
 
@@ -168,17 +168,18 @@ deferral reflected scope-cutting for the original PR, not a technical barrier.
 > `Setting`/`SettingScope` path — closes the P1 zone-values deferral); zone **create** via
 > `save.zones.clone(i)` → edit name/material/distribution → `.append()` (deep-copies the
 > template's `RawJSON`, assigns a fresh zone id); pellet scalar set + `delete()` (group
-> locators, zone + material stale guards, scene `nPellets` reconciled by the mutator). Scalar
-> sets are mirror-everything; structural ops (delete, clone-append) are staged but not
+> locators, zone + material stale guards, scene `nPellets` reconciled by the mutator); pellet
+> **create** via `save.pellets.clone(i)` → edit scalars → `.append(zone="X")` (P2B, below).
+> Scalar sets are mirror-everything; structural ops (delete, clone-append) are staged but not
 > mirrored (invisible to in-run `save.sql` until commit).
 >
 > **Deviations from the stub:**
-> 1. **Pellet `append` is deferred.** Unlike synapse/stomach, a pellet's JSON element is
->    nested (`pellet.*`, `transform.position[*]`, `matterDecay.*`, `rb2d.*`) and the apply
->    path (`appendJSONArray`) inserts the payload verbatim, so the flat `appendBuiltin` (2b)
->    would emit literal dotted keys and corrupt the pellet (`setJSONPath` also can't build the
->    object from scratch). A metadata-driven nested-payload builder (or clone-a-template) is
->    future work; `save.pellets` ships without `append`.
+> 1. **Pellet `append` — resolved in P2B (below).** It was deferred from P2 because a pellet's
+>    JSON element is nested (`pellet.*`, `transform.position[*]`, `matterDecay.*`, `rb2d.*`) and
+>    the apply path (`appendJSONArray`) inserts the payload verbatim, so the flat `appendBuiltin`
+>    would emit literal dotted keys and corrupt the pellet. P2B ships it via **clone** (not the
+>    originally-planned field-append): a small isolated nested-path builder + a deep copy of the
+>    template's retained JSON. See the **P2B** section.
 > 2. **Pending-zone `.values` edits are deferred** (a clone inherits the template's values).
 >    Editing a value on the raw cloned map would require replicating the mutator's
 >    wrapper-vs-bare handling; edit zone values via `save.zones[i].values` after committing.
@@ -201,6 +202,41 @@ deferral reflected scope-cutting for the original PR, not a technical barrier.
 - Scalar set: `p.amount = 5.0` → `SQLValueRef{Table:"pellets", Column:<source>, EntryName, GroupIndex/HasGroupIndex, GroupPelletIndex/HasGroupPelletIndex, Zone/HasZone}` → `resolvePelletColumn`; write-through + `recordMirrorRow` keyed by `(group_index, group_pellet_index)`.
 - **Append by fields** (decision): `save.pellets.append(group=0, material="meat", amount=5.0, position_x=…, …)` — reuse the `ElementCollection.appendBuiltin` contract (`subcollection.go:110`): all writable fields required, validated, built into the element map, `StageSQLAppend` (→ `pelletAppendTarget`, needs `GroupIndex`, optional `Zone` guard). Sets `op.SceneCount = sceneCountPellets` automatically via the resolver. Document the `group=` requirement (risk #8).
 - Delete: `save.pellets[i].delete()` → `GroupIndex`+`GroupPelletIndex` → `StageSQLDelete` (`pelletDeleteTarget`, scene-count reconciled). Structural.
+
+---
+
+## P2B — Pellet append via clone
+
+> **Status: Resolved 2026-06-16.** Binding-layer only — **no `savemutator`/`saveparser`/
+> `duckdb`/generator changes** (the generated `pellet_path_map` resolver + metadata already
+> carried everything). Edits to `script/thebibites/pellets.go` only (+ tests in
+> `pellets_test.go`). Whole suite green: `go test ./script/... ./savemutator/... ./saveparser/...`.
+
+Shipped `save.pellets.clone(i)` → edit scalars → `.append(zone="X")`, mirroring `save.zones.clone`.
+The originally-planned **field-append (2b) was not built** — clone was chosen because it guarantees
+a complete, valid pellet (inherits `transform`/`rb2d`/`matterDecay` from the template), is the
+lower-risk edit path, and needs no field-contract decision.
+
+- **Clone source:** `PelletRow` carries no `RawJSON` (and pellets are too numerous to store one
+  per row), so `clone(i)` deep-copies the parser's retained `archive.PelletData.Pellets[i].Raw`
+  (json round-trip). `tables.Pellets` is built from that list in order (`normalize.go`), so the
+  flat index is 1:1.
+- **Edit:** `PendingPellet.SetField` writes through the field's **nested** sqlref path
+  (`spec.jsonKey`, e.g. `transform.position[0]`) via an **isolated, unexported** nested-path
+  setter/getter local to `pellets.go` — deliberately not promoted to a shared util (it mirrors
+  the mutator's package-private `parsePath`/`setJSONPath`, and nothing else needs it). Because the
+  clone is already a complete structure, the setter is set-into-existing only (no scaffolding).
+- **Append:** `.append(zone="X")` resolves the zone to its pellet group (`pelletGroupByZone`,
+  from `tables.PelletGroups`) and stages `StageSQLAppend` → `pelletAppendTarget`
+  (`pellets[j].pellets`, `SceneCount = nPellets` auto-reconciled). **Zone name is the ergonomic
+  handle** — raw group indices are an internal positional detail not exposed; resolution errors
+  loudly on an unknown zone (listing what is available) or an ambiguous one (zone is not a
+  format-guaranteed-unique key). The zone doubles as the stale guard. No id allocation (pellets
+  have no id). Structural: staged but **not mirrored** (invisible to in-run reads until commit).
+
+**Limits:** clone needs an existing pellet to copy (cannot seed a save with zero pellets);
+zone-group / cross-reference reconciliation for appended pellets is not done (same known v2 limit
+as zone clone-append).
 
 ---
 
