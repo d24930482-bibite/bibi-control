@@ -31,8 +31,11 @@ func (e *Entity) Hash() (uint32, error) { return starlark.String(e.kind + e.entr
 // Attr resolves a friendly attribute or the gene() method. Unknown names return
 // (nil, nil) so Starlark reports a clean "<kind> has no .<name> attribute".
 func (e *Entity) Attr(name string) (starlark.Value, error) {
-	if name == "gene" {
+	switch name {
+	case "gene":
 		return starlark.NewBuiltin("gene", e.geneBuiltin), nil
+	case "genes":
+		return &GeneCollection{ls: e.ls, kind: e.kind, entryName: e.entryName}, nil
 	}
 	spec, ok := attrRegistry()[e.kind][name]
 	if !ok {
@@ -59,7 +62,7 @@ func (e *Entity) AttrNames() []string {
 	for name := range attrs {
 		names = append(names, name)
 	}
-	names = append(names, "gene")
+	names = append(names, "gene", "genes")
 	sort.Strings(names)
 	return names
 }
@@ -71,7 +74,10 @@ func (e *Entity) geneBuiltin(thread *starlark.Thread, b *starlark.Builtin, args 
 		return nil, err
 	}
 	genes := e.ls.genesFor(e.kind, e.entryName)
-	g, ok := genes[name]
+	if genes == nil {
+		return starlark.None, nil
+	}
+	g, ok := genes.byName[name]
 	if !ok {
 		return starlark.None, nil
 	}

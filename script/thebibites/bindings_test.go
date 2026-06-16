@@ -110,6 +110,75 @@ func TestGeneRead(t *testing.T) {
 	}
 }
 
+func TestGeneCollectionIter(t *testing.T) {
+	ls := loadFixture(t)
+	first := collect(t, &EntityCollection{ls: ls, kind: "bibite"})[0]
+
+	attr, err := first.Attr("genes")
+	if err != nil {
+		t.Fatalf("Attr(genes): %v", err)
+	}
+	genes, ok := attr.(*GeneCollection)
+	if !ok {
+		t.Fatalf("genes is %T, want *GeneCollection", attr)
+	}
+
+	// Count must match the rows for this entity, and order/value must line up
+	// with gene(name) point lookups.
+	var want int
+	for _, g := range ls.tables.BibiteGenes {
+		if g.EntryName == first.entryName {
+			want++
+		}
+	}
+	if genes.Len() != want {
+		t.Errorf("genes.Len()=%d, want %d", genes.Len(), want)
+	}
+
+	it := genes.Iterate()
+	defer it.Done()
+	var v starlark.Value
+	n := 0
+	for it.Next(&v) {
+		g, ok := v.(*Gene)
+		if !ok {
+			t.Fatalf("gene iter yielded %T, want *Gene", v)
+		}
+		name, _ := g.Attr("name")
+		gv, _ := g.Attr("value")
+		if callGene(t, first, string(name.(starlark.String))) != gv {
+			// values are comparable starlark scalars (Float/Bool/String/None)
+			t.Errorf("genes iter value for %v disagrees with gene() lookup", name)
+		}
+		n++
+	}
+	if n != want {
+		t.Errorf("iterated %d genes, want %d", n, want)
+	}
+}
+
+func TestGeneCollectionViaScript(t *testing.T) {
+	ls := loadFixture(t)
+	program := []byte(`
+def first_bibite():
+    for b in save.bibites:
+        return b
+    return None
+
+def gene_names(b):
+    return [g.name for g in b.genes]
+
+print("ngenes=%d" % len(gene_names(first_bibite())))
+`)
+	res, err := script.Run(context.Background(), program, Globals(ls), script.Options{Filename: "genes.star"})
+	if err != nil {
+		t.Fatalf("script.Run: %v (%+v)", err, res.Diagnostics)
+	}
+	if !strings.Contains(res.Output, "ngenes=") {
+		t.Errorf("output %q missing ngenes", res.Output)
+	}
+}
+
 func TestMissingAttr(t *testing.T) {
 	ls := loadFixture(t)
 	e := collect(t, &EntityCollection{ls: ls, kind: "bibite"})[0]

@@ -41,7 +41,14 @@ type LoadedSave struct {
 	access map[string]*tableAccess // table name -> rows + entry_name index
 
 	geneOnce sync.Once
-	geneIdx  map[string]map[string]map[string]tb.GeneRow // kind -> entry_name -> gene name -> row
+	geneIdx  map[string]map[string]*geneSet // kind -> entry_name -> genes
+}
+
+// geneSet holds one entity's genes both in save order (for iteration) and by
+// name (for gene() lookup).
+type geneSet struct {
+	order  []tb.GeneRow
+	byName map[string]tb.GeneRow
 }
 
 // Load parses and normalizes a save file once and prepares it for scripting. It
@@ -138,29 +145,31 @@ func (ls *LoadedSave) rowForEntry(table, entryName string) (reflect.Value, bool)
 	return ta.slice.Index(idx), true
 }
 
-// genesFor returns the gene name -> row map for an entity, building the per-kind
-// gene index lazily on first use.
-func (ls *LoadedSave) genesFor(kind, entryName string) map[string]tb.GeneRow {
+// genesFor returns an entity's gene set (in save order + by name), building the
+// per-kind gene index lazily on first use. Returns nil when the entity has no
+// genes.
+func (ls *LoadedSave) genesFor(kind, entryName string) *geneSet {
 	ls.geneOnce.Do(ls.buildGeneIndex)
 	return ls.geneIdx[kind][entryName]
 }
 
 func (ls *LoadedSave) buildGeneIndex() {
-	ls.geneIdx = map[string]map[string]map[string]tb.GeneRow{
+	ls.geneIdx = map[string]map[string]*geneSet{
 		"bibite": indexGenes(ls.tables.BibiteGenes),
 		"egg":    indexGenes(ls.tables.EggGenes),
 	}
 }
 
-func indexGenes(rows []tb.GeneRow) map[string]map[string]tb.GeneRow {
-	out := make(map[string]map[string]tb.GeneRow)
+func indexGenes(rows []tb.GeneRow) map[string]*geneSet {
+	out := make(map[string]*geneSet)
 	for _, g := range rows {
-		byName := out[g.EntryName]
-		if byName == nil {
-			byName = make(map[string]tb.GeneRow)
-			out[g.EntryName] = byName
+		set := out[g.EntryName]
+		if set == nil {
+			set = &geneSet{byName: make(map[string]tb.GeneRow)}
+			out[g.EntryName] = set
 		}
-		byName[g.GeneName] = g
+		set.order = append(set.order, g)
+		set.byName[g.GeneName] = g
 	}
 	return out
 }
