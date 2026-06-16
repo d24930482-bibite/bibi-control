@@ -29,12 +29,20 @@ public static class HeadlessController
 	public static string Host { get; private set; } = "127.0.0.1";
 
 	private static bool _parsed;
+	private static bool _bootstrapped;
 	private static bool _launched;
 	private static IpcServer _server;
 
+	// Entry point. Reached either via Unity's [RuntimeInitializeOnLoadMethod] (when
+	// the mod is part of an auto-scanned assembly) or via a call injected into
+	// AppInitializer.Awake (the IL-patch loader). Idempotent: safe to call twice.
 	[RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
-	private static void Bootstrap()
+	public static void Bootstrap()
 	{
+		if (_bootstrapped)
+			return;
+		_bootstrapped = true;
+
 		ParseArgs();
 		// Single load marker so you can confirm in Player.log that the mod is
 		// actually loaded and this startup hook ran.

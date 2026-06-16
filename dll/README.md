@@ -14,23 +14,27 @@ game's managed assembly runs on (incl. macOS/ARM).
 
 ---
 
-## Status (what is and isn't proven)
+## Status — verified working end-to-end
 
-Verified on this machine (The Bibites, Unity **6000.0.44f1**, Mono):
+Tested on a live install (The Bibites, Unity **6000.0.44f1**, Mono, Steam):
 
 | Piece | Status |
 |-------|--------|
 | Go control client (`simctl`) | ✅ built + unit-tested (`go test -race`) |
 | Mod C# code | ✅ compiles cleanly against the real game assemblies |
-| Headless launch | ✅ game runs windowless under `-batchmode -nographics`; custom flags reach the game |
-| Mod actually running in-game (server up, commands answered) | ❌ **not yet** — see "Loading" below |
+| Headless launch | ✅ runs windowless (`-batchmode -nographics`), loads the given save |
+| Mod running in-game (IPC server up) | ✅ `[BibiControl] IPC listening on 127.0.0.1:43100` |
+| `STOP` / `RESUME` / `INFO` / `RELOAD` | ✅ all answered correctly over the network |
 
-The blocker is purely **how the mod gets loaded**, not the mod logic. On this
-Unity 6 build, dropping `BibiControl.dll` into `Managed` and listing it in
-`ScriptingAssemblies.json` does **not** cause Unity to run the mod's
-`[RuntimeInitializeOnLoadMethod]` startup hook (Unity never loads an assembly
-nothing references). The mod must be part of an assembly the game already loads
-— i.e. **baked into `BibitesAssembly`** (or called from it). See below.
+Observed in a real run: `INFO` → `{"tps":15,"real_tps":15.0,"paused":false,...}`,
+`STOP` → `{"previous_time_scale":1}` then `paused:true`, `RESUME` at `5` then
+`paused:false`, `RELOAD` → reloaded the newest autosave.
+
+**Loading note (important).** On this Unity 6 build, dropping `BibiControl.dll`
+into `Managed` and listing it in `ScriptingAssemblies.json` does **not** run the
+mod (Unity never loads an assembly nothing references). The working approach is
+the **IL-patch loader** below, which injects a call to the mod into the game's
+own `AppInitializer.Awake()`.
 
 ---
 
@@ -42,7 +46,8 @@ nothing references). The mod must be part of an assembly the game already loads
 | `BibiControl/IpcServer.cs` | TCP server, envelope framing, main-thread dispatch, command registry |
 | `BibiControl/SimCommands.cs` | `STOP` / `RESUME` / `INFO` / `RELOAD` handlers |
 | `BibiControl/Envelope.cs` | JSON envelope DTO (mirrors `ipc.Envelope`) |
-| `BibiControl.csproj` | Companion-DLL build (handy for compile-checking against your install) |
+| `BibiControl.csproj` | Builds the mod as a DLL |
+| `patcher/` | Mono.Cecil tool that injects the mod into the game's assembly (the proven loader) |
 
 ---
 
@@ -62,28 +67,40 @@ dotnet build dll/BibiControl.csproj -c Release `
 `BibiControl.dll`, but on Unity 6 that standalone DLL will **not auto-load** (see
 Status). It's a build/lint check, not the deployable artifact.
 
-### Bake into `BibitesAssembly` (the deployable path)
+### Install via the IL-patch loader (recommended, proven)
 
-This is the only reliable way to get the mod to run on Unity 6.
+`dll/patcher` is a tiny Mono.Cecil tool that injects a call to
+`BibiControl.HeadlessController.Bootstrap()` into the shipped game's
+`AppInitializer.Awake()` and adds the assembly reference — so the game loads and
+runs the mod **without recompiling its source**. This is what was verified above.
 
-1. Get the game's decompiled, recompilable source + its `BibitesAssembly.csproj`.
-2. Copy `dll/BibiControl/` into the source root (the SDK project globs `*.cs`).
-3. Point the project's references at your install's `Managed` folder (e.g. a
-   `Directory.Build.props` that adds `<AssemblySearchPaths>` for `Managed`, plus
-   a .NET Framework reference pack such as
-   `Microsoft.NETFramework.ReferenceAssemblies.net40`).
-4. Build with a C# compiler that matches the source's language level
-   (`BibitesAssembly.csproj` sets `LangVersion 14.0`). Decompiled IL can need a
-   recent Roslyn and occasionally a small artifact fix.
-5. Copy the resulting `BibitesAssembly.dll` over the one in
-   `The Bibites_Data/Managed/` (back up the original first).
+Let `MGD = …\The Bibites\The Bibites_Data\Managed`.
 
-> Heads-up: recompiling the full ~94k-line decompiled assembly is the hard part.
-> On this machine it did not build out of the box (compiler errors around `ref`
-> expressions in the decompiled code, unrelated to this mod). A lighter
-> alternative — IL-patching the shipped `BibitesAssembly.dll` to call
-> `BibiControl.HeadlessController.Bootstrap()` (e.g. with Mono.Cecil), so the mod
-> loads without recompiling the source — is feasible but not yet implemented here.
+```powershell
+# 1. Build the mod DLL
+dotnet build dll/BibiControl.csproj -c Release -o out
+
+# 2. Patch a copy of the game's assembly (out\BibitesAssembly.patched.dll)
+dotnet run --project dll/patcher -c Release -- `
+  "$MGD\BibitesAssembly.dll" "out\BibiControl.dll" "out\BibitesAssembly.patched.dll"
+
+# 3. Install (back up the original first!)
+Copy-Item "$MGD\BibitesAssembly.dll" "$MGD\BibitesAssembly.dll.bak"
+Copy-Item "out\BibitesAssembly.patched.dll" "$MGD\BibitesAssembly.dll" -Force
+Copy-Item "out\BibiControl.dll" "$MGD\BibiControl.dll" -Force
+```
+
+The patcher is idempotent (re-running on a patched assembly is a no-op). To
+uninstall, restore `BibitesAssembly.dll.bak` and delete `BibiControl.dll`.
+
+> Re-apply after a game update (a patch overwrites `BibitesAssembly.dll`).
+
+### Alternative: bake into `BibitesAssembly`
+
+If you have the game's decompiled, recompilable source, copy `dll/BibiControl/`
+into it and rebuild `BibitesAssembly.dll`. This avoids the patch step but means
+recompiling the full ~94k-line assembly, which needs the right toolchain and may
+need small decompiler-artifact fixes — heavier than the IL-patch above.
 
 ---
 

@@ -108,14 +108,16 @@ Two launch gotchas learned on a real install (Steam, Unity 6.0):
 
 ## Verification status
 
+Confirmed end-to-end on a live install (The Bibites, Unity 6000.0.44f1, Mono,
+Steam): the game runs headless, loads the given save, the IPC server listens, and
+`STOP` / `RESUME` / `INFO` / `RELOAD` all answer correctly over the network.
+
 - Go transport + `simctl` client: covered by `simctl/simctl_test.go` (the test's
   fake server is the canonical contract for the DLL).
-- DLL: compiles against the real game assemblies; `-batchmode -nographics`
-  headless launch and arg delivery confirmed against a live install.
-- **Not yet confirmed end-to-end:** the mod executing in-game. On Unity 6 a
-  standalone DLL listed in `ScriptingAssemblies.json` is not loaded/scanned, so
-  the mod must be compiled into (or called from) `BibitesAssembly`. See the
-  "Building" and "Status" sections of `dll/README.md`.
+- Loader: on Unity 6 a standalone DLL listed in `ScriptingAssemblies.json` is
+  **not** loaded/scanned, so the mod is injected into `BibitesAssembly` via the
+  IL patcher in `dll/patcher` (a call into `AppInitializer.Awake`). See
+  `dll/README.md` → "Install via the IL-patch loader".
 
 ## Extending
 
