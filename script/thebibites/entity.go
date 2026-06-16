@@ -18,8 +18,9 @@ type Entity struct {
 }
 
 var (
-	_ starlark.Value    = (*Entity)(nil)
-	_ starlark.HasAttrs = (*Entity)(nil)
+	_ starlark.Value       = (*Entity)(nil)
+	_ starlark.HasAttrs    = (*Entity)(nil)
+	_ starlark.HasSetField = (*Entity)(nil)
 )
 
 func (e *Entity) String() string        { return fmt.Sprintf("%s<%s>", e.kind, e.entryName) }
@@ -65,6 +66,55 @@ func (e *Entity) AttrNames() []string {
 	names = append(names, "gene", "genes")
 	sort.Strings(names)
 	return names
+}
+
+// SetField mutates a writable scalar attribute (b.energy = x). It resolves the
+// attribute through the same generated-metadata registry used for reads, so write
+// capability comes straight from attrSpec.writable (the field's sqlref path) — no
+// parallel allowlist. It rejects unknown/read-only attributes and non-scalar
+// values with a clean error, captures the current value as a stale-value guard,
+// stages a guarded set on the session, writes the new value through to the
+// in-memory row (so a later plain read observes it), and records a DuckDB mirror
+// intent. T6 is scalar set only — gene writes and structural mutations, plus the
+// value-validation layer (range/enum/type-match), are later tickets.
+func (e *Entity) SetField(name string, val starlark.Value) error {
+	if name == "gene" || name == "genes" {
+		return fmt.Errorf("%s.%s is read-only", e.kind, name)
+	}
+	spec, ok := attrRegistry()[e.kind][name]
+	if !ok {
+		return fmt.Errorf("cannot set %s.%s: unknown attribute", e.kind, name)
+	}
+	if !spec.writable {
+		return fmt.Errorf("%s.%s is read-only", e.kind, name)
+	}
+	row, ok := e.ls.rowForEntry(spec.table, e.entryName)
+	if !ok {
+		return fmt.Errorf("cannot set %s.%s: no %s row for %s", e.kind, name, spec.table, e.entryName)
+	}
+	old, err := goScalar(row.FieldByIndex(spec.fieldIndex))
+	if err != nil {
+		return fmt.Errorf("%s.%s: %w", e.kind, name, err)
+	}
+	goVal, err := fromStarlark(val)
+	if err != nil {
+		return fmt.Errorf("%s.%s: %w", e.kind, name, err)
+	}
+	staged, err := setRowField(row, spec.fieldIndex, goVal)
+	if err != nil {
+		return fmt.Errorf("%s.%s: %w", e.kind, name, err)
+	}
+	ref, err := e.ls.entityLocatorRef(e.kind, e.entryName)
+	if err != nil {
+		return err
+	}
+	ref.Table, ref.Column = spec.table, spec.column
+	if err := e.ls.session.StageSQLSet(ref.WithExpected(old), staged); err != nil {
+		return fmt.Errorf("%s.%s: %w", e.kind, name, err)
+	}
+	e.ls.stagedOps++
+	e.ls.recordMirror(spec.table, spec.column, spec.sqlType, e.entryName, staged)
+	return nil
 }
 
 // geneBuiltin implements e.gene("Name") -> typed gene value (None if absent).

@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"go.starlark.net/starlark"
+
+	"github.com/asemones/bibicontrol/duckdb"
 )
 
 // sql.go is the T5 analytics path: the raw save.sql escape hatch plus the
@@ -323,6 +325,108 @@ func (ls *LoadedSave) groupedAgg(kind, where, groupCol string, agg aggCall) (*st
 	return out, nil
 }
 
+// bulkSet stages a scalar constant onto every entity matching the (narrowed)
+// collection, as one batched set. It selects the locators + current value for the
+// matched rows (push-down: prior staged sets are flushed first so guards read the
+// live value), converts each result row to a SQLValueRef via duckdb.ScanSQLRefs,
+// and stages a stale-value-guarded StageSQLSet per row. Each row is written
+// through to its in-memory row and recorded in the per-(table,column) mirror
+// buffer, so the whole set later flushes as ONE UPDATE, not N point-updates.
+// Returns the number of rows staged.
+func (ls *LoadedSave) bulkSet(kind, where, column string, value starlark.Value) (int, error) {
+	spec, ok := attrRegistry()[kind][column]
+	if !ok {
+		return 0, fmt.Errorf("unknown column %q for %s", column, kind)
+	}
+	if !spec.writable {
+		return 0, fmt.Errorf("%s.%s is read-only", kind, column)
+	}
+	goVal, err := fromStarlark(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s.%s: %w", kind, column, err)
+	}
+
+	q, args, err := ls.bulkSetQuery(kind, where, spec)
+	if err != nil {
+		return 0, err
+	}
+	rows, err := ls.query(q, args...)
+	if err != nil {
+		return 0, wrapWhere(where, err)
+	}
+	refs, err := duckdb.ScanSQLRefs(rows, duckdb.SQLRefScanSpec{Table: spec.table, Column: spec.column})
+	rows.Close()
+	if err != nil {
+		return 0, wrapWhere(where, err)
+	}
+
+	for _, r := range refs {
+		staged := goVal
+		if row, ok := ls.rowForEntry(spec.table, r.Ref.EntryName); ok {
+			coerced, err := setRowField(row, spec.fieldIndex, goVal)
+			if err != nil {
+				return 0, fmt.Errorf("%s.%s: %w", kind, column, err)
+			}
+			staged = coerced
+		}
+		if err := ls.session.StageSQLSet(r.Ref.WithExpected(r.CurrentValue), staged); err != nil {
+			return 0, fmt.Errorf("%s.%s: %w", kind, column, err)
+		}
+		ls.stagedOps++
+		ls.recordMirror(spec.table, spec.column, spec.sqlType, r.Ref.EntryName, staged)
+	}
+	return len(refs), nil
+}
+
+// bulkSetQuery builds the locator+value SELECT for a bulk set: identity-table
+// locators (entry_name + the kind's id guard) plus the target column, with the
+// predicate's sub-tables and the column's table LEFT JOINed. Reuses the same
+// builders as the analytics push-down so friendly columns and collisions resolve
+// identically.
+func (ls *LoadedSave) bulkSetQuery(kind, where string, spec attrSpec) (string, []any, error) {
+	identity, err := identityTable(kind)
+	if err != nil {
+		return "", nil, err
+	}
+	needed := map[string]bool{spec.table: true}
+	predicate, predTables, err := ls.rewritePredicate(kind, where)
+	if err != nil {
+		return "", nil, err
+	}
+	for t := range predTables {
+		needed[t] = true
+	}
+	from, err := fromClause(kind, needed)
+	if err != nil {
+		return "", nil, err
+	}
+	whereSQL, args, err := ls.whereClause(kind, predicate)
+	if err != nil {
+		return "", nil, err
+	}
+	locators, err := locatorSelect(kind, identity)
+	if err != nil {
+		return "", nil, err
+	}
+	valueCol := quoteIdent(spec.table) + "." + quoteIdent(spec.column) + " AS " + quoteIdent(spec.column)
+	q := "SELECT " + locators + ", " + valueCol + " " + from + " " + whereSQL
+	return q, args, nil
+}
+
+// locatorSelect projects the locator columns ScanSQLRefs needs (entry_name plus
+// the kind's id guard), aliased to their bare names, from the identity table.
+func locatorSelect(kind, identity string) (string, error) {
+	id := quoteIdent(identity)
+	switch kind {
+	case "bibite":
+		return id + ".entry_name AS entry_name, " + id + ".body_id AS body_id, " + id + ".has_body_id AS has_body_id", nil
+	case "egg":
+		return id + ".entry_name AS entry_name, " + id + ".egg_id AS egg_id, " + id + ".has_egg_id AS has_egg_id", nil
+	default:
+		return "", fmt.Errorf("unknown entity kind %q", kind)
+	}
+}
+
 // wrapWhere names the predicate in an analytics error so an unknown column inside
 // a .where() string surfaces a diagnostic that points at the predicate.
 func wrapWhere(where string, err error) error {
@@ -373,10 +477,33 @@ func (ls *LoadedSave) rewritePredicate(kind, expr string) (string, map[string]bo
 		switch {
 		case c == '\'':
 			// single-quoted string literal: copy verbatim, honoring '' escape.
-			i = copyQuoted(s, i, '\'', true, writeByte)
+			writeByte(c)
+			i++
+			for i < len(s) {
+				writeByte(s[i])
+				if s[i] == '\'' {
+					if i+1 < len(s) && s[i+1] == '\'' {
+						writeByte(s[i+1])
+						i += 2
+						continue
+					}
+					i++
+					goto nextToken
+				}
+				i++
+			}
 		case c == '"':
 			// double-quoted identifier: caller qualified it explicitly; copy as-is.
-			i = copyQuoted(s, i, '"', false, writeByte)
+			writeByte(c)
+			i++
+			for i < len(s) {
+				writeByte(s[i])
+				if s[i] == '"' {
+					i++
+					goto nextToken
+				}
+				i++
+			}
 		case isIdentStart(c):
 			j := i + 1
 			for j < len(s) && isIdentPart(s[j]) {
@@ -404,30 +531,10 @@ func (ls *LoadedSave) rewritePredicate(kind, expr string) (string, map[string]bo
 			writeByte(c)
 			i++
 		}
+		continue
+	nextToken:
 	}
 	return out.String(), tables, nil
-}
-
-// copyQuoted copies a quoted span starting at s[start] (the opening quote) to the
-// writer verbatim and returns the index just past the closing quote (or len(s) if
-// unterminated). When escapeDoubled is set, a doubled quote ('') is treated as an
-// escaped literal quote rather than the terminator.
-func copyQuoted(s string, start int, quote byte, escapeDoubled bool, write func(byte)) int {
-	write(s[start])
-	i := start + 1
-	for i < len(s) {
-		write(s[i])
-		if s[i] == quote {
-			if escapeDoubled && i+1 < len(s) && s[i+1] == quote {
-				write(s[i+1])
-				i += 2
-				continue
-			}
-			return i + 1
-		}
-		i++
-	}
-	return i
 }
 
 func isSpace(b byte) bool      { return b == ' ' || b == '\t' || b == '\n' || b == '\r' }

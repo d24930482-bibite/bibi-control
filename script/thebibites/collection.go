@@ -47,12 +47,30 @@ func (c *EntityCollection) Attr(name string) (starlark.Value, error) {
 		return starlark.NewBuiltin("quantile", c.quantileBuiltin), nil
 	case "sum", "mean", "median", "min", "max":
 		return c.aggBuiltin(name), nil
+	case "set":
+		return starlark.NewBuiltin("set", c.setBuiltin), nil
 	}
 	return nil, nil
 }
 
 func (c *EntityCollection) AttrNames() []string {
-	return []string{"count", "group_by", "max", "mean", "median", "min", "quantile", "sum", "where"}
+	return []string{"count", "group_by", "max", "mean", "median", "min", "quantile", "set", "sum", "where"}
+}
+
+// setBuiltin implements where(...).set(column, value): one batched scalar set over
+// every matching entity. value is a Starlark scalar constant applied to all
+// matched rows. Returns the number of rows staged.
+func (c *EntityCollection) setBuiltin(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var column string
+	var value starlark.Value
+	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "column", &column, "value", &value); err != nil {
+		return nil, err
+	}
+	n, err := c.ls.bulkSet(c.kind, c.where, column, value)
+	if err != nil {
+		return nil, err
+	}
+	return starlark.MakeInt(n), nil
 }
 
 // whereBuiltin narrows the collection, returning a new unmaterialized collection.
@@ -165,11 +183,13 @@ var (
 	_ starlark.HasAttrs = (*GroupedCollection)(nil)
 )
 
-func (g *GroupedCollection) String() string        { return g.kind + "s.group_by(" + g.groupCol + ")" }
-func (g *GroupedCollection) Type() string          { return "grouped_collection" }
-func (g *GroupedCollection) Freeze()               {}
-func (g *GroupedCollection) Truth() starlark.Bool  { return starlark.True }
-func (g *GroupedCollection) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable type: %s", g.Type()) }
+func (g *GroupedCollection) String() string       { return g.kind + "s.group_by(" + g.groupCol + ")" }
+func (g *GroupedCollection) Type() string         { return "grouped_collection" }
+func (g *GroupedCollection) Freeze()              {}
+func (g *GroupedCollection) Truth() starlark.Bool { return starlark.True }
+func (g *GroupedCollection) Hash() (uint32, error) {
+	return 0, fmt.Errorf("unhashable type: %s", g.Type())
+}
 
 func (g *GroupedCollection) Attr(name string) (starlark.Value, error) {
 	switch name {

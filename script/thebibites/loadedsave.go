@@ -45,17 +45,27 @@ type LoadedSave struct {
 	geneOnce sync.Once
 	geneIdx  map[string]map[string]*geneSet // kind -> entry_name -> genes
 
-	// mirrorDirty marks pending scalar mutations that DuckDB has not yet observed.
-	// T5 never sets it (no mutations); T6 flips it on every staged set and clears
-	// it in flushMirror. It exists now so the query/aggregate entry points already
-	// call flushMirror and T6 only has to fill the buffer.
+	// mirror buffers scalar mutations not yet mirrored into DuckDB; mirrorDirty
+	// marks it non-empty. T5 never sets these (no mutations); T6 fills the buffer
+	// on every staged set and flushMirror drains it into the open DuckDB as one
+	// batched UPDATE per (table, column). The query/aggregate entry points already
+	// call flushMirror, so T6 only fills the buffer and the flush body.
+	mirror      mirrorBuffer
 	mirrorDirty bool
 
-	// dbOpenCount / rowsMaterialized are test instrumentation: the analytics path
-	// must open DuckDB at most once per run and must not materialize Entity values
-	// to aggregate. Tests assert these counters.
+	// stagedOps counts mutations staged on the session this run (reported by
+	// commit / the Result). dryRun stages but skips the file write; a plain field
+	// for now, wired to the CLI --dry-run flag by T8.
+	stagedOps int
+	dryRun    bool
+
+	// dbOpenCount / rowsMaterialized / flushStmtCount are test instrumentation:
+	// the analytics path opens DuckDB at most once per run and never materializes
+	// Entity values to aggregate; the mirror flushes N row-by-row sets as one
+	// UPDATE per column, not N point-updates. Tests assert these counters.
 	dbOpenCount      int
 	rowsMaterialized int
+	flushStmtCount   int
 }
 
 // geneSet holds one entity's genes both in save order (for iteration) and by
@@ -211,15 +221,101 @@ func (ls *LoadedSave) openDB(ctx context.Context) (*sql.DB, error) {
 }
 
 // flushMirror makes DuckDB observe scalar mutations staged since the last flush.
-// In T5 there are no mutations, so it is a no-op whenever nothing is dirty; T6
-// fills the deferred buffer and replaces this body with the batched UPDATE flush.
-// It is the call site already wired into every query/aggregate entry point.
+// It runs at the head of every query/aggregate (and once right after a lazy
+// openDB) so a later read-after-write observes staged sets without a reparse or a
+// re-import. It is a no-op when nothing is dirty. When the DB is not yet open the
+// buffer is left intact — the lazy import picks up the write-throughs already
+// applied to ls.tables, and openDB flushes (idempotently) once the handle exists.
+// Each (table, column) drains as exactly one UPDATE (counted for tests).
 func (ls *LoadedSave) flushMirror(ctx context.Context) error {
-	if !ls.mirrorDirty {
+	if !ls.mirrorDirty || ls.mirror.empty() {
+		ls.mirrorDirty = false
 		return nil
 	}
-	// T6 flushes the buffer here as one UPDATE ... FROM (VALUES …) per column.
+	if ls.db == nil {
+		return nil
+	}
+	for key, col := range ls.mirror.cols {
+		if err := ls.flushMirrorColumn(ctx, key, col); err != nil {
+			return err
+		}
+		ls.flushStmtCount++
+	}
+	ls.mirror.reset()
 	ls.mirrorDirty = false
+	return nil
+}
+
+// entityLocatorRef builds the locator half of a SQLValueRef for one entity —
+// entry_name plus the kind's id guard (body_id for bibites, egg_id for eggs) —
+// read generically from the identity row through the same generated-metadata
+// registry that powers reads. The caller fills Table/Column. No hand-maintained
+// locator list: the id columns are ordinary (non-writable) registry specs.
+func (ls *LoadedSave) entityLocatorRef(kind, entryName string) (mutator.SQLValueRef, error) {
+	identity, err := identityTable(kind)
+	if err != nil {
+		return mutator.SQLValueRef{}, err
+	}
+	row, ok := ls.rowForEntry(identity, entryName)
+	if !ok {
+		return mutator.SQLValueRef{}, fmt.Errorf("no %s row for %q", identity, entryName)
+	}
+	reg := attrRegistry()[kind]
+	ref := mutator.SQLValueRef{EntryName: entryName}
+	switch kind {
+	case "bibite":
+		id, err := rowInt64Field(row, reg, "body_id")
+		if err != nil {
+			return mutator.SQLValueRef{}, err
+		}
+		has, err := rowBoolField(row, reg, "has_body_id")
+		if err != nil {
+			return mutator.SQLValueRef{}, err
+		}
+		ref.BodyID, ref.HasBodyID = id, has
+	case "egg":
+		id, err := rowInt64Field(row, reg, "egg_id")
+		if err != nil {
+			return mutator.SQLValueRef{}, err
+		}
+		has, err := rowBoolField(row, reg, "has_egg_id")
+		if err != nil {
+			return mutator.SQLValueRef{}, err
+		}
+		ref.EggID, ref.HasEggID = id, has
+	default:
+		return mutator.SQLValueRef{}, fmt.Errorf("unknown entity kind %q", kind)
+	}
+	return ref, nil
+}
+
+func rowInt64Field(row reflect.Value, reg map[string]attrSpec, column string) (int64, error) {
+	spec, ok := reg[column]
+	if !ok {
+		return 0, fmt.Errorf("missing locator column %q", column)
+	}
+	return row.FieldByIndex(spec.fieldIndex).Int(), nil
+}
+
+func rowBoolField(row reflect.Value, reg map[string]attrSpec, column string) (bool, error) {
+	spec, ok := reg[column]
+	if !ok {
+		return false, fmt.Errorf("missing locator column %q", column)
+	}
+	return row.FieldByIndex(spec.fieldIndex).Bool(), nil
+}
+
+// WriteSave applies the staged mutations to the in-memory archive and writes the
+// resulting save zip — with NO reparse (the run is over; fresh projections would
+// be unused). This is the T6 commit-to-file core; T8 layers content-addressed
+// persistence + provenance on top of it.
+func (ls *LoadedSave) WriteSave(path string) error {
+	if err := ls.session.Apply(); err != nil {
+		return fmt.Errorf("apply staged mutations: %w", err)
+	}
+	if err := tb.WriteArchive(path, ls.session.Archive()); err != nil {
+		return fmt.Errorf("write save %q: %w", path, err)
+	}
 	return nil
 }
 

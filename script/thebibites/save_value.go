@@ -32,11 +32,30 @@ func (s *Save) Attr(name string) (starlark.Value, error) {
 		return &EntityCollection{ls: s.ls, kind: "egg"}, nil
 	case "sql":
 		return starlark.NewBuiltin("sql", s.sqlBuiltin), nil
+	case "commit":
+		return starlark.NewBuiltin("commit", s.commitBuiltin), nil
 	default:
 		return nil, nil
 	}
 }
 
 func (s *Save) AttrNames() []string {
-	return []string{"bibites", "eggs", "sql"}
+	return []string{"bibites", "commit", "eggs", "sql"}
+}
+
+// commitBuiltin implements save.commit(path) -> staged op count. It applies the
+// staged mutations and writes the corrected save zip with no reparse (T6's
+// commit-to-file). Under dry-run it stages everything but writes nothing. T8 adds
+// the host-driven content-addressed commit on top of LoadedSave.WriteSave.
+func (s *Save) commitBuiltin(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var path string
+	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "path", &path); err != nil {
+		return nil, err
+	}
+	if !s.ls.dryRun {
+		if err := s.ls.WriteSave(path); err != nil {
+			return nil, err
+		}
+	}
+	return starlark.MakeInt(s.ls.stagedOps), nil
 }
