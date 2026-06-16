@@ -417,6 +417,69 @@ func (ls *LoadedSave) bulkSetQuery(kind, where string, spec attrSpec) (string, [
 	return q, args, nil
 }
 
+// bulkDelete deletes every entity matching the predicate — the structural-op
+// counterpart of bulkSet. EntityCollection iteration ignores the where predicate, so
+// matches are resolved via the same push-down query path bulkSet uses, then a
+// whole-entity delete is staged per match (reusing stageEntityDelete, so the cascade
+// and id guard are identical to a single b.delete()). Structural: staged but NOT
+// mirrored (an in-run query still sees the rows until commit). Each bibite is its own
+// entry keyed by entry_name + an id guard, so the N staged deletes are
+// order-independent (no array-index shift). Returns the number staged for deletion.
+func (ls *LoadedSave) bulkDelete(kind, where string, prune bool) (int, error) {
+	names, err := ls.matchingEntryNames(kind, where)
+	if err != nil {
+		return 0, err
+	}
+	for _, name := range names {
+		if err := ls.stageEntityDelete(kind, name, prune); err != nil {
+			return 0, err
+		}
+		ls.stagedOps++
+	}
+	return len(names), nil
+}
+
+// matchingEntryNames runs the predicate as a push-down SELECT of identity-table
+// entry_names (the same rewrite/from/where builders bulkSet uses), returning the
+// matched entities' entry_names. Only the predicate's sub-tables are LEFT JOINed, all
+// 1:1 with identity, so the result is one row per matching entity.
+func (ls *LoadedSave) matchingEntryNames(kind, where string) ([]string, error) {
+	identity, err := identityTable(kind)
+	if err != nil {
+		return nil, err
+	}
+	predicate, predTables, err := ls.rewritePredicate(kind, where)
+	if err != nil {
+		return nil, err
+	}
+	needed := make(map[string]bool, len(predTables))
+	for t := range predTables {
+		needed[t] = true
+	}
+	from, err := fromClause(kind, needed)
+	if err != nil {
+		return nil, err
+	}
+	whereSQL, args, err := ls.whereClause(kind, predicate)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := ls.query("SELECT "+quoteIdent(identity)+".entry_name "+from+" "+whereSQL, args...)
+	if err != nil {
+		return nil, wrapWhere(where, err)
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+	}
+	return names, rows.Err()
+}
+
 // locatorSelect projects the locator columns ScanSQLRefs needs (entry_name plus
 // the kind's id guard), aliased to their bare names, from the identity table.
 func locatorSelect(kind, identity string) (string, error) {

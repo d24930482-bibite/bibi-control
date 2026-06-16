@@ -162,30 +162,39 @@ func (e *Entity) deleteBuiltin(thread *starlark.Thread, b *starlark.Builtin, arg
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "prune?", &prune); err != nil {
 		return nil, err
 	}
-	ref, err := e.ls.entityLocatorRef(e.kind, e.entryName)
-	if err != nil {
+	if err := e.ls.stageEntityDelete(e.kind, e.entryName, prune); err != nil {
 		return nil, err
-	}
-	table, err := identityTable(e.kind)
-	if err != nil {
-		return nil, err
-	}
-	ref.Table = table
-
-	// Prune control exists only for bibites (eggs have no parent links, so prune
-	// is a no-op for them). Everything else goes through the generic SQL-ref
-	// delete, which resolves to a whole-entry delete with default options.
-	if prune && e.kind == "bibite" {
-		err = e.ls.session.StageDeleteBibiteWithOptions(
-			mutator.BibiteRef{EntryName: e.entryName, BodyID: ref.BodyID},
-			mutator.DeleteOptions{PruneParentLinks: true},
-		)
-	} else {
-		err = e.ls.session.StageSQLDelete(ref)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("%s.delete: %w", e.kind, err)
 	}
 	e.ls.stagedOps++
 	return starlark.None, nil
+}
+
+// stageEntityDelete stages one whole-entity delete by entry_name, guarded by the
+// kind's id stale guard. Prune control exists only for bibites (eggs have no parent
+// links, so prune is a no-op for them); everything else goes through the generic
+// SQL-ref delete, which resolves to a whole-entry delete with default options.
+// Structural — not mirrored. Shared by Entity.delete() and the bulk
+// where(...).delete() path so both get the identical cascade/guard semantics.
+func (ls *LoadedSave) stageEntityDelete(kind, entryName string, prune bool) error {
+	ref, err := ls.entityLocatorRef(kind, entryName)
+	if err != nil {
+		return err
+	}
+	table, err := identityTable(kind)
+	if err != nil {
+		return err
+	}
+	ref.Table = table
+	if prune && kind == "bibite" {
+		err = ls.session.StageDeleteBibiteWithOptions(
+			mutator.BibiteRef{EntryName: entryName, BodyID: ref.BodyID},
+			mutator.DeleteOptions{PruneParentLinks: true},
+		)
+	} else {
+		err = ls.session.StageSQLDelete(ref)
+	}
+	if err != nil {
+		return fmt.Errorf("%s.delete: %w", kind, err)
+	}
+	return nil
 }

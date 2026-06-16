@@ -239,3 +239,63 @@ print("staged=%%d" %% mutate())
 		t.Errorf("scripted delete: entry %q still present", name)
 	}
 }
+
+// TestBulkWhereDelete: where(predicate).delete() stages a whole-entity delete for
+// exactly the matching entities — proving the predicate is applied (iteration alone
+// ignores it) — and the reparsed save loses exactly those. Splits on median energy
+// for a strict subset, and uses prune=True so a matched non-leaf bibite does not trip
+// the referential guard at commit.
+func TestBulkWhereDelete(t *testing.T) {
+	ls := loadFixture(t)
+	bibites := &EntityCollection{ls: ls, kind: "bibite"}
+	total := bibites.Len()
+	if total < 2 {
+		t.Skip("need >= 2 bibites")
+	}
+	medV, err := callMethod(t, bibites, "median", starlark.String("energy"))
+	if err != nil {
+		t.Fatalf("median: %v", err)
+	}
+	pred := fmt.Sprintf("energy < %v", mustFloat(t, medV))
+
+	filtered, err := callMethod(t, bibites, "where", starlark.String(pred))
+	if err != nil {
+		t.Fatalf("where: %v", err)
+	}
+	fc, ok := filtered.(*EntityCollection)
+	if !ok {
+		t.Fatalf("where returned %T, want *EntityCollection", filtered)
+	}
+	cntV, err := callMethod(t, fc, "count")
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	want := mustInt(t, cntV)
+	if want <= 0 || want >= int64(total) {
+		t.Skipf("predicate %q matched %d of %d (need a strict subset)", pred, want, total)
+	}
+
+	res, err := callMethod(t, fc, "delete", starlark.Bool(true)) // prune=True
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if got := mustInt(t, res); got != want {
+		t.Errorf("delete returned %d, want %d (match count)", got, want)
+	}
+	if int64(ls.stagedOps) != want {
+		t.Errorf("stagedOps = %d, want %d", ls.stagedOps, want)
+	}
+
+	tmp := filepath.Join(t.TempDir(), "out.zip")
+	if err := ls.WriteSave(tmp); err != nil {
+		t.Fatalf("WriteSave: %v", err)
+	}
+	re, err := tb.ParseFile(tmp, nil)
+	if err != nil {
+		t.Fatalf("reparse: %v", err)
+	}
+	tables := tb.ExtractTables(re.SHA256, re)
+	if got := len(tables.Bibites); got != total-int(want) {
+		t.Errorf("bibite count after bulk delete = %d, want %d (deleted %d)", got, total-int(want), want)
+	}
+}

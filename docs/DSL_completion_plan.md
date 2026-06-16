@@ -1,6 +1,6 @@
 # Plan: Completing the Bibites DSL (settings, genes, zones, pellets, aliases)
 
-> **Status:** P1 + P2 resolved 2026-06-16; pellet *append* added via clone (P2B) 2026-06-16; P3 not yet implemented.
+> **Status:** P1 + P2 resolved 2026-06-16; pellet *append* via clone (P2B) + bulk `where().delete()` (P2C) added 2026-06-16; P3 not yet implemented.
 > **Follows:** `docs/DSL_tickets_plan.md` (v1 language core). This plan closes the gaps
 > between that v1 and the intended full feature set.
 
@@ -240,6 +240,30 @@ as zone clone-append).
 
 ---
 
+## P2C — Bulk `where(...).delete()`
+
+> **Status: Resolved 2026-06-16.** Binding-layer only. Edits to `collection.go`
+> (`delete` method), `sql.go` (`bulkDelete` + `matchingEntryNames`), `entity.go`
+> (factored shared `stageEntityDelete`); test `delete_test.go` (`TestBulkWhereDelete`).
+
+`save.bibites.where(pred).delete(prune=False)` stages a whole-entity delete for every
+matching entity — the structural counterpart of `.set`. **Necessary, not just sugar:**
+`EntityCollection` iteration ignores the `where` predicate (it walks the identity table's
+full order), so a `for e in coll.where(...): e.delete()` loop would delete *every* entity.
+Predicate-scoped delete therefore resolves matches via push-down: `bulkDelete` runs the
+same rewrite/from/where builders as `bulkSet` to SELECT the matching `entry_name`s, then
+stages the existing per-entity delete (`stageEntityDelete`, now shared with
+`Entity.delete()`) for each — identical cascade (scene `nBibites`, species, parent links
+with `prune`) and id stale guard. Each bibite is its own entry, so the N deletes are
+order-independent. Structural: staged, not mirrored (in-run queries see the rows until commit).
+
+**`where().append()` is intentionally not built:** a predicate selects *existing* rows while
+append *creates* new ones — there is nothing to append to a filtered set. The real
+"read → modify → append back" workload is **cross-save** (read from save A, append into
+save B), i.e. feature #8 / P3 below.
+
+---
+
 ## P3 — Cross-save query→insert: documented stub
 - Add a clearly-erroring seam on `save` (e.g. `save.insert_from(...)` / a `workspace`/`open()` binding) that returns a clean Starlark error: `"cross-save transfer is not implemented (v2); see savemutator/thebibites/workspace.go"`. Add a one-paragraph note to `docs/DSL_tickets_plan.md` pointing at `workspace.go` as the entry point and naming **settings** as the first canonical cross-save copy target. No mutator work.
 
@@ -265,4 +289,4 @@ as zone clone-append).
 - **End-to-end:** a script exercising one mutation per surface → `save.commit(tmp)` → reparse → assert values (extend `commit_test.go`).
 
 ## Out of scope
-Cross-save transfer implementation (#8 stays a stub); brain-graph integrity enforcement; `settings_changers` surface; bulk `where().append()/delete()`; multi-save workspaces; relaxing the all-fields append contract.
+Cross-save transfer implementation (#8 stays a stub); brain-graph integrity enforcement; `settings_changers` surface; multi-save workspaces; relaxing the all-fields append contract. (Bulk `where().delete()` is now **implemented** — see P2C; `where().append()` is intentionally not a thing — it is the cross-save read-modify-append workload, i.e. #8/P3.)

@@ -49,12 +49,14 @@ func (c *EntityCollection) Attr(name string) (starlark.Value, error) {
 		return c.aggBuiltin(name), nil
 	case "set":
 		return starlark.NewBuiltin("set", c.setBuiltin), nil
+	case "delete":
+		return starlark.NewBuiltin("delete", c.deleteBuiltin), nil
 	}
 	return nil, nil
 }
 
 func (c *EntityCollection) AttrNames() []string {
-	return []string{"count", "group_by", "max", "mean", "median", "min", "quantile", "set", "sum", "where"}
+	return []string{"count", "delete", "group_by", "max", "mean", "median", "min", "quantile", "set", "sum", "where"}
 }
 
 // setBuiltin implements where(...).set(column, value): one batched scalar set over
@@ -67,6 +69,24 @@ func (c *EntityCollection) setBuiltin(thread *starlark.Thread, b *starlark.Built
 		return nil, err
 	}
 	n, err := c.ls.bulkSet(c.kind, c.where, column, value)
+	if err != nil {
+		return nil, err
+	}
+	return starlark.MakeInt(n), nil
+}
+
+// deleteBuiltin implements where(...).delete(prune=False): stage a whole-entity
+// delete for every matching entity — the structural counterpart of .set. Iteration
+// does NOT apply the where predicate, so this push-down resolution is the only
+// predicate-scoped delete; a `for e in coll.where(...): e.delete()` loop would walk
+// every entity, not the matches. prune cascades parent links (bibite only). Returns
+// the number staged for deletion.
+func (c *EntityCollection) deleteBuiltin(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var prune bool
+	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "prune?", &prune); err != nil {
+		return nil, err
+	}
+	n, err := c.ls.bulkDelete(c.kind, c.where, prune)
 	if err != nil {
 		return nil, err
 	}
