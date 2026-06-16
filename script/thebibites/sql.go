@@ -1,0 +1,435 @@
+package thebibites
+
+import (
+	"database/sql"
+	"fmt"
+	"strconv"
+	"strings"
+
+	"go.starlark.net/starlark"
+)
+
+// sql.go is the T5 analytics path: the raw save.sql escape hatch plus the
+// push-down query builder that compiles collection narrowing + aggregates into
+// DuckDB SELECTs. Nothing here materializes Entity values — computation runs in
+// DuckDB and only scalars/dicts come back.
+
+// quoteIdent double-quotes a SQL identifier for DuckDB, escaping embedded quotes.
+// Table and column names come from generated metadata (safe), but quoting keeps
+// the builder correct for any identifier and case-exact against the migration's
+// lowercase column names.
+func quoteIdent(identifier string) string {
+	return `"` + strings.ReplaceAll(identifier, `"`, `""`) + `"`
+}
+
+// identityTable returns the identity (one-row-per-entity) table backing a kind.
+func identityTable(kind string) (string, error) {
+	tables := entityTables[kind]
+	if len(tables) == 0 {
+		return "", fmt.Errorf("unknown entity kind %q", kind)
+	}
+	return tables[0], nil
+}
+
+// query opens DuckDB lazily, flushes any pending mutation mirror (no-op in T5),
+// and runs a query. flushMirror sits at the head of every query so a later T6
+// read-after-write observes staged sets without a reparse.
+func (ls *LoadedSave) query(q string, args ...any) (*sql.Rows, error) {
+	ctx := ls.queryCtx()
+	db, err := ls.openDB(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := ls.flushMirror(ctx); err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query: %w", err)
+	}
+	return rows, nil
+}
+
+// sqlBuiltin implements save.sql(query) -> list[dict]. The raw escape hatch: the
+// caller writes literal DuckDB SQL against the normalized tables; no friendly
+// name resolution happens here.
+func (s *Save) sqlBuiltin(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var query string
+	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "query", &query); err != nil {
+		return nil, err
+	}
+	rows, err := s.ls.query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRowsToDicts(rows)
+}
+
+// scanRowsToDicts materializes a result set as a Starlark list of dicts (one per
+// row, column name -> value), preserving column order. Driver scalars are
+// converted by fromSQLValue (SQL NULL -> None).
+func scanRowsToDicts(rows *sql.Rows) (*starlark.List, error) {
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	values := make([]any, len(cols))
+	targets := make([]any, len(cols))
+	for i := range values {
+		targets[i] = &values[i]
+	}
+
+	var items []starlark.Value
+	for rows.Next() {
+		for i := range values {
+			values[i] = nil
+		}
+		if err := rows.Scan(targets...); err != nil {
+			return nil, fmt.Errorf("scan row: %w", err)
+		}
+		d := starlark.NewDict(len(cols))
+		for i, name := range cols {
+			v, err := fromSQLValue(values[i])
+			if err != nil {
+				return nil, fmt.Errorf("column %q: %w", name, err)
+			}
+			if err := d.SetKey(starlark.String(name), v); err != nil {
+				return nil, err
+			}
+		}
+		items = append(items, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return starlark.NewList(items), nil
+}
+
+// aggCall describes one aggregate request from a collection method. fn is the
+// friendly aggregate name; col is the friendly column (empty for count); q is the
+// fraction for quantile.
+type aggCall struct {
+	fn  string
+	col string
+	q   float64
+}
+
+// resolveColumn maps a friendly column name to its qualified DuckDB reference
+// "<table>"."<column>" via the generated-metadata registry — the same resolution
+// table that powers reads. It returns the owning table so the caller can JOIN it.
+// Unknown column -> clean diagnostic.
+//
+// NOTE: spec.column is the canonical DuckDB column. (overrides aliases are empty
+// today; if added, the registry would need to retain the source column for SQL.)
+func resolveColumn(kind, col string) (qualified, table string, err error) {
+	spec, ok := attrRegistry()[kind][col]
+	if !ok {
+		return "", "", fmt.Errorf("unknown column %q for %s", col, kind)
+	}
+	return quoteIdent(spec.table) + "." + quoteIdent(spec.column), spec.table, nil
+}
+
+// aggExpr builds the SQL aggregate expression and reports the sub-table (if any)
+// it references so the caller can include it in the FROM joins.
+func aggExpr(kind string, agg aggCall) (expr, table string, err error) {
+	if agg.fn == "count" {
+		return "count(*)", "", nil
+	}
+	qualified, table, err := resolveColumn(kind, agg.col)
+	if err != nil {
+		return "", "", err
+	}
+	switch agg.fn {
+	case "sum":
+		expr = "sum(" + qualified + ")"
+	case "mean":
+		expr = "avg(" + qualified + ")"
+	case "median":
+		expr = "median(" + qualified + ")"
+	case "min":
+		expr = "min(" + qualified + ")"
+	case "max":
+		expr = "max(" + qualified + ")"
+	case "quantile":
+		expr = "quantile_cont(" + qualified + ", " + strconv.FormatFloat(agg.q, 'g', -1, 64) + ")"
+	default:
+		return "", "", fmt.Errorf("unknown aggregate %q", agg.fn)
+	}
+	return expr, table, nil
+}
+
+// fromClause builds "FROM <identity> [LEFT JOIN <subtable> ON …]" including only
+// the sub-tables actually referenced (in entityTables order, for determinism).
+// Every sub-table is 1:1 with identity on (save_id, entry_name), so LEFT JOIN
+// preserves cardinality and aggregates stay correct.
+func fromClause(kind string, needed map[string]bool) (string, error) {
+	tables := entityTables[kind]
+	if len(tables) == 0 {
+		return "", fmt.Errorf("unknown entity kind %q", kind)
+	}
+	identity := tables[0]
+	var b strings.Builder
+	b.WriteString("FROM ")
+	b.WriteString(quoteIdent(identity))
+	for _, t := range tables[1:] {
+		if !needed[t] {
+			continue
+		}
+		b.WriteString(" LEFT JOIN ")
+		b.WriteString(quoteIdent(t))
+		b.WriteString(" ON ")
+		b.WriteString(quoteIdent(identity) + ".save_id = " + quoteIdent(t) + ".save_id")
+		b.WriteString(" AND ")
+		b.WriteString(quoteIdent(identity) + ".entry_name = " + quoteIdent(t) + ".entry_name")
+	}
+	return b.String(), nil
+}
+
+// whereClause builds "WHERE <identity>.save_id = ? [AND (<predicate>)]" and its
+// args. The predicate is already friendly-column-rewritten.
+func (ls *LoadedSave) whereClause(kind, predicate string) (string, []any, error) {
+	identity, err := identityTable(kind)
+	if err != nil {
+		return "", nil, err
+	}
+	clause := "WHERE " + quoteIdent(identity) + ".save_id = ?"
+	args := []any{ls.saveID}
+	if strings.TrimSpace(predicate) != "" {
+		clause += " AND (" + predicate + ")"
+	}
+	return clause, args, nil
+}
+
+// combineWhere AND-combines two raw predicates (either may be empty).
+func combineWhere(existing, add string) string {
+	switch {
+	case existing == "":
+		return add
+	case add == "":
+		return existing
+	default:
+		return "(" + existing + ") AND (" + add + ")"
+	}
+}
+
+// scalarAgg compiles and runs a single-scalar aggregate over a (possibly
+// narrowed) collection, returning the scalar Starlark value (None for SQL NULL,
+// e.g. an aggregate over the empty set).
+func (ls *LoadedSave) scalarAgg(kind, where string, agg aggCall) (starlark.Value, error) {
+	needed := map[string]bool{}
+	expr, aggTable, err := aggExpr(kind, agg)
+	if err != nil {
+		return nil, err
+	}
+	if aggTable != "" {
+		needed[aggTable] = true
+	}
+	predicate, predTables, err := ls.rewritePredicate(kind, where)
+	if err != nil {
+		return nil, err
+	}
+	for t := range predTables {
+		needed[t] = true
+	}
+	from, err := fromClause(kind, needed)
+	if err != nil {
+		return nil, err
+	}
+	whereSQL, args, err := ls.whereClause(kind, predicate)
+	if err != nil {
+		return nil, err
+	}
+	q := "SELECT " + expr + " " + from + " " + whereSQL
+
+	rows, err := ls.query(q, args...)
+	if err != nil {
+		return nil, wrapWhere(where, err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, wrapWhere(where, err)
+		}
+		return starlark.None, nil
+	}
+	var v any
+	if err := rows.Scan(&v); err != nil {
+		return nil, fmt.Errorf("scan aggregate: %w", err)
+	}
+	return fromSQLValue(v)
+}
+
+// groupedAgg compiles and runs "SELECT <group>, <agg> … GROUP BY <group>" and
+// returns a dict keyed by group value.
+func (ls *LoadedSave) groupedAgg(kind, where, groupCol string, agg aggCall) (*starlark.Dict, error) {
+	needed := map[string]bool{}
+	groupQual, groupTable, err := resolveColumn(kind, groupCol)
+	if err != nil {
+		return nil, err
+	}
+	needed[groupTable] = true
+	expr, aggTable, err := aggExpr(kind, agg)
+	if err != nil {
+		return nil, err
+	}
+	if aggTable != "" {
+		needed[aggTable] = true
+	}
+	predicate, predTables, err := ls.rewritePredicate(kind, where)
+	if err != nil {
+		return nil, err
+	}
+	for t := range predTables {
+		needed[t] = true
+	}
+	from, err := fromClause(kind, needed)
+	if err != nil {
+		return nil, err
+	}
+	whereSQL, args, err := ls.whereClause(kind, predicate)
+	if err != nil {
+		return nil, err
+	}
+	q := "SELECT " + groupQual + " AS grp, " + expr + " AS val " + from + " " + whereSQL + " GROUP BY " + groupQual
+
+	rows, err := ls.query(q, args...)
+	if err != nil {
+		return nil, wrapWhere(where, err)
+	}
+	defer rows.Close()
+
+	out := starlark.NewDict(0)
+	for rows.Next() {
+		var groupVal, aggVal any
+		if err := rows.Scan(&groupVal, &aggVal); err != nil {
+			return nil, fmt.Errorf("scan grouped aggregate: %w", err)
+		}
+		key, err := fromSQLValue(groupVal)
+		if err != nil {
+			return nil, fmt.Errorf("group key: %w", err)
+		}
+		val, err := fromSQLValue(aggVal)
+		if err != nil {
+			return nil, fmt.Errorf("group value: %w", err)
+		}
+		if err := out.SetKey(key, val); err != nil {
+			return nil, err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, wrapWhere(where, err)
+	}
+	return out, nil
+}
+
+// wrapWhere names the predicate in an analytics error so an unknown column inside
+// a .where() string surfaces a diagnostic that points at the predicate.
+func wrapWhere(where string, err error) error {
+	if strings.TrimSpace(where) == "" {
+		return err
+	}
+	return fmt.Errorf("analytics query failed (where %q): %w", where, err)
+}
+
+// rewritePredicate qualifies friendly column names inside a raw .where() string
+// with their owning table, so awkward/colliding generated column names resolve
+// unambiguously across the joined sub-tables. It is a lightweight identifier
+// tokenizer, NOT a SQL parser: it rewrites only bare identifiers that (a) are not
+// already dotted, (b) are not function calls (followed by "("), and (c) match a
+// registry friendly column for kind. Everything else — SQL keywords, operators,
+// numeric/string literals, quoted identifiers, already-qualified refs — passes
+// through verbatim, so no hand-maintained keyword list is needed. It returns the
+// rewritten predicate and the set of sub-tables its columns reference.
+func (ls *LoadedSave) rewritePredicate(kind, expr string) (string, map[string]bool, error) {
+	reg := attrRegistry()[kind]
+	tables := map[string]bool{}
+	if strings.TrimSpace(expr) == "" {
+		return "", tables, nil
+	}
+
+	var out strings.Builder
+	var prev byte // last significant (non-space) byte emitted; for dotted-ref detection
+	writeStr := func(s string) {
+		out.WriteString(s)
+		for i := len(s) - 1; i >= 0; i-- {
+			if !isSpace(s[i]) {
+				prev = s[i]
+				break
+			}
+		}
+	}
+	writeByte := func(b byte) {
+		out.WriteByte(b)
+		if !isSpace(b) {
+			prev = b
+		}
+	}
+
+	s := expr
+	i := 0
+	for i < len(s) {
+		c := s[i]
+		switch {
+		case c == '\'':
+			// single-quoted string literal: copy verbatim, honoring '' escape.
+			i = copyQuoted(s, i, '\'', true, writeByte)
+		case c == '"':
+			// double-quoted identifier: caller qualified it explicitly; copy as-is.
+			i = copyQuoted(s, i, '"', false, writeByte)
+		case isIdentStart(c):
+			j := i + 1
+			for j < len(s) && isIdentPart(s[j]) {
+				j++
+			}
+			word := s[i:j]
+			dotted := prev == '.'
+			// function call if the next non-space char is '('.
+			k := j
+			for k < len(s) && isSpace(s[k]) {
+				k++
+			}
+			isCall := k < len(s) && s[k] == '('
+			if !dotted && !isCall {
+				if spec, ok := reg[strings.ToLower(word)]; ok {
+					writeStr(quoteIdent(spec.table) + "." + quoteIdent(spec.column))
+					tables[spec.table] = true
+					i = j
+					continue
+				}
+			}
+			writeStr(word)
+			i = j
+		default:
+			writeByte(c)
+			i++
+		}
+	}
+	return out.String(), tables, nil
+}
+
+// copyQuoted copies a quoted span starting at s[start] (the opening quote) to the
+// writer verbatim and returns the index just past the closing quote (or len(s) if
+// unterminated). When escapeDoubled is set, a doubled quote ('') is treated as an
+// escaped literal quote rather than the terminator.
+func copyQuoted(s string, start int, quote byte, escapeDoubled bool, write func(byte)) int {
+	write(s[start])
+	i := start + 1
+	for i < len(s) {
+		write(s[i])
+		if s[i] == quote {
+			if escapeDoubled && i+1 < len(s) && s[i+1] == quote {
+				write(s[i+1])
+				i += 2
+				continue
+			}
+			return i + 1
+		}
+		i++
+	}
+	return i
+}
+
+func isSpace(b byte) bool      { return b == ' ' || b == '\t' || b == '\n' || b == '\r' }
+func isIdentStart(b byte) bool { return b == '_' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') }
+func isIdentPart(b byte) bool  { return isIdentStart(b) || (b >= '0' && b <= '9') }

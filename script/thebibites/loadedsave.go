@@ -7,11 +7,13 @@
 package thebibites
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"reflect"
 	"sync"
 
+	"github.com/asemones/bibicontrol/duckdb"
 	mutator "github.com/asemones/bibicontrol/savemutator/thebibites"
 	tb "github.com/asemones/bibicontrol/saveparser/thebibites"
 )
@@ -42,6 +44,18 @@ type LoadedSave struct {
 
 	geneOnce sync.Once
 	geneIdx  map[string]map[string]*geneSet // kind -> entry_name -> genes
+
+	// mirrorDirty marks pending scalar mutations that DuckDB has not yet observed.
+	// T5 never sets it (no mutations); T6 flips it on every staged set and clears
+	// it in flushMirror. It exists now so the query/aggregate entry points already
+	// call flushMirror and T6 only has to fill the buffer.
+	mirrorDirty bool
+
+	// dbOpenCount / rowsMaterialized are test instrumentation: the analytics path
+	// must open DuckDB at most once per run and must not materialize Entity values
+	// to aggregate. Tests assert these counters.
+	dbOpenCount      int
+	rowsMaterialized int
 }
 
 // geneSet holds one entity's genes both in save order (for iteration) and by
@@ -173,3 +187,44 @@ func indexGenes(rows []tb.GeneRow) map[string]*geneSet {
 	}
 	return out
 }
+
+// openDB lazily opens DuckDB and imports this save's normalized rows on the first
+// analytical query, then reuses the handle. DuckDB therefore opens at most once
+// per run. The import is the in-memory ExtractedSave already parsed at Load time —
+// no reparse. A run is single-threaded (one Starlark thread), so no locking.
+func (ls *LoadedSave) openDB(ctx context.Context) (*sql.DB, error) {
+	if ls.db != nil {
+		return ls.db, nil
+	}
+	db, err := duckdb.OpenAndImport(ctx, "", ls.tables)
+	if err != nil {
+		return nil, fmt.Errorf("open analytics db: %w", err)
+	}
+	ls.db = db
+	ls.dbOpenCount++
+	// Per the consistency contract, a freshly opened DB flushes any pending mirror
+	// buffer once so mutation/open ordering is irrelevant. No-op in T5.
+	if err := ls.flushMirror(ctx); err != nil {
+		return nil, err
+	}
+	return ls.db, nil
+}
+
+// flushMirror makes DuckDB observe scalar mutations staged since the last flush.
+// In T5 there are no mutations, so it is a no-op whenever nothing is dirty; T6
+// fills the deferred buffer and replaces this body with the batched UPDATE flush.
+// It is the call site already wired into every query/aggregate entry point.
+func (ls *LoadedSave) flushMirror(ctx context.Context) error {
+	if !ls.mirrorDirty {
+		return nil
+	}
+	// T6 flushes the buffer here as one UPDATE ... FROM (VALUES …) per column.
+	ls.mirrorDirty = false
+	return nil
+}
+
+// queryCtx is the context used for DuckDB calls from script builtins. v1 uses a
+// background context — the Starlark step budget already bounds the run via
+// Thread.Cancel, and analytics queries are short. Threading the run's context
+// through here (so cancellation reaches in-flight SQL) is the documented seam.
+func (ls *LoadedSave) queryCtx() context.Context { return context.Background() }

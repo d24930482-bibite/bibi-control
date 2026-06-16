@@ -30,11 +30,13 @@ func (s *Save) Attr(name string) (starlark.Value, error) {
 		return &EntityCollection{ls: s.ls, kind: "bibite"}, nil
 	case "eggs":
 		return &EntityCollection{ls: s.ls, kind: "egg"}, nil
+	case "sql":
+		return starlark.NewBuiltin("sql", s.sqlBuiltin), nil
 	default:
 		return nil, nil
 	}
 }
 
 func (s *Save) AttrNames() []string {
-	return []string{"bibites", "eggs"}
+	return []string{"bibites", "eggs", "sql"}
 }
