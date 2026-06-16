@@ -203,10 +203,13 @@ Critical path: **T3 → T4 → T6 → T8**. T1/T2/T3/T9 can start in parallel.
 - **Verification:** `GOMODCACHE=/tmp/bibicontrol-go-mod GOCACHE=/tmp/bibicontrol-go-build go test ./revisionstore`; `GOMODCACHE=/tmp/bibicontrol-go-mod GOCACHE=/tmp/bibicontrol-go-build go test ./...`.
 
 ### T3 — `script/`: Starlark host engine (domain-neutral)
+- **Status:** Resolved 2026-06-16 in isolation.
 - **Goal:** a reusable, sandboxed Starlark runner with budgets and clean diagnostics; no Bibites types.
 - **Files:** `engine.go` — `Run(ctx, program []byte, globals starlark.StringDict, opts Options) (Result, error)`: `starlark.Thread`, `thread.SetMaxExecutionSteps` (budget), `thread.Print` → captured buffer, `*starlark.EvalError` backtraces → diagnostics. `result.go` — `Result{ Output string; Diagnostics []Diagnostic; StagedOps int; RevisionRef string; DryRun bool }`.
-- **Deps:** none. **New module dep:** `go.starlark.net`.
+- **Resolution:** implemented a domain-neutral `script` package with `Run`, `Options`, `Result`, `Diagnostic`, and `RunError`; the runner captures `print` output, uses `starlark.ExecFileOptions` with explicit `syntax.FileOptions`, enforces optional execution-step budgets through `Thread.SetMaxExecutionSteps`, propagates context cancellation through `Thread.Cancel`, and normalizes syntax/eval/budget/cancellation failures into clean diagnostics with source locations and eval backtraces.
+- **Deps:** none. **New module dep:** `go.starlark.net v0.0.0-20260324133313-ffb3f39dd27a` (pinned to the newest checked commit before the upstream `go 1.25.0` module bump; this repo remains on Go 1.24).
 - **DoD / tests:** trivial program prints + returns; step budget aborts a long bounded loop; syntax/eval error surfaces a clean diagnostic. (Starlark's lack of `while`/recursion gives hermeticity for free.)
+- **Verification:** `GOMODCACHE=/tmp/bibicontrol-go-mod GOCACHE=/tmp/bibicontrol-go-build go test ./script`; `GOMODCACHE=/tmp/bibicontrol-go-mod GOCACHE=/tmp/bibicontrol-go-build go test ./...`.
 
 ### T4 — `script/thebibites/`: LoadedSave + read bindings (enumerate + attribute reads)
 - **Goal:** load a save once and expose read-only entity enumeration and friendly attribute reads. First user-visible vertical slice (a script can read and print).
