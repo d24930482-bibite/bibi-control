@@ -7,13 +7,17 @@
 package thebibites
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"reflect"
 	"sync"
 
+	"github.com/asemones/bibicontrol/blobstore"
 	"github.com/asemones/bibicontrol/duckdb"
+	"github.com/asemones/bibicontrol/revisionstore"
 	mutator "github.com/asemones/bibicontrol/savemutator/thebibites"
 	tb "github.com/asemones/bibicontrol/saveparser/thebibites"
 )
@@ -54,18 +58,25 @@ type LoadedSave struct {
 	mirrorDirty bool
 
 	// stagedOps counts mutations staged on the session this run (reported by
-	// commit / the Result). dryRun stages but skips the file write; a plain field
-	// for now, wired to the CLI --dry-run flag by T8.
-	stagedOps int
-	dryRun    bool
+	// commit / the Result). dryRun stages but skips the write; set by the host
+	// RunAndCommit from RunOptions.DryRun. willCommit is the script-declared commit
+	// intent (default yes); the autocommit() builtin flips it to opt a pure-analysis
+	// run out of producing a revision.
+	stagedOps  int
+	dryRun     bool
+	willCommit bool
 
 	// dbOpenCount / rowsMaterialized / flushStmtCount are test instrumentation:
 	// the analytics path opens DuckDB at most once per run and never materializes
 	// Entity values to aggregate; the mirror flushes N row-by-row sets as one
-	// UPDATE per column, not N point-updates. Tests assert these counters.
-	dbOpenCount      int
-	rowsMaterialized int
-	flushStmtCount   int
+	// UPDATE per column, not N point-updates. writeArchiveCount / reparseCount let
+	// the churn DoD assert a pure-mutation commit does exactly one WriteArchive and
+	// zero reparses (one reparse only under verify). Tests assert these counters.
+	dbOpenCount       int
+	rowsMaterialized  int
+	flushStmtCount    int
+	writeArchiveCount int
+	reparseCount      int
 }
 
 // geneSet holds one entity's genes both in save order (for iteration) and by
@@ -87,11 +98,12 @@ func Load(path string) (*LoadedSave, error) {
 		saveID = archive.FileName
 	}
 	ls := &LoadedSave{
-		path:    path,
-		saveID:  saveID,
-		archive: archive,
-		tables:  tb.ExtractTables(saveID, archive),
-		session: mutator.NewSession(archive),
+		path:       path,
+		saveID:     saveID,
+		archive:    archive,
+		tables:     tb.ExtractTables(saveID, archive),
+		session:    mutator.NewSession(archive),
+		willCommit: true,
 	}
 	ls.buildAccess()
 	return ls, nil
@@ -305,16 +317,102 @@ func rowBoolField(row reflect.Value, reg map[string]attrSpec, column string) (bo
 	return row.FieldByIndex(spec.fieldIndex).Bool(), nil
 }
 
-// WriteSave applies the staged mutations to the in-memory archive and writes the
-// resulting save zip — with NO reparse (the run is over; fresh projections would
-// be unused). This is the T6 commit-to-file core; T8 layers content-addressed
-// persistence + provenance on top of it.
-func (ls *LoadedSave) WriteSave(path string) error {
+// ensureApplied applies the staged mutations to the in-memory archive at most
+// once. Session.Apply is itself idempotent (no-op once StateApplied or with no
+// staged ops), so a script that calls save.commit(path) and is then committed by
+// the host does not double-apply.
+func (ls *LoadedSave) ensureApplied() error {
 	if err := ls.session.Apply(); err != nil {
 		return fmt.Errorf("apply staged mutations: %w", err)
 	}
+	return nil
+}
+
+// WriteSave applies the staged mutations to the in-memory archive and writes the
+// resulting save zip — with NO reparse (the run is over; fresh projections would
+// be unused). This is the T6 commit-to-file core (the save.commit(path) plain-file
+// export); content-addressed persistence + provenance is layered by Commit.
+func (ls *LoadedSave) WriteSave(path string) error {
+	if err := ls.ensureApplied(); err != nil {
+		return err
+	}
 	if err := tb.WriteArchive(path, ls.session.Archive()); err != nil {
 		return fmt.Errorf("write save %q: %w", path, err)
+	}
+	return nil
+}
+
+// Commit serializes the applied save to content-addressed storage and records a
+// provenance revision linked to scriptRunID. It is the T8 terminus on top of the
+// T6 write core: apply (idempotent) → serialize to bytes via WriteArchiveTo (NO
+// temp file, NO reparse) → blobs.Put → revs.RecordRevision. When verify is set the
+// produced bytes are reparsed exactly once and their hash asserted against the
+// blob ref (the only reparse this path ever performs). DuckDB is never touched.
+func (ls *LoadedSave) Commit(ctx context.Context, blobs blobstore.Store, revs *revisionstore.Store, scriptRunID int64, verify bool) (revisionstore.Revision, error) {
+	if blobs == nil {
+		return revisionstore.Revision{}, fmt.Errorf("commit: blob store is nil")
+	}
+	if err := ls.ensureApplied(); err != nil {
+		return revisionstore.Revision{}, err
+	}
+
+	var buf bytes.Buffer
+	if err := tb.WriteArchiveTo(&buf, ls.session.Archive()); err != nil {
+		return revisionstore.Revision{}, fmt.Errorf("serialize save: %w", err)
+	}
+	ls.writeArchiveCount++
+	data := buf.Bytes()
+
+	ref, err := blobs.Put(ctx, data)
+	if err != nil {
+		return revisionstore.Revision{}, fmt.Errorf("store save blob: %w", err)
+	}
+
+	if verify {
+		if err := ls.verifyRoundTrip(data, ref); err != nil {
+			return revisionstore.Revision{}, err
+		}
+	}
+
+	rev, err := revs.RecordRevision(ctx, revisionstore.RevisionInput{
+		SourcePath:  ls.path,
+		BlobRef:     ref,
+		ScriptRunID: scriptRunID,
+		// ParentID nil in v1: the input save is not itself a recorded revision, so
+		// there is no parent to link. Lineage chaining is a documented seam.
+	})
+	if err != nil {
+		return revisionstore.Revision{}, fmt.Errorf("record revision: %w", err)
+	}
+	return rev, nil
+}
+
+// verifyRoundTrip reparses the produced save bytes once and asserts the parsed
+// archive's whole-file SHA256 matches the blob ref. ParseFile is path-based (there
+// is no in-memory archive parser), so verify writes a temp file; the common commit
+// path stays temp-file-free.
+func (ls *LoadedSave) verifyRoundTrip(data []byte, ref blobstore.Ref) error {
+	tmp, err := os.CreateTemp("", "bibiscript-verify-*.zip")
+	if err != nil {
+		return fmt.Errorf("verify: temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("verify: write temp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("verify: close temp: %w", err)
+	}
+
+	re, err := tb.ParseFile(tmpPath, nil)
+	ls.reparseCount++
+	if err != nil {
+		return fmt.Errorf("verify: reparse produced save: %w", err)
+	}
+	if re.SHA256 != ref.SHA256 {
+		return fmt.Errorf("verify: reparsed save sha256 %s does not match blob ref %s", re.SHA256, ref.SHA256)
 	}
 	return nil
 }

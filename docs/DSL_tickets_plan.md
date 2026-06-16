@@ -173,7 +173,7 @@ Nine tickets, each independently shippable with its own tests and definition of 
 
 ```
 T1 blobstore ─┐
-              ├─► T8 persistence + provenance + CLI
+              ├─► T8 persistence + provenance (host API)
 T2 revisionstore (needs T1.Ref) ─┘
 T3 engine ─► T4 read bindings ─┬─► T5 analytics
                                └─► T6 scalar set ─┬─► T7 settings (needs T10)
@@ -248,11 +248,46 @@ Critical path: **T3 → T4 → T6 → T8**. T1/T2/T3/T9 can start in parallel.
 - **DoD / tests:** `save.settings.simulation["maxBibiteCount"].set(v)` round-trips through reparse; wrapper-vs-bare value handled (`settingValueUsesWrapper`); guard rejects wrong-type; zone-scoped value write hits the right index.
 - **Stretch (gate separately):** intra-save clone of a zone/material/changer via append of source `RawJSON` through the `settings_zone_path_map` append target (`sqlref_settings.go:227`).
 
-### T8 — persistence + provenance + `cmd/bibiscript` CLI (end-to-end)
-- **Goal:** wire commits into content-addressed storage + SQL provenance and expose a runnable CLI.
-- **Files:** extend `loadedsave.go` — `Commit(blobstore, revisionstore, scriptRun)`: `session.Apply()` + `tb.WriteArchive(tmp, session.Archive())` (**no reparse**; opt-in `--verify` reparses to assert round-trip) → read bytes → `blobstore.Put` → `revisionstore.RecordRevision` linked to a `RecordScriptRun`. `cmd/bibiscript/main.go` — `bibiscript --save <in.zip> --script <prog.star> [--store <dir>] [--dry-run] [--verify]`: load, run, commit, print `Result`. Mirror existing `cmd/` style; keep thin.
-- **Deps:** T1, T2, T6 (and benefits from T5/T7). **New module dep:** none beyond T1/T2.
-- **DoD / tests:** running a mutation script produces a blob + `save_revisions`/`script_runs` rows; written save (re-read in the test) shows the change and unrelated entries byte-identical; `--dry-run` records a run with `dry_run=1` and writes no blob; **churn assertion — a pure-mutation script triggers exactly one `WriteArchive` and zero `ParseFile` reparses, and never opens DuckDB**; `--verify` adds exactly one reparse.
+### T8 — persistence + provenance (end-to-end host API)
+- **Status:** Resolved 2026-06-16.
+- **Scope (revised 2026-06-16):** the `cmd/bibiscript` CLI is **dropped** per the project
+  decision that the primary consumer is a UI / Starlark editor, not a terminal. The
+  deliverable is a host-callable Go orchestration API; an end-to-end test plays the role the
+  CLI verification would have. Commit is **host-driven auto-commit** with a **script-declared
+  intent** (`autocommit(enabled=True)`, default yes).
+- **Goal:** wire commits into content-addressed storage + SQL provenance behind a single host
+  entry point a UI backend can call.
+- **Resolution:** `script/thebibites/run.go` adds `RunAndCommit(ctx, savePath, program, blobs,
+  revs, RunOptions{Filename, MaxExecutionSteps, DryRun, Verify})` (and the in-package
+  `runLoaded` core tests inspect counters through): load once → `script.Run` with `Globals(ls)`
+  → `revs.RecordScriptRun` (always, even on failure / read-only) → and, when the run succeeded,
+  is not dry-run, the script left commit intent on, and `stagedOps > 0`, `ls.Commit(...)`.
+  `loadedsave.go` gains `LoadedSave.Commit(ctx, blobs, revs, scriptRunID, verify)`:
+  `ensureApplied()` (idempotent `Session.Apply`, so a script's own `save.commit(path)` does not
+  double-apply) → `tb.WriteArchiveTo(&buf, …)` serialize to bytes (**no temp file, no
+  reparse**) → `blobs.Put` → `revs.RecordRevision` linked to the run. Opt-in `verify` writes
+  the bytes to a temp file and `tb.ParseFile`s once (the only archive parser is path-based),
+  asserting the reparsed whole-file SHA256 equals the blob ref. `bindings.go` adds the
+  predeclared `autocommit(enabled=True)` builtin (sets `ls.willCommit`). **Deviations:** (1) no
+  CLI (above). (2) `recordedDryRun = host DryRun || !willCommit` — the `script_runs.dry_run`
+  flag records the *intent* "this run produced no revision," covering both the host override
+  and the script opt-out (no schema change to the resolved T2 store). (3) `RevisionInput.ParentID`
+  is nil in v1 — the input save is not itself a recorded revision, so lineage chaining is a
+  documented seam. (4) `save.commit(path)` (T6) stays as an orthogonal plain-file export, not
+  the provenance path. (5) instrumentation `writeArchiveCount`/`reparseCount` added to
+  `LoadedSave` alongside `dbOpenCount` so the churn DoD is assertable.
+- **Files:** `script/thebibites/run.go` (new), `script/thebibites/loadedsave.go` (`Commit`,
+  `ensureApplied`, `verifyRoundTrip`, counters, `willCommit`), `script/thebibites/bindings.go`
+  (`autocommit`), `script/thebibites/commit_test.go` (new).
+- **Deps:** T1, T2, T6 (benefits from T5/T7). **New module dep:** none beyond T1/T2.
+- **DoD / tests (`commit_test.go`):** a mutation run produces a blob + linked
+  `save_revisions`/`script_runs` rows, the produced save (re-read) shows the change and an
+  unrelated entry stays byte-identical; `DryRun` records a run with `dry_run=1` and writes no
+  blob; `autocommit(False)` stages mutations but produces no revision (recorded dry); **churn
+  assertion — a pure-mutation run does exactly one `WriteArchive`, zero reparses, and never
+  opens DuckDB** (`writeArchiveCount==1`, `reparseCount==0`, `dbOpenCount==0`); `Verify` adds
+  exactly one reparse and asserts the round-trip hash.
+- **Verification:** `GOMODCACHE=/tmp/bibicontrol-go-mod GOCACHE=/tmp/bibicontrol-go-build go test ./script/thebibites`; `GOMODCACHE=/tmp/bibicontrol-go-mod GOCACHE=/tmp/bibicontrol-go-build go test ./...`.
 
 ### T9 — thin IPC command seam (`control/`)
 - **Goal:** typed client-side command definitions over the existing transport, ready for the DLL later.
@@ -286,6 +321,6 @@ Critical path: **T3 → T4 → T6 → T8**. T1/T2/T3/T9 can start in parallel.
 
 ## End-to-end verification (after T8)
 1. `GOCACHE=/tmp/bibicontrol-go-build go test ./...` — all new packages + existing suites green.
-2. Build `cmd/bibiscript`; run a sample `.star` (carnivore-speed example adapted to real attributes) against `testdata/saves/the-bibites/autosave_20260228004041.zip` with and without `--dry-run`; confirm a revision blob + SQLite rows are produced and the written save, re-read, shows the mutated field changed with unrelated entries byte-identical (`--verify` asserts the round-trip in one reparse).
+2. Via `thebibites.RunAndCommit` (the host API; no CLI), run a sample `.star` (carnivore-speed example adapted to real attributes) against `testdata/saves/the-bibites/autosave_20260228004041.zip` with and without `RunOptions.DryRun`; confirm a revision blob + SQLite rows are produced and the produced save, re-read, shows the mutated field changed with unrelated entries byte-identical (`RunOptions.Verify` asserts the round-trip in one reparse). Covered by `script/thebibites/commit_test.go`.
 3. Scale path on the 1027-bibite fixture: `save.bibites.group_by("species_id").median("energy")` returns without materializing `Bibite` values and matches the raw `save.sql` equivalent.
 4. In-run consistency: a script doing `save.sql` → `set` → `save.sql` observes its own mutation, with instrumentation showing **zero `ParseFile` reparses and zero full `ReplaceExtractedSave` re-imports** during the run — only incremental `UPDATE`s.
