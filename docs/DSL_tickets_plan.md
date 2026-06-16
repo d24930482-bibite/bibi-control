@@ -194,10 +194,13 @@ Critical path: **T3 → T4 → T6 → T8**. T1/T2/T3/T9 can start in parallel.
 - **Verification:** `GOMODCACHE=/tmp/bibicontrol-go-mod GOCACHE=/tmp/bibicontrol-go-build go test ./blobstore`.
 
 ### T2 — `revisionstore/`: SQLite revision + provenance metadata ("metadata in SQL")
+- **Status:** Resolved 2026-06-16 in isolation.
 - **Goal:** record every produced save revision and the script run that produced it.
 - **Files:** `schema.sql` (embedded migration) — `save_revisions(id, sha256, size, parent_id, source_path, blob_ref, inline_blob BLOB NULL, script_run_id, created_at)`, `script_runs(id, script_sha256, started_at, finished_at, status, error, output, staged_ops, dry_run)`. `store.go` — `Open(path)` (applies migration), `RecordScriptRun`, `RecordRevision`, lookups by id/sha. Reuse the `//go:embed` + ordered-apply pattern from `duckdb/import.go`.
-- **Deps:** T1 (stores a `blobstore.Ref`). **New module dep:** `modernc.org/sqlite` (pure-Go, cgo-free).
+- **Resolution:** implemented `revisionstore.Store` over `database/sql` + pure-Go `modernc.org/sqlite`; added an embedded SQLite schema for `script_runs` and `save_revisions`; revisions persist `blobstore.Ref` metadata as JSON while storing inline bytes in `inline_blob`; lookups cover script run by ID, revision by ID, and revisions by SHA-256. `modernc.org/sqlite` is pinned to `v1.45.0`, the newest checked release that keeps `go 1.24.0`.
+- **Deps:** T1 (stores a `blobstore.Ref`). **New module dep:** `modernc.org/sqlite v1.45.0` (pure-Go, cgo-free).
 - **DoD / tests:** record + read back a run and its produced revision; parent linkage; inline-blob vs blob_ref path both persist and reload.
+- **Verification:** `GOMODCACHE=/tmp/bibicontrol-go-mod GOCACHE=/tmp/bibicontrol-go-build go test ./revisionstore`; `GOMODCACHE=/tmp/bibicontrol-go-mod GOCACHE=/tmp/bibicontrol-go-build go test ./...`.
 
 ### T3 — `script/`: Starlark host engine (domain-neutral)
 - **Goal:** a reusable, sandboxed Starlark runner with budgets and clean diagnostics; no Bibites types.
