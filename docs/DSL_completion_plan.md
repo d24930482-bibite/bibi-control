@@ -1,6 +1,6 @@
 # Plan: Completing the Bibites DSL (settings, genes, zones, pellets, aliases)
 
-> **Status:** P1 resolved 2026-06-16; P2/P3 not yet implemented.
+> **Status:** P1 + P2 resolved 2026-06-16 (pellet *append* deferred — see the P2 block); P3 not yet implemented.
 > **Follows:** `docs/DSL_tickets_plan.md` (v1 language core). This plan closes the gaps
 > between that v1 and the intended full feature set.
 
@@ -30,13 +30,13 @@ deferral reflected scope-cutting for the original PR, not a technical barrier.
 |---|---------|---------|-------------|--------|
 | 1 | Mutate settings (aliased) | ✅ `settings_value` resolver | ✅ `settings_value.go` (P1) | **Done (P1)** |
 | 2 | Load save as variable, no god object | ✅ | ✅ `LoadedSave` | none |
-| 3 | Mutate zones + append/delete | ✅ `settings_zone_path_map` | ❌ | **Build (P2)** |
+| 3 | Mutate zones + append/delete | ✅ `settings_zone_path_map` | ✅ `zones.go` (P2) | **Done (P2)** |
 | 4 | Mutate bibites: scalar/pos/health/energy | ✅ | ✅ | none |
 | 4 | …brain synapses/nodes, stomach | ✅ | ✅ `subcollection.go` | none |
 | 4 | …gene **values** | ✅ `bibite/egg_gene_value` | ✅ `gene.go` R/W (P1) | **Done (P1)** |
 | 5 | Query settings (get) | ✅ in-memory rows + DuckDB | ✅ `settings_value.go` (P1) | **Done (P1)** |
 | 5 | Query bibites + push-down | ✅ | ✅ `sql.go`/`collection.go` | none |
-| 6 | Mutate + delete pellets | ✅ `pellet_path_map` | ❌ | **Build (P2)** |
+| 6 | Mutate + delete pellets | ✅ `pellet_path_map` | ✅ `pellets.go` (P2; append deferred) | **Done (P2)** |
 | 7 | Aliases for all of the above | ✅ registry | ✅ fixed (`sourceColumn`, P1) | **Done (P1)** |
 | 8 | Cross-save query→insert | seam `workspace.go` | ❌ | **Documented stub (P3)** |
 
@@ -154,6 +154,39 @@ deferral reflected scope-cutting for the original PR, not a technical barrier.
 ---
 
 ## P2 — Zones and pellets (structural)
+
+> **Status: Resolved 2026-06-16.** Binding-layer only — **no `savemutator`/`saveparser`/
+> `duckdb`/generator changes** (the generated zone/pellet resolvers already carried
+> everything). New files `script/thebibites/zones.go`, `pellets.go` (+ tests
+> `zones_test.go`, `pellets_test.go`); edits to `save_value.go` (dispatch),
+> `attr_registry.go` (factored `tableScalarSpecs` + `zoneRegistry`/`pelletRegistry` +
+> `pelletOverrides`), `loadedsave.go` (`settings_zone_values` backing/index + `allocZoneID`).
+> Whole suite green: `go test ./script/... ./savemutator/... ./saveparser/...`.
+>
+> **Shipped:** zone & pellet read/iterate; zone scalar set (name/material/distribution) +
+> `delete()` (zone_id-guarded); zone-scoped values `save.zones[i].values["k"]` (reuse the P1
+> `Setting`/`SettingScope` path — closes the P1 zone-values deferral); zone **create** via
+> `save.zones.clone(i)` → edit name/material/distribution → `.append()` (deep-copies the
+> template's `RawJSON`, assigns a fresh zone id); pellet scalar set + `delete()` (group
+> locators, zone + material stale guards, scene `nPellets` reconciled by the mutator). Scalar
+> sets are mirror-everything; structural ops (delete, clone-append) are staged but not
+> mirrored (invisible to in-run `save.sql` until commit).
+>
+> **Deviations from the stub:**
+> 1. **Pellet `append` is deferred.** Unlike synapse/stomach, a pellet's JSON element is
+>    nested (`pellet.*`, `transform.position[*]`, `matterDecay.*`, `rb2d.*`) and the apply
+>    path (`appendJSONArray`) inserts the payload verbatim, so the flat `appendBuiltin` (2b)
+>    would emit literal dotted keys and corrupt the pellet (`setJSONPath` also can't build the
+>    object from scratch). A metadata-driven nested-payload builder (or clone-a-template) is
+>    future work; `save.pellets` ships without `append`.
+> 2. **Pending-zone `.values` edits are deferred** (a clone inherits the template's values).
+>    Editing a value on the raw cloned map would require replicating the mutator's
+>    wrapper-vs-bare handling; edit zone values via `save.zones[i].values` after committing.
+>    This also kept P2 fully binding-only (the `path.go` export the stub anticipated for 2a
+>    was unnecessary).
+> 3. **Clone-append is explicit `.append()` only** (no end-of-run auto-finalize) — no hidden
+>    session lifecycle. Zone-group membership and other zone-id references are not reconciled
+>    (a known v2 limitation, like brain-graph integrity).
 
 ### 2a. Zones — `save.zones`
 - New file `script/thebibites/zones.go`; add `case "zones"` to `Save.Attr`.

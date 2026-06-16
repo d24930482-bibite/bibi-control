@@ -35,6 +35,10 @@ func (s *Save) Attr(name string) (starlark.Value, error) {
 		return starlark.NewBuiltin("sql", s.sqlBuiltin), nil
 	case "settings":
 		return &Settings{ls: s.ls}, nil
+	case "zones":
+		return &Zones{ls: s.ls}, nil
+	case "pellets":
+		return &Pellets{ls: s.ls}, nil
 	case "commit":
 		return starlark.NewBuiltin("commit", s.commitBuiltin), nil
 	default:
@@ -43,7 +47,7 @@ func (s *Save) Attr(name string) (starlark.Value, error) {
 }
 
 func (s *Save) AttrNames() []string {
-	return []string{"bibites", "commit", "eggs", "settings", "sql"}
+	return []string{"bibites", "commit", "eggs", "pellets", "settings", "sql", "zones"}
 }
 
 // commitBuiltin implements save.commit(path) -> staged op count. It applies the

@@ -102,63 +102,118 @@ func attrRegistry() map[string]map[string]attrSpec {
 
 func buildRegistry() {
 	registry = make(map[string]map[string]attrSpec, len(entityTables))
-
-	specByTable := make(map[string]tb.NormalizedTableSpec, len(tb.NormalizedTables))
-	for _, spec := range tb.NormalizedTables {
-		specByTable[spec.Table] = spec
-	}
-
-	// Resolve row struct types by SaveField off a zero ExtractedSave so field
-	// indices can be precomputed without an instance.
-	extractedType := reflect.TypeOf(tb.ExtractedSave{})
-
 	for kind, tables := range entityTables {
 		attrs := make(map[string]attrSpec)
 		for _, table := range tables {
-			spec, ok := specByTable[table]
-			if !ok {
-				continue
-			}
-			rowType := rowTypeFor(extractedType, spec.SaveField)
-			if rowType == nil {
-				continue
-			}
-			for _, field := range spec.Fields {
-				if field.Column == "save_id" {
-					continue // pure locator noise
-				}
-				if _, exists := attrs[field.Column]; exists {
+			for col, spec := range tableScalarSpecs(table) {
+				if _, exists := attrs[col]; exists {
 					continue // first table wins (identity table precedence)
 				}
-				sf, found := rowType.FieldByName(field.Field)
-				if !found {
-					continue
-				}
-				idx := make([]int, len(sf.Index))
-				copy(idx, sf.Index)
-				attrs[field.Column] = attrSpec{
-					category:     categoryScalar,
-					table:        table,
-					column:       field.Column,
-					sourceColumn: field.Column,
-					fieldIndex:   idx,
-					writable:     field.SQLRefPath != "",
-					sqlType:      field.SQLType,
-					jsonKey:      field.SQLRefPath,
-				}
+				attrs[col] = spec
 			}
 		}
-		// Register friendly aliases: the alias becomes the map key + display
-		// (spec.column), but spec.sourceColumn is preserved so all SQL/mutator/
-		// mirror/guard keying still targets the real generated column.
-		for alias, source := range overrides[kind] {
-			if spec, ok := attrs[source]; ok {
-				spec.column = alias
-				attrs[alias] = spec
-			}
-		}
+		applyOverrides(attrs, overrides[kind])
 		registry[kind] = attrs
 	}
+}
+
+// tableScalarSpecs derives the friendly scalar attribute specs for one normalized
+// table straight from tb.NormalizedTables (no hand-maintained column allowlist):
+// every projected column except save_id becomes a readable attrSpec, writable iff
+// the field carries an sqlref path. Shared by the entity registry (buildRegistry)
+// and the zone/pellet registries. The map key and friendly column default to the
+// generated DuckDB column; callers apply any alias overrides afterward.
+func tableScalarSpecs(table string) map[string]attrSpec {
+	var spec tb.NormalizedTableSpec
+	found := false
+	for _, s := range tb.NormalizedTables {
+		if s.Table == table {
+			spec, found = s, true
+			break
+		}
+	}
+	if !found {
+		return nil
+	}
+	// Resolve the row struct type by SaveField off a zero ExtractedSave so field
+	// indices can be precomputed without an instance.
+	rowType := rowTypeFor(reflect.TypeOf(tb.ExtractedSave{}), spec.SaveField)
+	if rowType == nil {
+		return nil
+	}
+	attrs := make(map[string]attrSpec, len(spec.Fields))
+	for _, field := range spec.Fields {
+		if field.Column == "save_id" {
+			continue // pure locator noise
+		}
+		sf, ok := rowType.FieldByName(field.Field)
+		if !ok {
+			continue
+		}
+		idx := make([]int, len(sf.Index))
+		copy(idx, sf.Index)
+		attrs[field.Column] = attrSpec{
+			category:     categoryScalar,
+			table:        table,
+			column:       field.Column,
+			sourceColumn: field.Column,
+			fieldIndex:   idx,
+			writable:     field.SQLRefPath != "",
+			sqlType:      field.SQLType,
+			jsonKey:      field.SQLRefPath,
+		}
+	}
+	return attrs
+}
+
+// applyOverrides registers friendly aliases (alias -> source column): the alias
+// becomes an additional map key whose spec keeps sourceColumn, so all SQL/mutator/
+// mirror/guard keying still targets the real generated column.
+func applyOverrides(attrs map[string]attrSpec, aliases map[string]string) {
+	for alias, source := range aliases {
+		if spec, ok := attrs[source]; ok {
+			spec.column = alias
+			attrs[alias] = spec
+		}
+	}
+}
+
+// pelletOverrides aliases the generated transform_* pellet columns to the short
+// position_x/position_y/rotation/scale surface used for bibites/eggs, keeping the
+// pellet scalar surface consistent across entities. Tiny and hand-edited, like
+// overrides; the columns themselves stay generated.
+var pelletOverrides = map[string]string{
+	"position_x": "transform_position_x",
+	"position_y": "transform_position_y",
+	"rotation":   "transform_rotation",
+	"scale":      "transform_scale",
+}
+
+var (
+	zoneRegOnce   sync.Once
+	zoneRegMap    map[string]attrSpec
+	pelletRegOnce sync.Once
+	pelletRegMap  map[string]attrSpec
+)
+
+// zoneRegistry is the friendly scalar attribute registry for settings_zones
+// (name/material/distribution writable; zone_index/zone_id readable), derived from
+// generated metadata. Backs the save.zones surface (zones.go).
+func zoneRegistry() map[string]attrSpec {
+	zoneRegOnce.Do(func() { zoneRegMap = tableScalarSpecs("settings_zones") })
+	return zoneRegMap
+}
+
+// pelletRegistry is the friendly scalar attribute registry for pellets, derived
+// from generated metadata plus the short position aliases. Backs save.pellets
+// (pellets.go).
+func pelletRegistry() map[string]attrSpec {
+	pelletRegOnce.Do(func() {
+		m := tableScalarSpecs("pellets")
+		applyOverrides(m, pelletOverrides)
+		pelletRegMap = m
+	})
+	return pelletRegMap
 }
 
 // rowTypeFor returns the element struct type of the ExtractedSave field named

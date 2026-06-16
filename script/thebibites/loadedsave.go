@@ -80,6 +80,13 @@ type LoadedSave struct {
 	dryRun     bool
 	willCommit bool
 
+	// zoneIDNext is the next synthetic zone id handed out to save.zones.clone(...)
+	// appends, lazily seeded from max(existing zone id)+1 so cloned zones do not
+	// collide on id with the template or each other within a run. Zone-group
+	// membership and other id references are not reconciled (see zones.go).
+	zoneIDNext      int64
+	zoneIDNextReady bool
+
 	// dbOpenCount / rowsMaterialized / flushStmtCount are test instrumentation:
 	// the analytics path opens DuckDB at most once per run and never materializes
 	// Entity values to aggregate; the mirror flushes N row-by-row sets as one
@@ -286,6 +293,8 @@ func (ls *LoadedSave) settingsBacking(table string) []tb.SettingValueRow {
 		return ls.tables.SettingsIndependentValues
 	case "settings_material_values":
 		return ls.tables.SettingsMaterialValues
+	case "settings_zone_values":
+		return ls.tables.SettingsZoneValues
 	default:
 		return nil
 	}
@@ -313,6 +322,7 @@ func (ls *LoadedSave) buildSettingsIndex() {
 		"settings_simulation_values":  indexSettings(ls.tables.SettingsSimulationValues),
 		"settings_independent_values": indexSettings(ls.tables.SettingsIndependentValues),
 		"settings_material_values":    indexSettings(ls.tables.SettingsMaterialValues),
+		"settings_zone_values":        indexSettings(ls.tables.SettingsZoneValues),
 	}
 }
 
@@ -332,6 +342,32 @@ func indexSettings(rows []tb.SettingValueRow) map[string]map[string]int {
 		byName[r.SettingName] = i
 	}
 	return out
+}
+
+// allocZoneID returns a fresh, unused zone id for a cloned-zone append, lazily
+// seeding from max(existing zone id)+1 and incrementing per call. Reports
+// (0,false) when zones in this save carry no ids (nothing to keep unique).
+func (ls *LoadedSave) allocZoneID() (int64, bool) {
+	if !ls.zoneIDNextReady {
+		max := int64(0)
+		any := false
+		for i := range ls.tables.SettingsZones {
+			if z := &ls.tables.SettingsZones[i]; z.HasZoneID {
+				any = true
+				if z.ZoneID > max {
+					max = z.ZoneID
+				}
+			}
+		}
+		if !any {
+			return 0, false
+		}
+		ls.zoneIDNext = max + 1
+		ls.zoneIDNextReady = true
+	}
+	id := ls.zoneIDNext
+	ls.zoneIDNext++
+	return id, true
 }
 
 // openDB lazily opens DuckDB and imports this save's normalized rows on the first
