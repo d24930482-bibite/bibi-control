@@ -2,6 +2,7 @@ package thebibites
 
 import (
 	"reflect"
+	"sort"
 	"sync"
 
 	tb "github.com/asemones/bibicontrol/saveparser/thebibites"
@@ -17,6 +18,10 @@ const (
 	// categoryScalar reads a single column off the entity's row (or a 1:1
 	// sub-table row joined by entry_name).
 	categoryScalar attrCategory = iota
+	// categorySubCollection is a 1:many sub-table (brain synapses/nodes, stomach
+	// contents) exposed as an iterable element collection (T11b). Dispatched in
+	// entity.go to an ElementCollection rather than a scalar read.
+	categorySubCollection
 )
 
 // attrSpec describes one friendly attribute of an entity kind. Everything here
@@ -29,6 +34,7 @@ type attrSpec struct {
 	fieldIndex []int  // reflect index path into the row struct
 	writable   bool   // field has an sqlref path (mutable) — used by T6, not T4
 	sqlType    string
+	jsonKey    string // raw JSON key (NormalizedFieldSpec.SQLRefPath); used by T11b sub-collection append
 }
 
 // entityTables lists, per entity kind, the normalized tables whose columns are
@@ -115,6 +121,7 @@ func buildRegistry() {
 					fieldIndex: idx,
 					writable:   field.SQLRefPath != "",
 					sqlType:    field.SQLType,
+					jsonKey:    field.SQLRefPath,
 				}
 			}
 		}
@@ -143,4 +150,131 @@ func rowTypeFor(extractedType reflect.Type, saveField string) reflect.Type {
 		return nil
 	}
 	return t
+}
+
+// subCollectionInfo names a 1:many sub-table exposed as an element collection and
+// its synthesized array-ordinal column. indexColumn both orders elements for the
+// read surface and selects which SQLValueRef index field a delete stamps (mapped
+// in subElementIndexSetters, subcollection.go) — it is the array row index (no
+// SQLRefPath), distinct from any in-payload "*_index" data column (e.g. a node's
+// node_index, which carries SQLRefPath "Index").
+type subCollectionInfo struct {
+	table       string
+	indexColumn string
+}
+
+// entitySubCollections lists, per entity kind, the 1:many sub-tables exposed as
+// iterable element collections (T11b). Keyed by friendly attribute -> info. Like
+// entityTables this is the one piece of domain knowledge; element columns are
+// derived generically from tb.NormalizedTables. Eggs carry no stomach.
+var entitySubCollections = map[string]map[string]subCollectionInfo{
+	"bibite": {
+		"synapses": {table: "bibite_brain_synapses", indexColumn: "synapse_row_index"},
+		"nodes":    {table: "bibite_brain_nodes", indexColumn: "node_row_index"},
+		"stomach":  {table: "bibite_stomach_contents", indexColumn: "content_index"},
+	},
+	"egg": {
+		"synapses": {table: "egg_brain_synapses", indexColumn: "synapse_row_index"},
+		"nodes":    {table: "egg_brain_nodes", indexColumn: "node_row_index"},
+	},
+}
+
+// subLocatorColumns are the normalized projection columns that locate a row's
+// parent or position rather than carry element data. They are excluded from the
+// element read/append surface (the index column is exposed separately as `index`).
+var subLocatorColumns = map[string]bool{
+	"save_id": true, "entry_name": true,
+	"owner_kind": true, "owner_id": true,
+	"body_id": true, "has_body_id": true,
+	"egg_id": true, "has_egg_id": true,
+}
+
+// subCollectionSpec is the built form of a sub-collection: the table + the
+// ExtractedSave field holding its rows, the array-ordinal index column (field +
+// name), the element's data attributes (derived from tb.NormalizedTables), and the
+// deterministic stale-guard column used on element delete.
+type subCollectionSpec struct {
+	attr         string
+	table        string
+	saveField    string
+	indexColumn  string
+	indexField   []int
+	elementAttrs map[string]attrSpec // friendly column -> spec (reads + append kwargs)
+	writableCols []string            // writable element columns, sorted (append/guard)
+	guardColumn  string              // first writable column, used as the delete stale guard
+}
+
+var (
+	subRegOnce     sync.Once
+	subRegistryMap map[string]map[string]*subCollectionSpec // kind -> attr -> spec
+)
+
+// subCollectionRegistry returns the lazily built sub-collection registry, derived
+// from entitySubCollections + tb.NormalizedTables (no hand-maintained column list).
+func subCollectionRegistry() map[string]map[string]*subCollectionSpec {
+	subRegOnce.Do(buildSubRegistry)
+	return subRegistryMap
+}
+
+func buildSubRegistry() {
+	subRegistryMap = make(map[string]map[string]*subCollectionSpec, len(entitySubCollections))
+
+	specByTable := make(map[string]tb.NormalizedTableSpec, len(tb.NormalizedTables))
+	for _, spec := range tb.NormalizedTables {
+		specByTable[spec.Table] = spec
+	}
+	extractedType := reflect.TypeOf(tb.ExtractedSave{})
+
+	for kind, subs := range entitySubCollections {
+		out := make(map[string]*subCollectionSpec, len(subs))
+		for attr, info := range subs {
+			tableSpec, ok := specByTable[info.table]
+			if !ok {
+				continue
+			}
+			rowType := rowTypeFor(extractedType, tableSpec.SaveField)
+			if rowType == nil {
+				continue
+			}
+			sc := &subCollectionSpec{
+				attr:         attr,
+				table:        info.table,
+				saveField:    tableSpec.SaveField,
+				indexColumn:  info.indexColumn,
+				elementAttrs: make(map[string]attrSpec),
+			}
+			for _, field := range tableSpec.Fields {
+				sf, found := rowType.FieldByName(field.Field)
+				if !found {
+					continue
+				}
+				idx := append([]int(nil), sf.Index...)
+				if field.Column == info.indexColumn {
+					sc.indexField = idx
+					continue
+				}
+				if subLocatorColumns[field.Column] {
+					continue
+				}
+				sc.elementAttrs[field.Column] = attrSpec{
+					category:   categoryScalar,
+					table:      info.table,
+					column:     field.Column,
+					fieldIndex: idx,
+					writable:   field.SQLRefPath != "",
+					sqlType:    field.SQLType,
+					jsonKey:    field.SQLRefPath,
+				}
+				if field.SQLRefPath != "" {
+					sc.writableCols = append(sc.writableCols, field.Column)
+				}
+			}
+			sort.Strings(sc.writableCols)
+			if len(sc.writableCols) > 0 {
+				sc.guardColumn = sc.writableCols[0]
+			}
+			out[attr] = sc
+		}
+		subRegistryMap[kind] = out
+	}
 }

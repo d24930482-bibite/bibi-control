@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 
+	mutator "github.com/asemones/bibicontrol/savemutator/thebibites"
 	"go.starlark.net/starlark"
 )
 
@@ -37,6 +38,11 @@ func (e *Entity) Attr(name string) (starlark.Value, error) {
 		return starlark.NewBuiltin("gene", e.geneBuiltin), nil
 	case "genes":
 		return &GeneCollection{ls: e.ls, kind: e.kind, entryName: e.entryName}, nil
+	case "delete":
+		return starlark.NewBuiltin("delete", e.deleteBuiltin), nil
+	}
+	if sc, ok := subCollectionRegistry()[e.kind][name]; ok {
+		return &ElementCollection{ls: e.ls, kind: e.kind, entryName: e.entryName, spec: sc}, nil
 	}
 	spec, ok := attrRegistry()[e.kind][name]
 	if !ok {
@@ -63,7 +69,10 @@ func (e *Entity) AttrNames() []string {
 	for name := range attrs {
 		names = append(names, name)
 	}
-	names = append(names, "gene", "genes")
+	names = append(names, "gene", "genes", "delete")
+	for sub := range subCollectionRegistry()[e.kind] {
+		names = append(names, sub)
+	}
 	sort.Strings(names)
 	return names
 }
@@ -78,8 +87,11 @@ func (e *Entity) AttrNames() []string {
 // (so a later plain read observes it), and records a DuckDB mirror intent. Scalar
 // set only — gene writes and structural mutations are later tickets.
 func (e *Entity) SetField(name string, val starlark.Value) error {
-	if name == "gene" || name == "genes" {
+	if name == "gene" || name == "genes" || name == "delete" {
 		return fmt.Errorf("%s.%s is read-only", e.kind, name)
+	}
+	if _, ok := subCollectionRegistry()[e.kind][name]; ok {
+		return fmt.Errorf("%s.%s is a collection (use .append/.delete), not assignable", e.kind, name)
 	}
 	spec, ok := attrRegistry()[e.kind][name]
 	if !ok {
@@ -135,4 +147,45 @@ func (e *Entity) geneBuiltin(thread *starlark.Thread, b *starlark.Builtin, args 
 		return starlark.None, nil
 	}
 	return geneValueToStarlark(g), nil
+}
+
+// deleteBuiltin implements b.delete(prune=False): stage a whole-entity delete.
+// This is a structural op — it is staged on the session for the eventual commit
+// but, unlike a scalar set, is NOT mirrored into DuckDB, so an in-run query does
+// not observe it until after commit (the consistency contract). The mutator owns
+// the cascade: deleting a bibite reconciles scene nBibites and (with prune) the
+// parent/child links, and deleting the last member of a species drops it from
+// activeSpeciesList. The referential guard (refuse orphaning a parent link
+// without prune) fires later, inside Session.Apply at commit time.
+func (e *Entity) deleteBuiltin(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var prune bool
+	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "prune?", &prune); err != nil {
+		return nil, err
+	}
+	ref, err := e.ls.entityLocatorRef(e.kind, e.entryName)
+	if err != nil {
+		return nil, err
+	}
+	table, err := identityTable(e.kind)
+	if err != nil {
+		return nil, err
+	}
+	ref.Table = table
+
+	// Prune control exists only for bibites (eggs have no parent links, so prune
+	// is a no-op for them). Everything else goes through the generic SQL-ref
+	// delete, which resolves to a whole-entry delete with default options.
+	if prune && e.kind == "bibite" {
+		err = e.ls.session.StageDeleteBibiteWithOptions(
+			mutator.BibiteRef{EntryName: e.entryName, BodyID: ref.BodyID},
+			mutator.DeleteOptions{PruneParentLinks: true},
+		)
+	} else {
+		err = e.ls.session.StageSQLDelete(ref)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%s.delete: %w", e.kind, err)
+	}
+	e.ls.stagedOps++
+	return starlark.None, nil
 }

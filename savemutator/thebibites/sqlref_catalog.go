@@ -39,11 +39,20 @@ func generatedSQLRefTable(table string, columns map[string]string, resolver tb.S
 	spec := baseGeneratedSQLRefTable(table, columns, resolver)
 	switch resolver {
 	case tb.SQLRefResolverBibiteBrainSynapsePathMap:
-		spec.appendArray = synapseArrayResolver(tb.EntryBibite, entitySynapseAppendTarget)
-		spec.deleteArray = synapseArrayResolver(tb.EntryBibite, entitySynapseDeleteTarget)
+		spec.appendArray = entityBrainArrayResolver(tb.EntryBibite, entitySynapseAppendTarget)
+		spec.deleteArray = entityBrainArrayResolver(tb.EntryBibite, entitySynapseDeleteTarget)
 	case tb.SQLRefResolverEggBrainSynapsePathMap:
-		spec.appendArray = synapseArrayResolver(tb.EntryEgg, entitySynapseAppendTarget)
-		spec.deleteArray = synapseArrayResolver(tb.EntryEgg, entitySynapseDeleteTarget)
+		spec.appendArray = entityBrainArrayResolver(tb.EntryEgg, entitySynapseAppendTarget)
+		spec.deleteArray = entityBrainArrayResolver(tb.EntryEgg, entitySynapseDeleteTarget)
+	case tb.SQLRefResolverBibiteBrainNodePathMap:
+		spec.appendArray = entityBrainArrayResolver(tb.EntryBibite, entityNodeAppendTarget)
+		spec.deleteArray = entityBrainArrayResolver(tb.EntryBibite, entityNodeDeleteTarget)
+	case tb.SQLRefResolverEggBrainNodePathMap:
+		spec.appendArray = entityBrainArrayResolver(tb.EntryEgg, entityNodeAppendTarget)
+		spec.deleteArray = entityBrainArrayResolver(tb.EntryEgg, entityNodeDeleteTarget)
+	case tb.SQLRefResolverBibiteStomachContentPathMap:
+		spec.appendArray = bibiteStomachAppendTarget
+		spec.deleteArray = bibiteStomachDeleteTarget
 	case tb.SQLRefResolverPelletPathMap:
 		spec.appendArray = pelletAppendTarget
 		spec.deleteArray = pelletDeleteTarget
@@ -59,7 +68,9 @@ func generatedSQLRefTable(table string, columns map[string]string, resolver tb.S
 	return spec
 }
 
-func synapseArrayResolver(kind tb.EntryKind, resolve func(SQLValueRef, tb.EntryKind) (Target, string, error)) sqlRefArrayResolver {
+// entityBrainArrayResolver binds an entity kind to a brain array target resolver
+// (synapses or nodes), the array-mutation counterpart of the brain SET resolvers.
+func entityBrainArrayResolver(kind tb.EntryKind, resolve func(SQLValueRef, tb.EntryKind) (Target, string, error)) sqlRefArrayResolver {
 	return func(ref SQLValueRef) (Target, string, error) {
 		return resolve(ref, kind)
 	}

@@ -385,6 +385,19 @@ func (s *Session) applyDeleteEntry(updates map[string]*entryUpdate, removed *[]s
 		}
 	}
 
+	// If this removes the last living member of its species, drop the species id
+	// from speciesData.json's activeSpeciesList. Bibites and eggs both carry
+	// genes.speciesID, so this applies to either kind.
+	if entry.Kind == tb.EntryBibite || entry.Kind == tb.EntryEgg {
+		if sid, ok := entitySpeciesID(entry.JSON); ok {
+			if !s.speciesHasOtherMembers(op.Target.EntryName, *removed, sid) {
+				if err := s.removeActiveSpecies(updates, sid); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
 	*removed = append(*removed, op.Target.EntryName)
 	return nil
 }
@@ -520,6 +533,79 @@ func childIndexOf(root any, id int64) int {
 	}
 	for i, child := range children {
 		if n, ok := jsonNumberToInt64(child); ok && n == id {
+			return i
+		}
+	}
+	return -1
+}
+
+// entitySpeciesID reads genes.speciesID from a bibite or egg entry's JSON. The
+// path matches the parser's sqlref:"genes.speciesID" on BibiteRow and EggRow.
+func entitySpeciesID(root any) (int64, bool) {
+	value, ok, err := getJSONPath(root, "genes.speciesID")
+	if err != nil || !ok {
+		return 0, false
+	}
+	return jsonNumberToInt64(value)
+}
+
+// speciesHasOtherMembers reports whether any bibite or egg entry other than
+// skipName (and not already staged for removal) still belongs to species sid.
+// Like entriesReferencingChild, it reads entry.JSON directly, so a same-batch
+// genes.speciesID reassignment is not considered.
+func (s *Session) speciesHasOtherMembers(skipName string, removed []string, sid int64) bool {
+	removedSet := make(map[string]struct{}, len(removed))
+	for _, name := range removed {
+		removedSet[name] = struct{}{}
+	}
+	for i := range s.archive.Entries {
+		entry := &s.archive.Entries[i]
+		if entry.Kind != tb.EntryBibite && entry.Kind != tb.EntryEgg {
+			continue
+		}
+		if entry.Name == skipName || entry.JSON == nil {
+			continue
+		}
+		if _, dropped := removedSet[entry.Name]; dropped {
+			continue
+		}
+		if other, ok := entitySpeciesID(entry.JSON); ok && other == sid {
+			return true
+		}
+	}
+	return false
+}
+
+// removeActiveSpecies drops sid from speciesData.json's activeSpeciesList. It is
+// a no-op when the save has no species entry, no activeSpeciesList, or the id is
+// already absent — staleness here is not parser-validated, so a missing path
+// degrades quietly, consistent with the other delete-cascade helpers.
+func (s *Session) removeActiveSpecies(updates map[string]*entryUpdate, sid int64) error {
+	if s.archive.Entry(SpeciesEntryName) == nil {
+		return nil
+	}
+	update, err := s.entryUpdate(updates, SpeciesTarget())
+	if err != nil {
+		return err
+	}
+	idx := activeSpeciesIndexOf(update.value, sid)
+	if idx < 0 {
+		return nil
+	}
+	return deleteJSONArrayElement(update.value, fmt.Sprintf("activeSpeciesList[%d]", idx))
+}
+
+func activeSpeciesIndexOf(root any, sid int64) int {
+	value, ok, err := getJSONPath(root, "activeSpeciesList")
+	if err != nil || !ok {
+		return -1
+	}
+	ids, ok := value.([]any)
+	if !ok {
+		return -1
+	}
+	for i, id := range ids {
+		if n, ok := jsonNumberToInt64(id); ok && n == sid {
 			return i
 		}
 	}

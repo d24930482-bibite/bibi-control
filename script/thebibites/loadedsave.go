@@ -49,6 +49,12 @@ type LoadedSave struct {
 	geneOnce sync.Once
 	geneIdx  map[string]map[string]*geneSet // kind -> entry_name -> genes
 
+	// subRowIdx indexes 1:many sub-collection tables (brain synapses/nodes,
+	// stomach contents) by entry_name, holding each entity's element rows in array
+	// order (T11b). Built lazily; reads served in-memory like genes.
+	subRowOnce sync.Once
+	subRowIdx  map[string]map[string][]reflect.Value // table -> entry_name -> rows
+
 	// mirror buffers scalar mutations not yet mirrored into DuckDB; mirrorDirty
 	// marks it non-empty. T5 never sets these (no mutations); T6 fills the buffer
 	// on every staged set and flushMirror drains it into the open DuckDB as one
@@ -196,6 +202,53 @@ func (ls *LoadedSave) buildGeneIndex() {
 	}
 }
 
+// subRowsFor returns one entity's element rows for a 1:many sub-collection table,
+// in array order, building the per-table index lazily. Returns nil when the entity
+// has no elements in that table.
+func (ls *LoadedSave) subRowsFor(table, entryName string) []reflect.Value {
+	ls.subRowOnce.Do(ls.buildSubRowIndex)
+	return ls.subRowIdx[table][entryName]
+}
+
+// buildSubRowIndex groups every sub-collection table's rows by entry_name,
+// preserving slice order (which the parser emits in array order, so it equals the
+// element index order). One pass per distinct table across all entity kinds.
+func (ls *LoadedSave) buildSubRowIndex() {
+	ls.subRowIdx = make(map[string]map[string][]reflect.Value)
+	extracted := reflect.ValueOf(ls.tables)
+	extractedType := extracted.Type()
+
+	seen := make(map[string]bool)
+	for _, subs := range subCollectionRegistry() {
+		for _, sc := range subs {
+			if seen[sc.table] {
+				continue
+			}
+			seen[sc.table] = true
+			fld, ok := extractedType.FieldByName(sc.saveField)
+			if !ok {
+				continue
+			}
+			slice := extracted.FieldByIndex(fld.Index)
+			if slice.Kind() != reflect.Slice {
+				continue
+			}
+			elem := slice.Type().Elem()
+			sf, ok := elem.FieldByName("EntryName")
+			if !ok {
+				continue
+			}
+			byEntry := make(map[string][]reflect.Value)
+			for i := 0; i < slice.Len(); i++ {
+				row := slice.Index(i)
+				name := row.FieldByIndex(sf.Index).String()
+				byEntry[name] = append(byEntry[name], row)
+			}
+			ls.subRowIdx[sc.table] = byEntry
+		}
+	}
+}
+
 func indexGenes(rows []tb.GeneRow) map[string]*geneSet {
 	out := make(map[string]*geneSet)
 	for _, g := range rows {
@@ -297,6 +350,23 @@ func (ls *LoadedSave) entityLocatorRef(kind, entryName string) (mutator.SQLValue
 		ref.EggID, ref.HasEggID = id, has
 	default:
 		return mutator.SQLValueRef{}, fmt.Errorf("unknown entity kind %q", kind)
+	}
+	return ref, nil
+}
+
+// subElementRef builds the locator for one array element: the parent entity
+// locator (entry_name + body_id/egg_id) plus the table and the array-ordinal index
+// stamped onto the matching SQLValueRef index field. The caller adds Column +
+// WithExpected for a delete stale guard. Append uses only the parent half (Table +
+// entity locator), since the appended element has no index yet.
+func (ls *LoadedSave) subElementRef(kind, entryName string, sc *subCollectionSpec, index int64) (mutator.SQLValueRef, error) {
+	ref, err := ls.entityLocatorRef(kind, entryName)
+	if err != nil {
+		return mutator.SQLValueRef{}, err
+	}
+	ref.Table = sc.table
+	if err := setRefArrayIndex(&ref, sc.indexColumn, index); err != nil {
+		return mutator.SQLValueRef{}, err
 	}
 	return ref, nil
 }
