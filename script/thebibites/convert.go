@@ -81,8 +81,8 @@ func fromSQLValue(v any) (starlark.Value, error) {
 // mutation (int64/float64/bool/string). It is the write-direction counterpart of
 // toStarlark and rejects non-scalar values (lists, dicts, None) with a clean
 // error. It does NOT validate that the scalar's type matches the target column —
-// that (range/enum/type-match) is the validation-guard ticket; this only ensures
-// the value can become a Go scalar at all.
+// that (range/enum/type-match) is validateSet in guards.go; this only ensures the
+// value can become a Go scalar at all.
 func fromStarlark(v starlark.Value) (any, error) {
 	switch x := v.(type) {
 	case starlark.Int:
@@ -127,8 +127,9 @@ func goScalar(v reflect.Value) (any, error) {
 // the kind of the row field at fieldIndex, writes it through to the in-memory row
 // (so a later plain attribute read observes the change), and returns the coerced
 // Go value to stage. It errors — never panics — on an incompatible kind. This is
-// the only "typing" T6 performs (memory safety, type fidelity of the staged JSON
-// value); full value validation is the guard ticket.
+// the only "typing" done at write time (memory safety, type fidelity of the staged
+// JSON value); full value validation (range/enum/type-match) is validateSet in
+// guards.go, run before this.
 func setRowField(row reflect.Value, fieldIndex []int, goVal any) (any, error) {
 	field := row.FieldByIndex(fieldIndex)
 	if !field.CanSet() {

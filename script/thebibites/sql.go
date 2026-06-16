@@ -339,10 +339,15 @@ func (ls *LoadedSave) bulkSet(kind, where, column string, value starlark.Value) 
 		return 0, fmt.Errorf("unknown column %q for %s", column, kind)
 	}
 	if !spec.writable {
-		return 0, fmt.Errorf("%s.%s is read-only", kind, column)
+		return 0, fmt.Errorf("%s.%s is read-only (derived or locator column, not writable)", kind, column)
 	}
 	goVal, err := fromStarlark(value)
 	if err != nil {
+		return 0, fmt.Errorf("%s.%s: %w", kind, column, err)
+	}
+	// Validate once per column, before the query runs: a bad value is rejected up
+	// front (and even when the predicate matches zero rows), not discovered per row.
+	if err := validateSet(spec, goVal); err != nil {
 		return 0, fmt.Errorf("%s.%s: %w", kind, column, err)
 	}
 

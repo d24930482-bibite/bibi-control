@@ -73,10 +73,10 @@ func (e *Entity) AttrNames() []string {
 // capability comes straight from attrSpec.writable (the field's sqlref path) — no
 // parallel allowlist. It rejects unknown/read-only attributes and non-scalar
 // values with a clean error, captures the current value as a stale-value guard,
-// stages a guarded set on the session, writes the new value through to the
-// in-memory row (so a later plain read observes it), and records a DuckDB mirror
-// intent. T6 is scalar set only — gene writes and structural mutations, plus the
-// value-validation layer (range/enum/type-match), are later tickets.
+// validates the new value (type/range/enum via validateSet, guards.go), stages a
+// guarded set on the session, writes the new value through to the in-memory row
+// (so a later plain read observes it), and records a DuckDB mirror intent. Scalar
+// set only — gene writes and structural mutations are later tickets.
 func (e *Entity) SetField(name string, val starlark.Value) error {
 	if name == "gene" || name == "genes" {
 		return fmt.Errorf("%s.%s is read-only", e.kind, name)
@@ -86,7 +86,7 @@ func (e *Entity) SetField(name string, val starlark.Value) error {
 		return fmt.Errorf("cannot set %s.%s: unknown attribute", e.kind, name)
 	}
 	if !spec.writable {
-		return fmt.Errorf("%s.%s is read-only", e.kind, name)
+		return fmt.Errorf("%s.%s is read-only (derived or locator column, not writable)", e.kind, name)
 	}
 	row, ok := e.ls.rowForEntry(spec.table, e.entryName)
 	if !ok {
@@ -98,6 +98,9 @@ func (e *Entity) SetField(name string, val starlark.Value) error {
 	}
 	goVal, err := fromStarlark(val)
 	if err != nil {
+		return fmt.Errorf("%s.%s: %w", e.kind, name, err)
+	}
+	if err := validateSet(spec, goVal); err != nil {
 		return fmt.Errorf("%s.%s: %w", e.kind, name, err)
 	}
 	staged, err := setRowField(row, spec.fieldIndex, goVal)
