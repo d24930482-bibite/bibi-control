@@ -36,6 +36,9 @@ public static class HeadlessController
 	private static void Bootstrap()
 	{
 		ParseArgs();
+		// Single load marker so you can confirm in Player.log that the mod is
+		// actually loaded and this startup hook ran.
+		Debug.Log("[BibiControl] mod loaded (headless=" + Enabled + ")");
 		if (!Enabled)
 			return;
 		StartServer();

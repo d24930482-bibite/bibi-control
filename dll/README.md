@@ -1,64 +1,117 @@
 # BibiControl — headless + IPC mod for The Bibites
 
-A small, additive mod baked into the game's own assembly (`BibitesAssembly`). It
-adds:
+Adds two things to The Bibites:
 
-- **Headless launch**: a `-bibiteHeadless` flag that boots straight into the
-  simulation with a chosen save, skipping interactive menus.
-- **An IPC server**: a TCP server speaking the same newline-delimited-JSON
+- **Headless launch** — a `-bibiteHeadless` flag that boots straight into the
+  simulation with a chosen save, with no menus and (combined with Unity's
+  `-batchmode -nographics`) no window.
+- **An IPC server** — a TCP server speaking the same newline-delimited-JSON
   envelope protocol as the Go `ipc` package, implementing `STOP`, `RESUME`,
-  `INFO`, and `RELOAD`.
+  `INFO`, and `RELOAD`. The control plane (`simctl`) dials in and drives it.
 
-No BepInEx / Doorstop. The bootstrap runs via Unity's
-`[RuntimeInitializeOnLoadMethod]`, so it works on every platform the managed
-assembly runs on (including macOS/ARM).
+No BepInEx / Doorstop. It is pure managed C#, so it runs on every platform the
+game's managed assembly runs on (incl. macOS/ARM).
+
+---
+
+## Status (what is and isn't proven)
+
+Verified on this machine (The Bibites, Unity **6000.0.44f1**, Mono):
+
+| Piece | Status |
+|-------|--------|
+| Go control client (`simctl`) | ✅ built + unit-tested (`go test -race`) |
+| Mod C# code | ✅ compiles cleanly against the real game assemblies |
+| Headless launch | ✅ game runs windowless under `-batchmode -nographics`; custom flags reach the game |
+| Mod actually running in-game (server up, commands answered) | ❌ **not yet** — see "Loading" below |
+
+The blocker is purely **how the mod gets loaded**, not the mod logic. On this
+Unity 6 build, dropping `BibiControl.dll` into `Managed` and listing it in
+`ScriptingAssemblies.json` does **not** cause Unity to run the mod's
+`[RuntimeInitializeOnLoadMethod]` startup hook (Unity never loads an assembly
+nothing references). The mod must be part of an assembly the game already loads
+— i.e. **baked into `BibitesAssembly`** (or called from it). See below.
+
+---
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `BibiControl/HeadlessController.cs` | Arg parsing, server bootstrap, headless redirect |
+| `BibiControl/HeadlessController.cs` | Arg parsing, server bootstrap (`[RuntimeInitializeOnLoadMethod]`), headless redirect |
 | `BibiControl/IpcServer.cs` | TCP server, envelope framing, main-thread dispatch, command registry |
 | `BibiControl/SimCommands.cs` | `STOP` / `RESUME` / `INFO` / `RELOAD` handlers |
 | `BibiControl/Envelope.cs` | JSON envelope DTO (mirrors `ipc.Envelope`) |
+| `BibiControl.csproj` | Companion-DLL build (handy for compile-checking against your install) |
 
-## Build (bake into `BibitesAssembly`)
+---
 
-The Bibites ships as a Unity Mono assembly with a recompilable, decompiled
-source tree and a `BibitesAssembly.csproj` (SDK-style, globs all `*.cs`).
+## Building
 
-1. Copy the `BibiControl/` folder into the **root of the decompiled source tree**
-   (the directory that contains `BibitesAssembly.csproj`). SDK-style globbing
-   picks the new files up automatically — no `.csproj` edit needed for sources.
-2. Ensure `System.dll` is referenced (needed for `System.Net.Sockets`). With
-   `UseWindowsForms=true` it usually already is; if the build can't find
-   `TcpListener`, add to the `csproj`:
-   ```xml
-   <Reference Include="System" />
-   ```
-3. Build against the game's managed assemblies. The simplest path is to point the
-   reference assemblies at the game install's `Managed` folder (Rider/VS resolve
-   the `<Reference Include="UnityEngine.*" />` items from there), then:
-   ```
-   dotnet build BibitesAssembly.csproj -c Release
-   ```
-4. Copy the resulting `BibitesAssembly.dll` over the one in
-   `TheBibites_Data/Managed/` (back up the original first).
+### Compile-check against your game (easy, no install)
 
-> The mod only calls existing **public** game APIs plus UnityEngine and the
-> game's bundled Newtonsoft.Json, so it compiles as part of the assembly with no
-> new dependencies.
-
-## Run
-
-Launch the game with the headless flag and a save, combined with Unity's own
-headless switches:
+`BibiControl.csproj` builds the four files as a standalone DLL referencing the
+shipped game assemblies. This proves the code matches your game's API:
 
 ```
-TheBibites.exe -batchmode -nographics \
-  -bibiteHeadless \
-  -bibiteSave latest \
+dotnet build dll/BibiControl.csproj -c Release `
+  -p:GameManaged="C:\Program Files (x86)\Steam\steamapps\common\The Bibites\The Bibites_Data\Managed"
+```
+
+(Default `GameManaged` already points at the typical Steam path.) This produces
+`BibiControl.dll`, but on Unity 6 that standalone DLL will **not auto-load** (see
+Status). It's a build/lint check, not the deployable artifact.
+
+### Bake into `BibitesAssembly` (the deployable path)
+
+This is the only reliable way to get the mod to run on Unity 6.
+
+1. Get the game's decompiled, recompilable source + its `BibitesAssembly.csproj`.
+2. Copy `dll/BibiControl/` into the source root (the SDK project globs `*.cs`).
+3. Point the project's references at your install's `Managed` folder (e.g. a
+   `Directory.Build.props` that adds `<AssemblySearchPaths>` for `Managed`, plus
+   a .NET Framework reference pack such as
+   `Microsoft.NETFramework.ReferenceAssemblies.net40`).
+4. Build with a C# compiler that matches the source's language level
+   (`BibitesAssembly.csproj` sets `LangVersion 14.0`). Decompiled IL can need a
+   recent Roslyn and occasionally a small artifact fix.
+5. Copy the resulting `BibitesAssembly.dll` over the one in
+   `The Bibites_Data/Managed/` (back up the original first).
+
+> Heads-up: recompiling the full ~94k-line decompiled assembly is the hard part.
+> On this machine it did not build out of the box (compiler errors around `ref`
+> expressions in the decompiled code, unrelated to this mod). A lighter
+> alternative — IL-patching the shipped `BibitesAssembly.dll` to call
+> `BibiControl.HeadlessController.Bootstrap()` (e.g. with Mono.Cecil), so the mod
+> loads without recompiling the source — is feasible but not yet implemented here.
+
+---
+
+## Running (Steam gotchas matter)
+
+Launching The Bibites' `.exe` directly makes Steam relaunch it through Steam and
+**strip your command-line args** (only `ARG 0` reaches the game). Two fixes:
+
+- **Add `steam_appid.txt`** containing `2736860` next to `The Bibites.exe`. Then a
+  direct launch keeps your args. (Confirmed working.)
+- **or** set the args as **Steam launch options** and start it from Steam.
+
+Then launch headless (note: **quote save paths that contain spaces** — the Bibites
+save folder usually does):
+
+```
+"…\The Bibites.exe" -batchmode -nographics ^
+  -bibiteHeadless ^
+  -bibiteSave "C:\Users\<you>\AppData\LocalLow\The Bibites\The Bibites\Savefiles\<world>\saves\_00.zip" ^
   -bibiteIpcPort 43100
+```
+
+Confirm it loaded by checking `Player.log`
+(`…\AppData\LocalLow\The Bibites\The Bibites\Player.log`, or pass `-logFile <path>`)
+for the line:
+
+```
+[BibiControl] mod loaded (headless=True)
 ```
 
 Flags:
@@ -66,69 +119,53 @@ Flags:
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `-bibiteHeadless` | off | Enable headless mode + start the IPC server |
-| `-bibiteSave <path\|latest>` | (none) | Save to auto-load; `latest` = newest save/autosave |
+| `-bibiteSave <path\|latest>` | (none) | Save to auto-load; `latest` = newest save the game finds (quote if it has spaces) |
 | `-bibiteIpcPort <port>` | `43100` | TCP listen port |
 | `-bibiteIpcHost <host>` | `127.0.0.1` | Bind host (`0.0.0.0` to listen on all interfaces) |
 
-Without `-bibiteSave`, the server still starts but no world is loaded until a
-`RELOAD` is sent.
+---
 
-## Drive it from Go
+## Testing it (end to end)
 
-The control plane dials in (it is the TCP client) and uses the typed client in
-`simctl`:
+1. Build + install the mod (bake-in path above) and add `steam_appid.txt`.
+2. Launch headless with a quoted save path on port 43100.
+3. From the repo, run the manual client and watch it exercise the commands:
+   ```
+   go run ./cmd/livetest 127.0.0.1:43100
+   ```
+   It waits for the world to load, then prints `INFO`, `STOP`, `INFO`,
+   `RESUME x5`, `INFO`, `RELOAD`, `INFO`. (For the automated protocol test that
+   needs no game, run `go test ./simctl/...`.)
+
+---
+
+## Driving it from Go
+
+The control plane is the TCP client and uses `simctl`:
 
 ```go
-rt, _ := noderuntime.Start(ctx, noderuntime.Spec{
-    Process: ipc.ProcessSpec{
-        Path: bibitesExe,
-        Args: []string{"-batchmode", "-nographics",
-            "-bibiteHeadless", "-bibiteSave", "latest", "-bibiteIpcPort", "43100"},
-    },
-    CompatAddr:     "127.0.0.1:43100",
-    ConnectOnStart: true,
-})
+sess, _ := ipc.Dial(ctx, "127.0.0.1:43100", nil)
+sim := simctl.New(sess)
 
-sim := simctl.New(rt)
-prev, _ := sim.Stop(ctx)          // pause; prev.PreviousTimeScale is the old speed
-info, _ := sim.Info(ctx)          // info.TPS / RealTPS / Paused / LastAutosave
-_, _ = sim.Resume(ctx, prev.PreviousTimeScale) // unpause at the prior speed
-_, _ = sim.Reload(ctx)            // reload most recent save
+prev, _ := sim.Stop(ctx)                       // pause; prev.PreviousTimeScale = old speed
+info, _ := sim.Info(ctx)                        // info.TPS / RealTPS / Paused / LastAutosave
+_, _    = sim.Resume(ctx, prev.PreviousTimeScale) // unpause at the prior speed
+_, _    = sim.Reload(ctx)                       // reload most recent save
 ```
+
+`*ipc.Session`, `*ipc.OpaqueNode`, and `*noderuntime.Runtime` all satisfy
+`simctl.Requester`, so this also composes with the process launcher in
+`noderuntime`.
+
+---
 
 ## Extending with a new command
 
-1. **Go**: add a `Command*` constant and payload/result types in
-   `ipc/commands.go`, plus a method on `simctl.Client`.
+1. **Go**: add a `Command*` constant + payload/result types in `ipc/commands.go`,
+   and a method on `simctl.Client`.
 2. **DLL**: write a handler `object MyCmd(JToken payload)` in `SimCommands.cs`
    and `server.Register("MYCMD", MyCmd)`.
+3. **Test**: extend `simctl/simctl_test.go`'s fake server to cover it.
 
 Handlers run on the Unity main thread, so they may read/write game state
 directly. Keep the JSON field names identical on both sides.
-
-## Notes / limits
-
-- Headless mode briefly loads the menu scene, then redirects into the
-  simulation. The default redirect needs no game-source changes. If the menu
-  scene misbehaves under `-batchmode -nographics`, skip it entirely by inserting
-  this in `ManagementScripts/AppInitializer.cs` `Start()`, before
-  `GameManager.OpenMenu();`:
-  ```csharp
-  if (BibiControl.HeadlessController.Enabled)
-  {
-      string headlessSave = BibiControl.HeadlessController.ResolveSave();
-      if (!string.IsNullOrEmpty(headlessSave))
-      {
-          GameManager.StartGame(headlessSave);
-          return;
-      }
-  }
-  ```
-  This composes safely with the automatic redirect (whichever launches first
-  wins; the other is a no-op).
-- `STOP` reports the **target** time scale as `previous_time_scale`. It pauses by
-  forcing the engine time scale to 0; `RESUME` sets both target and engine scale
-  so the requested speed takes effect immediately.
-- The IPC server cannot be unit-tested inside the DLL; verify behaviour over the
-  network against a running build. The wire contract is exercised by
-  `simctl/simctl_test.go`, which doubles as the contract spec.

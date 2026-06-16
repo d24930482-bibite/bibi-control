@@ -96,6 +96,27 @@ into the simulation with a save and starts the server. See `dll/README.md` for
 flags, build, and run instructions. The control plane launches the process with
 these args via `noderuntime`/`ipc.ProcessSpec` and connects to the chosen port.
 
+Two launch gotchas learned on a real install (Steam, Unity 6.0):
+
+- **Steam strips args on a direct `.exe` launch** (it relaunches the game through
+  Steam). Add a `steam_appid.txt` containing the app id (`2736860`) next to the
+  exe, or pass the args as Steam launch options, so the flags actually reach the
+  game.
+- **Quote save paths with spaces.** The Bibites' save folder lives under
+  `AppData/LocalLow/The Bibites/The Bibites/...`, so an unquoted `-bibiteSave`
+  path splits into several args.
+
+## Verification status
+
+- Go transport + `simctl` client: covered by `simctl/simctl_test.go` (the test's
+  fake server is the canonical contract for the DLL).
+- DLL: compiles against the real game assemblies; `-batchmode -nographics`
+  headless launch and arg delivery confirmed against a live install.
+- **Not yet confirmed end-to-end:** the mod executing in-game. On Unity 6 a
+  standalone DLL listed in `ScriptingAssemblies.json` is not loaded/scanned, so
+  the mod must be compiled into (or called from) `BibitesAssembly`. See the
+  "Building" and "Status" sections of `dll/README.md`.
+
 ## Extending
 
 Add a command in four places that must agree:
