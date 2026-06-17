@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"go.starlark.net/starlark"
@@ -255,6 +256,261 @@ func TestBulkWhereSet(t *testing.T) {
 	}
 	if ls.flushStmtCount != 1 {
 		t.Errorf("flushStmtCount = %d, want 1 (one UPDATE)", ls.flushStmtCount)
+	}
+}
+
+// sqlStr renders s as a single-quoted DuckDB string literal for inline use in a
+// .where() predicate (where the text is raw SQL, so a Go %q double-quoted form
+// would be read as an identifier, not a literal).
+func sqlStr(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
+// TestBulkWhereSetExprPersists: set_expr("energy", "energy * 0.9") computes a
+// distinct per-row value, persists through a reparse, and leaves an unmatched entry
+// byte-for-byte (SHA256-stable).
+func TestBulkWhereSetExprPersists(t *testing.T) {
+	ls := loadFixture(t)
+	orig, err := tb.ParseFile(fixture, nil)
+	if err != nil {
+		t.Fatalf("reference parse: %v", err)
+	}
+
+	order := ls.access["bibites"].order
+	if len(order) < 2 {
+		t.Fatal("fixture needs at least two bibites")
+	}
+	target, other := order[0], order[1]
+
+	// Capture the pre-set energies of the two we will narrow to.
+	wantTarget := bibiteRowEnergy(t, ls.tables, target) * 0.9
+	wantOther := bibiteRowEnergy(t, ls.tables, other) * 0.9
+
+	coll := &EntityCollection{ls: ls, kind: "bibite"}
+	narrowed, err := callMethod(t, coll, "where",
+		starlark.String(fmt.Sprintf("entry_name == %s OR entry_name == %s", sqlStr(target), sqlStr(other))))
+	if err != nil {
+		t.Fatalf("where: %v", err)
+	}
+	res, err := callMethod(t, narrowed.(*EntityCollection), "set_expr",
+		starlark.String("energy"), starlark.String("energy * 0.9"))
+	if err != nil {
+		t.Fatalf("set_expr: %v", err)
+	}
+	if n := mustInt(t, res); n != 2 {
+		t.Fatalf("set_expr staged %d rows, want 2", n)
+	}
+
+	tmp := filepath.Join(t.TempDir(), "out.zip")
+	if err := ls.WriteSave(tmp); err != nil {
+		t.Fatalf("WriteSave: %v", err)
+	}
+	re, err := tb.ParseFile(tmp, nil)
+	if err != nil {
+		t.Fatalf("reparse: %v", err)
+	}
+	tables := tb.ExtractTables(re.SHA256, re)
+
+	if got := bibiteRowEnergy(t, tables, target); !floatsClose(got, wantTarget) {
+		t.Errorf("target reparsed energy = %v, want %v", got, wantTarget)
+	}
+	if got := bibiteRowEnergy(t, tables, other); !floatsClose(got, wantOther) {
+		t.Errorf("other reparsed energy = %v, want %v", got, wantOther)
+	}
+	// The two distinct targets should generally differ (proves it is per-row, not a
+	// single shared constant); skip the assert only on the degenerate equal-energy case.
+	if wantTarget != wantOther && floatsClose(wantTarget, wantOther) {
+		t.Errorf("expected distinct per-row energies, both = %v", wantTarget)
+	}
+
+	// An entry not in the narrowed set is untouched, byte-for-byte.
+	var bystander string
+	for _, n := range order[2:] {
+		bystander = n
+		break
+	}
+	if bystander != "" {
+		if orig.Entry(bystander).SHA256 != re.Entry(bystander).SHA256 {
+			t.Errorf("unmatched entry %q SHA256 changed", bystander)
+		}
+	}
+}
+
+// floatsClose compares two float64 with a small relative tolerance (the reparse
+// round-trips through JSON, so an exact == can spuriously fail).
+func floatsClose(a, b float64) bool {
+	const eps = 1e-6
+	d := a - b
+	if d < 0 {
+		d = -d
+	}
+	scale := 1.0
+	if b != 0 {
+		s := b
+		if s < 0 {
+			s = -s
+		}
+		scale = s
+	}
+	return d <= eps*scale
+}
+
+// TestBulkWhereSetExprInRunReadAfterWrite: the in-run save.sql read reflects the
+// computed value, DuckDB opened once, applied as a single mirror UPDATE.
+func TestBulkWhereSetExprInRunReadAfterWrite(t *testing.T) {
+	ls := loadFixture(t)
+	name := firstBibiteEntry(t, ls)
+
+	before := bibiteEnergySQL(t, ls, name) // opens DuckDB (snapshot)
+	coll := &EntityCollection{ls: ls, kind: "bibite"}
+	narrowed, err := callMethod(t, coll, "where", starlark.String(fmt.Sprintf("entry_name == %s", sqlStr(name))))
+	if err != nil {
+		t.Fatalf("where: %v", err)
+	}
+	if _, err := callMethod(t, narrowed.(*EntityCollection), "set_expr",
+		starlark.String("energy"), starlark.String("energy * 2")); err != nil {
+		t.Fatalf("set_expr: %v", err)
+	}
+	after := bibiteEnergySQL(t, ls, name) // flushes the mirror, then reads
+
+	if !floatsClose(after, before*2) {
+		t.Errorf("in-run SQL energy = %v, want %v", after, before*2)
+	}
+	if ls.dbOpenCount != 1 {
+		t.Errorf("dbOpenCount = %d, want 1 (no re-import)", ls.dbOpenCount)
+	}
+	if ls.flushStmtCount != 1 {
+		t.Errorf("flushStmtCount = %d, want 1 (single mirror UPDATE)", ls.flushStmtCount)
+	}
+	if ls.rowsMaterialized != 0 {
+		t.Errorf("rowsMaterialized = %d, want 0 (set_expr materializes no entities)", ls.rowsMaterialized)
+	}
+}
+
+// TestBulkWhereSetExprCrossColumn: an expression referencing a column on a JOINed
+// sub-table (energy on bibites + d2_size on bibite_body) resolves and computes.
+func TestBulkWhereSetExprCrossColumn(t *testing.T) {
+	ls := loadFixture(t)
+	name := firstBibiteEntry(t, ls)
+
+	// Compute the expected value from the live in-memory rows.
+	baseEnergy := bibiteRowEnergy(t, ls.tables, name)
+	var d2 float64
+	for _, b := range ls.tables.BibiteBody {
+		if b.EntryName == name {
+			d2 = b.D2Size
+			break
+		}
+	}
+
+	coll := &EntityCollection{ls: ls, kind: "bibite"}
+	narrowed, err := callMethod(t, coll, "where", starlark.String(fmt.Sprintf("entry_name == %s", sqlStr(name))))
+	if err != nil {
+		t.Fatalf("where: %v", err)
+	}
+	res, err := callMethod(t, narrowed.(*EntityCollection), "set_expr",
+		starlark.String("energy"), starlark.String("energy + d2_size"))
+	if err != nil {
+		t.Fatalf("set_expr cross-column: %v", err)
+	}
+	if n := mustInt(t, res); n != 1 {
+		t.Fatalf("set_expr staged %d rows, want 1", n)
+	}
+	got := bibiteEnergySQL(t, ls, name)
+	if !floatsClose(got, baseEnergy+d2) {
+		t.Errorf("cross-column energy = %v, want %v", got, baseEnergy+d2)
+	}
+}
+
+// TestBulkWhereSetExprIntegerTarget: a BIGINT column (generation) with an integer
+// expression stages an integer-typed value, observable through the SQL read path.
+func TestBulkWhereSetExprIntegerTarget(t *testing.T) {
+	ls := loadFixture(t)
+	name := firstBibiteEntry(t, ls)
+
+	var before int64
+	for _, b := range ls.tables.Bibites {
+		if b.EntryName == name {
+			before = b.Generation
+			break
+		}
+	}
+
+	coll := &EntityCollection{ls: ls, kind: "bibite"}
+	narrowed, err := callMethod(t, coll, "where", starlark.String(fmt.Sprintf("entry_name == %s", sqlStr(name))))
+	if err != nil {
+		t.Fatalf("where: %v", err)
+	}
+	if _, err := callMethod(t, narrowed.(*EntityCollection), "set_expr",
+		starlark.String("generation"), starlark.String("generation + 1")); err != nil {
+		t.Fatalf("set_expr integer target: %v", err)
+	}
+
+	rows, err := ls.query("SELECT generation FROM bibites WHERE save_id = ? AND entry_name = ?", ls.saveID, name)
+	if err != nil {
+		t.Fatalf("generation query: %v", err)
+	}
+	defer rows.Close()
+	rows.Next()
+	var got int64
+	if err := rows.Scan(&got); err != nil {
+		t.Fatalf("scan generation: %v", err)
+	}
+	if got != before+1 {
+		t.Errorf("generation = %d, want %d", got, before+1)
+	}
+}
+
+// TestBulkWhereSetExprErrors: each malformed set_expr returns a clean error and
+// stages nothing.
+func TestBulkWhereSetExprErrors(t *testing.T) {
+	cases := []struct {
+		name   string
+		column string
+		expr   string
+	}{
+		{"unknown column", "energy", "definitely_not_a_column + 1"},
+		{"read-only target", "body_id", "body_id + 1"},
+		{"negative rejected by guard", "energy", "energy - 1e12"},
+		{"null result", "energy", "NULL"},
+		{"string for numeric", "energy", "'hello'"},
+		{"raw semicolon", "energy", "energy; DROP TABLE bibites"},
+		{"subquery", "energy", "(SELECT max(energy) FROM bibites)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ls := loadFixture(t)
+			coll := &EntityCollection{ls: ls, kind: "bibite"}
+			res, err := callMethod(t, coll, "set_expr", starlark.String(tc.column), starlark.String(tc.expr))
+			if err == nil {
+				t.Fatalf("set_expr(%q, %q) = %v, want error", tc.column, tc.expr, res)
+			}
+			if ls.stagedOps != 0 {
+				t.Errorf("stagedOps = %d after rejected set_expr, want 0", ls.stagedOps)
+			}
+		})
+	}
+}
+
+// TestBulkWhereSetExprZeroMatch: a predicate matching nothing stages nothing and
+// returns 0.
+func TestBulkWhereSetExprZeroMatch(t *testing.T) {
+	ls := loadFixture(t)
+	coll := &EntityCollection{ls: ls, kind: "bibite"}
+	narrowed, err := callMethod(t, coll, "where", starlark.String("energy < -1"))
+	if err != nil {
+		t.Fatalf("where: %v", err)
+	}
+	res, err := callMethod(t, narrowed.(*EntityCollection), "set_expr",
+		starlark.String("energy"), starlark.String("energy * 0.9"))
+	if err != nil {
+		t.Fatalf("set_expr zero-match: %v", err)
+	}
+	if n := mustInt(t, res); n != 0 {
+		t.Errorf("set_expr staged %d rows, want 0", n)
+	}
+	if ls.stagedOps != 0 {
+		t.Errorf("stagedOps = %d, want 0", ls.stagedOps)
 	}
 }
 

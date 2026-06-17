@@ -53,6 +53,81 @@ func TestScanSQLRefsScansDuckDBRows(t *testing.T) {
 	}
 }
 
+func TestScanSQLRefsWithNewValueCapturesComputedValue(t *testing.T) {
+	ctx := context.Background()
+	save := sampleExtractedSave()
+	db, err := OpenAndImport(ctx, "", save)
+	if err != nil {
+		t.Fatalf("OpenAndImport() error = %v", err)
+	}
+	defer db.Close()
+
+	rows, err := db.QueryContext(ctx, `
+		SELECT entry_name, body_id, has_body_id, health, (health * 0.5) AS __new_val
+		FROM bibites
+		WHERE save_id = ?
+	`, save.Archive.SaveID)
+	if err != nil {
+		t.Fatalf("query bibites: %v", err)
+	}
+	defer rows.Close()
+
+	got, err := ScanSQLRefsWithNewValue(rows, SQLRefScanSpec{
+		Table:  "bibites",
+		Column: "health",
+	}, "__new_val")
+	if err != nil {
+		t.Fatalf("ScanSQLRefsWithNewValue() error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("SQL refs = %d, want 1", len(got))
+	}
+	ref := got[0].Ref
+	if ref.Table != "bibites" || ref.Column != "health" {
+		t.Fatalf("ref target = %s.%s, want bibites.health", ref.Table, ref.Column)
+	}
+	if ref.EntryName != "bibites/bibite_0.bb8" || ref.BodyID != 42 || !ref.HasBodyID {
+		t.Fatalf("ref locator = (%q, %d, %t), want (bibites/bibite_0.bb8, 42, true)", ref.EntryName, ref.BodyID, ref.HasBodyID)
+	}
+	if got[0].CurrentValue != 1.0 {
+		t.Fatalf("current value = %v, want 1", got[0].CurrentValue)
+	}
+	if got[0].NewValue != 0.5 {
+		t.Fatalf("new value = %v, want 0.5", got[0].NewValue)
+	}
+}
+
+func TestScanSQLRefsWithNewValueRequiresNewValueColumn(t *testing.T) {
+	ctx := context.Background()
+	save := sampleExtractedSave()
+	db, err := OpenAndImport(ctx, "", save)
+	if err != nil {
+		t.Fatalf("OpenAndImport() error = %v", err)
+	}
+	defer db.Close()
+
+	rows, err := db.QueryContext(ctx, `
+		SELECT entry_name, body_id, has_body_id, health
+		FROM bibites
+		WHERE save_id = ?
+	`, save.Archive.SaveID)
+	if err != nil {
+		t.Fatalf("query bibites: %v", err)
+	}
+	defer rows.Close()
+
+	_, err = ScanSQLRefsWithNewValue(rows, SQLRefScanSpec{
+		Table:  "bibites",
+		Column: "health",
+	}, "__new_val")
+	if err == nil {
+		t.Fatalf("ScanSQLRefsWithNewValue() error = nil, want missing new value column")
+	}
+	if !strings.Contains(err.Error(), "new value column") {
+		t.Fatalf("ScanSQLRefsWithNewValue() error = %v, want new value column", err)
+	}
+}
+
 func TestScanSQLRefsRequiresCurrentValueColumn(t *testing.T) {
 	ctx := context.Background()
 	save := sampleExtractedSave()

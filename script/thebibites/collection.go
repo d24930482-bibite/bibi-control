@@ -116,6 +116,8 @@ func (c *EntityCollection) Attr(name string) (starlark.Value, error) {
 		return starlark.NewBuiltin("group_by", c.groupByBuiltin), nil
 	case "set":
 		return starlark.NewBuiltin("set", c.setBuiltin), nil
+	case "set_expr":
+		return starlark.NewBuiltin("set_expr", c.setExprBuiltin), nil
 	case "delete":
 		return starlark.NewBuiltin("delete", c.deleteBuiltin), nil
 	}
@@ -129,7 +131,7 @@ func (c *EntityCollection) runAgg(call aggCall) (starlark.Value, error) {
 }
 
 func (c *EntityCollection) AttrNames() []string {
-	return []string{"count", "delete", "group_by", "max", "mean", "median", "min", "quantile", "set", "sum", "where"}
+	return []string{"count", "delete", "group_by", "max", "mean", "median", "min", "quantile", "set", "set_expr", "sum", "where"}
 }
 
 // setBuiltin implements where(...).set(column, value): one batched scalar set over
@@ -142,6 +144,24 @@ func (c *EntityCollection) setBuiltin(thread *starlark.Thread, b *starlark.Built
 		return nil, err
 	}
 	n, err := c.ls.bulkSet(c.kind, c.where, column, value)
+	if err != nil {
+		return nil, err
+	}
+	return starlark.MakeInt(n), nil
+}
+
+// setExprBuiltin implements where(...).set_expr(column, expr): one batched set
+// where each matched entity's new value is computed per row by evaluating the SQL
+// expression `expr` against that row (e.g. set_expr("energy", "energy * 0.9")). It
+// is a DISTINCT method from set (not string-vs-constant auto-detection, which is
+// ambiguous for TEXT columns): the second argument is always a SQL expression.
+// Returns the number of rows staged.
+func (c *EntityCollection) setExprBuiltin(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var column, expr string
+	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "column", &column, "expr", &expr); err != nil {
+		return nil, err
+	}
+	n, err := c.ls.bulkSetExpr(c.kind, c.where, column, expr)
 	if err != nil {
 		return nil, err
 	}

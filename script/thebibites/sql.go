@@ -423,6 +423,214 @@ func (ls *LoadedSave) bulkSet(kind, where, column string, value starlark.Value) 
 	return len(refs), nil
 }
 
+// bulkSetExpr stages a per-row SQL expression onto every entity matching the
+// (narrowed) collection: the analogue of bulkSet, but each matched row receives a
+// distinct value computed by evaluating `expr` against that row in DuckDB, not one
+// shared constant. It pushes down a 3-column SELECT (locators, current value, the
+// computed __new_val), scans each row via ScanSQLRefsWithNewValue, then per row:
+// coerces the raw result into the column's Go kind (coerceExprResult), re-validates
+// it against the column's full Rule POST-compute (validateSet — so e.g. the energy
+// >= 0 bound rejects "energy - 1e12"), writes it through to the in-memory row, and
+// stages a stale-value-guarded set + mirror intent (the concrete computed scalar,
+// so the deferred mirror UPDATE never diverges from the guarded value). The first
+// invalid row fails the whole call: earlier rows' in-memory write-throughs are not
+// applied to the session (nothing persists until commit), consistent with how
+// bulkSet returns mid-loop. Returns the number of rows staged.
+func (ls *LoadedSave) bulkSetExpr(kind, where, column, expr string) (int, error) {
+	spec, ok := attrRegistry()[kind][column]
+	if !ok {
+		return 0, fmt.Errorf("unknown column %q for %s", column, kind)
+	}
+	if !spec.writable {
+		return 0, fmt.Errorf("%s.%s is read-only (derived or locator column, not writable)", kind, column)
+	}
+	if err := validateExprSafety(expr); err != nil {
+		return 0, fmt.Errorf("%s.%s: %w", kind, column, err)
+	}
+
+	q, args, err := ls.bulkSetExprQuery(kind, where, spec, expr)
+	if err != nil {
+		return 0, err
+	}
+	rows, err := ls.query(q, args...)
+	if err != nil {
+		return 0, wrapExpr(expr, wrapWhere(where, err))
+	}
+	refs, err := duckdb.ScanSQLRefsWithNewValue(rows,
+		duckdb.SQLRefScanSpec{Table: spec.table, Column: spec.sourceColumn}, exprNewValueColumn)
+	rows.Close()
+	if err != nil {
+		return 0, wrapExpr(expr, wrapWhere(where, err))
+	}
+
+	for _, r := range refs {
+		coerced, err := coerceExprResult(spec, r.NewValue)
+		if err != nil {
+			return 0, fmt.Errorf("%s.%s: %w", kind, column, err)
+		}
+		// Re-validate POST-compute, per row: type/range/enum all apply to the
+		// computed value (e.g. a non-negative bound rejects a row that went negative).
+		if err := validateSet(spec, coerced); err != nil {
+			return 0, fmt.Errorf("%s.%s: %w", kind, column, err)
+		}
+
+		staged := coerced
+		var (
+			wroteRow   reflect.Value
+			restorePri any
+			restore    bool
+		)
+		if row, ok := ls.rowForEntry(spec.table, r.Ref.EntryName); ok {
+			prior, err := goScalar(row.FieldByIndex(spec.fieldIndex))
+			if err != nil {
+				return 0, fmt.Errorf("%s.%s: %w", kind, column, err)
+			}
+			written, err := setRowField(row, spec.fieldIndex, coerced)
+			if err != nil {
+				return 0, fmt.Errorf("%s.%s: %w", kind, column, err)
+			}
+			staged = written
+			wroteRow, restorePri, restore = row, prior, true
+		}
+		var rollback func()
+		if restore {
+			rollback = func() { _, _ = setRowField(wroteRow, spec.fieldIndex, restorePri) }
+		}
+		if err := ls.stageScalarSet(r.Ref, r.CurrentValue, staged, spec.table, spec.sourceColumn, spec.sqlType,
+			[]mirrorLocator{{column: "entry_name", value: r.Ref.EntryName}}, rollback); err != nil {
+			return 0, fmt.Errorf("%s.%s: %w", kind, column, err)
+		}
+	}
+	return len(refs), nil
+}
+
+// exprNewValueColumn is the projection alias the set_expr push-down evaluates the
+// user expression into; the scanner reads the computed per-row value from it.
+const exprNewValueColumn = "__new_val"
+
+// bulkSetExprQuery builds the 3-column SELECT for a per-row expression set:
+// identity-table locators + the kind's id guard, the target column's CURRENT value
+// (the stale-value guard), and the user expression evaluated as __new_val. The
+// expression is qualified through rewritePredicate (the same tokenizer .where()
+// uses), so a bare friendly column inside it resolves to <table>.<sourceColumn> and
+// any sub-table it references is fed into the JOIN needed-set — e.g. "energy +
+// d2_size" LEFT JOINs bibite_body. Reuses bulkSetQuery's builders so resolution is
+// identical to the constant-set path.
+func (ls *LoadedSave) bulkSetExprQuery(kind, where string, spec attrSpec, expr string) (string, []any, error) {
+	identity, err := identityTable(kind)
+	if err != nil {
+		return "", nil, err
+	}
+	needed := map[string]bool{spec.table: true}
+
+	predicate, predTables, err := ls.rewritePredicate(kind, where)
+	if err != nil {
+		return "", nil, err
+	}
+	for t := range predTables {
+		needed[t] = true
+	}
+
+	// Qualify the expression with the same tokenizer .where() uses and pull its
+	// referenced sub-tables into the JOIN set so a cross-table expression resolves.
+	exprSQL, exprTables, err := ls.rewritePredicate(kind, expr)
+	if err != nil {
+		return "", nil, err
+	}
+	if strings.TrimSpace(exprSQL) == "" {
+		return "", nil, fmt.Errorf("set_expr expression is empty")
+	}
+	for t := range exprTables {
+		needed[t] = true
+	}
+
+	from, err := fromClause(kind, needed)
+	if err != nil {
+		return "", nil, err
+	}
+	whereSQL, args, err := ls.whereClause(kind, predicate)
+	if err != nil {
+		return "", nil, err
+	}
+	locators, err := locatorSelect(kind, identity)
+	if err != nil {
+		return "", nil, err
+	}
+	valueCol := quoteIdent(spec.table) + "." + quoteIdent(spec.sourceColumn) + " AS " + quoteIdent(spec.sourceColumn)
+	newValCol := "(" + exprSQL + ") AS " + quoteIdent(exprNewValueColumn)
+	q := "SELECT " + locators + ", " + valueCol + ", " + newValCol + " " + from + " " + whereSQL
+	return q, args, nil
+}
+
+// validateExprSafety rejects two shapes a single-projection SQL expression must
+// never contain: a raw statement terminator (';' outside a string literal, which
+// could chain a second statement) and a subquery ('(' immediately followed by a
+// case-insensitive SELECT). It reuses the same literal-aware scan as
+// rewritePredicate so quotes and '' escapes are honored. The expression is still
+// strictly weaker than the raw save.sql() hatch — it is one SELECT projection over
+// the in-memory save — so this is defense in depth, not the only gate.
+func validateExprSafety(expr string) error {
+	s := expr
+	i := 0
+	for i < len(s) {
+		c := s[i]
+		switch c {
+		case '\'':
+			i++
+			for i < len(s) {
+				if s[i] == '\'' {
+					if i+1 < len(s) && s[i+1] == '\'' {
+						i += 2
+						continue
+					}
+					i++
+					break
+				}
+				i++
+			}
+		case '"':
+			i++
+			for i < len(s) {
+				if s[i] == '"' {
+					i++
+					break
+				}
+				i++
+			}
+		case ';':
+			return fmt.Errorf("expression must not contain ';'")
+		case '(':
+			j := i + 1
+			for j < len(s) && isSpace(s[j]) {
+				j++
+			}
+			if j+6 <= len(s) && strings.EqualFold(s[j:j+6], "select") {
+				return fmt.Errorf("expression must not contain a subquery")
+			}
+			i++
+		default:
+			i++
+		}
+	}
+	return nil
+}
+
+// wrapExpr names the set_expr expression in an error and rewrites the raw DuckDB
+// "column ... does not exist" / "Referenced column ... not found" binder error
+// into a clean "unknown column in expression" diagnostic, the set_expr analogue of
+// wrapWhere for the projected expression.
+func wrapExpr(expr string, err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "Referenced column") || strings.Contains(msg, "does not exist") ||
+		strings.Contains(msg, "not found in FROM clause") || strings.Contains(msg, "Binder Error") {
+		return fmt.Errorf("unknown column in expression %q: %w", expr, err)
+	}
+	return fmt.Errorf("set_expr (%q): %w", expr, err)
+}
+
 // bulkSetQuery builds the locator+value SELECT for a bulk set: identity-table
 // locators (entry_name + the kind's id guard) plus the target column, with the
 // predicate's sub-tables and the column's table LEFT JOINed. Reuses the same

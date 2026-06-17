@@ -29,6 +29,17 @@ type SQLRefRow struct {
 	CurrentValue any
 }
 
+// SQLRefRowWithValue extends SQLRefRow with the per-row result of a SQL
+// expression projection (the DSL set_expr path): NewValue is the computed
+// replacement scalar for the cell, normalized via NormalizeSQLScanValue so the
+// caller sees the same canonical scalars (int64/uint64/float64/bool/string/
+// *big.Int/nil) the value guard already carries.
+type SQLRefRowWithValue struct {
+	Ref          mutator.SQLValueRef
+	CurrentValue any
+	NewValue     any
+}
+
 // ScanSQLRefs converts DuckDB query rows into SQLValueRef values. It infers
 // only locator fields from returned column names; JSON path resolution remains
 // in savemutator/thebibites.ResolveSQLValueRef.
@@ -102,6 +113,87 @@ func ScanSQLRefs(rows *sql.Rows, spec SQLRefScanSpec) ([]SQLRefRow, error) {
 			row.CurrentValue = NormalizeSQLScanValue(values[valueIndex])
 		}
 		out = append(out, row)
+		rowIndex++
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ScanSQLRefsWithNewValue is ScanSQLRefs plus a per-row computed replacement
+// value: it captures the named newValueColumn (the DSL set_expr projection,
+// "__new_val") into NewValue, normalized identically to CurrentValue. The op is
+// always SET here (a per-row expression result replaces the cell), so the
+// current-value guard column is required just as in ScanSQLRefs. ScanSQLRefs is
+// left untouched; this variant exists so the existing scan spec and SQLRefRow
+// path carry no optional new-value field.
+func ScanSQLRefsWithNewValue(rows *sql.Rows, spec SQLRefScanSpec, newValueColumn string) ([]SQLRefRowWithValue, error) {
+	if rows == nil {
+		return nil, fmt.Errorf("duckdb: rows is nil")
+	}
+	if spec.Table == "" {
+		return nil, fmt.Errorf("duckdb: SQL ref table is required")
+	}
+	if spec.Column == "" {
+		return nil, fmt.Errorf("duckdb: SQL ref column is required")
+	}
+	if newValueColumn == "" {
+		return nil, fmt.Errorf("duckdb: new value column is required")
+	}
+	op := spec.Op
+	if op == "" {
+		op = mutator.SQLRefOpSet
+	}
+
+	columns, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	columnIndex, err := scanColumnIndex(columns)
+	if err != nil {
+		return nil, err
+	}
+
+	valueColumn := spec.ValueColumn
+	if valueColumn == "" {
+		valueColumn = spec.Column
+	}
+	valueIndex, ok := columnIndex[sqlColumnKey(valueColumn)]
+	if !ok {
+		return nil, fmt.Errorf("duckdb: current value column %q is required", valueColumn)
+	}
+	newValueIndex, ok := columnIndex[sqlColumnKey(newValueColumn)]
+	if !ok {
+		return nil, fmt.Errorf("duckdb: new value column %q is required", newValueColumn)
+	}
+
+	values := make([]any, len(columns))
+	targets := make([]any, len(columns))
+	out := make([]SQLRefRowWithValue, 0)
+	rowIndex := 0
+	for rows.Next() {
+		for i := range values {
+			values[i] = nil
+			targets[i] = &values[i]
+		}
+		if err := rows.Scan(targets...); err != nil {
+			return nil, fmt.Errorf("duckdb: scan SQL ref row %d: %w", rowIndex, err)
+		}
+
+		ref, err := sqlRefFromRow(spec, columnIndex, values)
+		if err != nil {
+			return nil, fmt.Errorf("duckdb: SQL ref row %d: %w", rowIndex, err)
+		}
+		if err := mutator.ValidateSQLRefForOp(ref, op); err != nil {
+			return nil, fmt.Errorf("duckdb: SQL ref row %d: %w", rowIndex, err)
+		}
+
+		out = append(out, SQLRefRowWithValue{
+			Ref:          ref,
+			CurrentValue: NormalizeSQLScanValue(values[valueIndex]),
+			NewValue:     NormalizeSQLScanValue(values[newValueIndex]),
+		})
 		rowIndex++
 	}
 	if err := rows.Err(); err != nil {

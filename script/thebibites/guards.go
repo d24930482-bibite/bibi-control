@@ -3,6 +3,7 @@ package thebibites
 import (
 	"fmt"
 	"math"
+	"math/big"
 
 	tb "github.com/asemones/bibicontrol/saveparser/thebibites"
 )
@@ -227,15 +228,115 @@ func validateValue(r Rule, goVal any) error {
 	return nil
 }
 
+// coerceExprResult maps a per-row SQL expression result (the set_expr path) into
+// the int64/float64/bool/string that validateSet and setRowField consume, driven
+// by the target column's derived kind. The input is a value scanned from DuckDB
+// and already run through duckdb.NormalizeSQLScanValue, so it is one of:
+// int64/uint64/float64/bool/string/*big.Int/nil. This is the set_expr analogue of
+// coercePelletScalar, but it must also absorb the wider scalar set a raw SQL
+// expression can yield (HUGEINT -> *big.Int, an unsigned sum -> uint64, a NULL
+// result -> nil) and turn an out-of-range or mistyped result into a clean,
+// column-named diagnostic instead of a downstream panic. Callers wrap the
+// returned reason with their "%s.%s: %w" attribute context.
+func coerceExprResult(spec attrSpec, v any) (any, error) {
+	col, sqlType := spec.sourceColumn, spec.sqlType
+	if v == nil {
+		return nil, fmt.Errorf("expression produced NULL for %s (%s)", col, sqlType)
+	}
+	kind := deriveType(sqlType)
+	switch kind {
+	case kindInt, kindUint:
+		n, err := exprToInt64(col, sqlType, v)
+		if err != nil {
+			return nil, err
+		}
+		if kind == kindUint && n < 0 {
+			return nil, fmt.Errorf("expression produced %d for %s (%s), which is negative", n, col, sqlType)
+		}
+		return n, nil
+	case kindNumber:
+		return exprToFloat64(col, sqlType, v)
+	case kindBool:
+		b, ok := v.(bool)
+		if !ok {
+			return nil, fmt.Errorf("expression for %s (%s) produced %s, want a boolean", col, sqlType, goScalarName(v))
+		}
+		return b, nil
+	case kindString:
+		s, ok := v.(string)
+		if !ok {
+			return nil, fmt.Errorf("expression for %s (%s) produced %s, want a string", col, sqlType, goScalarName(v))
+		}
+		return s, nil
+	default:
+		// kindUnknown: no derived target kind (a new generated SQLType). Pass the
+		// normalized scalar through; validateSet/setRowField apply what checks exist.
+		return v, nil
+	}
+}
+
+// exprToInt64 narrows a scanned expression scalar to an int64 for an integer
+// target column, rejecting a non-integer result and an out-of-int64-range
+// magnitude (uint64 above MaxInt64, or a HUGEINT *big.Int) with a column-named
+// overflow error rather than silently truncating.
+func exprToInt64(col, sqlType string, v any) (int64, error) {
+	switch x := v.(type) {
+	case int64:
+		return x, nil
+	case uint64:
+		if x > uint64(math.MaxInt64) {
+			return 0, fmt.Errorf("value overflows column %s (%s)", col, sqlType)
+		}
+		return int64(x), nil
+	case *big.Int:
+		if !x.IsInt64() {
+			return 0, fmt.Errorf("value overflows column %s (%s)", col, sqlType)
+		}
+		return x.Int64(), nil
+	case float64:
+		if n, ok := asInt64(x); ok {
+			return n, nil
+		}
+		if math.IsNaN(x) || math.IsInf(x, 0) || x != math.Trunc(x) {
+			return 0, fmt.Errorf("expression for %s (%s) produced %v, want an integer", col, sqlType, x)
+		}
+		return 0, fmt.Errorf("value overflows column %s (%s)", col, sqlType)
+	default:
+		return 0, fmt.Errorf("expression for %s (%s) produced %s, want an integer", col, sqlType, goScalarName(v))
+	}
+}
+
+// exprToFloat64 widens a scanned expression scalar to a float64 for a DOUBLE
+// target column. A HUGEINT/uint64 that exceeds int64 is still a valid double
+// magnitude (precision loss is inherent to the column type), so it converts
+// rather than erroring; a non-numeric result is a clean column-named error.
+func exprToFloat64(col, sqlType string, v any) (float64, error) {
+	switch x := v.(type) {
+	case float64:
+		return x, nil
+	case int64:
+		return float64(x), nil
+	case uint64:
+		return float64(x), nil
+	case *big.Int:
+		f, _ := new(big.Float).SetInt(x).Float64()
+		return f, nil
+	default:
+		return 0, fmt.Errorf("expression for %s (%s) produced %s, want a number", col, sqlType, goScalarName(v))
+	}
+}
+
 // typeError reports an expected-vs-got mismatch in friendly terms.
 func typeError(want valueKind, goVal any) error {
 	return fmt.Errorf("expects %s, got %s", want, goScalarName(goVal))
 }
 
-// goScalarName names a fromStarlark scalar for diagnostics.
+// goScalarName names a scalar for diagnostics. It covers the fromStarlark scalar
+// set plus the wider scalars a raw SQL expression result can carry (uint64 and
+// *big.Int from coerceExprResult), so a mistyped expression result reads cleanly.
 func goScalarName(v any) string {
 	switch v.(type) {
-	case int64:
+	case int64, uint64, *big.Int:
 		return "an integer"
 	case float64:
 		return "a number"
@@ -243,6 +344,8 @@ func goScalarName(v any) string {
 		return "a boolean"
 	case string:
 		return "a string"
+	case nil:
+		return "NULL"
 	default:
 		return fmt.Sprintf("%T", v)
 	}
