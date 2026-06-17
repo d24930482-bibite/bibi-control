@@ -37,16 +37,14 @@ import (
 var ErrReadOnlyQuery = errors.New("workspace: only read-only SELECT queries are allowed")
 
 // mirrorCatalogDDL is the CREATE TABLE statement for the mirror_saves catalog.
-// mirror_saves is a native DuckDB table (rebuilt from SQLite registry rows on
-// every query call; never authored in DuckDB directly). The rebuild-on-every-query
-// strategy guarantees correctness after a concurrent G2 eviction flips a revision's
-// tier or blob_present without requiring a change notification bus.
+// mirror_saves is a native DuckDB table (rebuilt from SQLite registry rows;
+// never authored in DuckDB directly).
 //
-// sim_time is populated via a sub-select from scenes.simulated_time (keyed by
-// sha256 = save_id) so every revision carries its own sim_time, not just the head.
-// save_revisions has no sim_time column (schema.sql:33/40-55); only worlds.sim_time
-// holds the head value. Sourcing from scenes gives per-revision history sim_times
-// suitable for time-series queries.
+// sim_time is populated from scenes.simulated_time (keyed by sha256 = save_id)
+// so every revision carries its own sim_time, not just the head. save_revisions
+// has no sim_time column (schema.sql:33/40-55); only worlds.sim_time holds the
+// head value. Sourcing from scenes gives per-revision history sim_times suitable
+// for time-series queries.
 const mirrorCatalogDDL = `
 CREATE TABLE IF NOT EXISTS mirror_saves (
 	save_id      TEXT,
@@ -56,12 +54,51 @@ CREATE TABLE IF NOT EXISTS mirror_saves (
 	sim_time     DOUBLE
 )`
 
-// refreshMirrorCatalog rebuilds the mirror_saves catalog from the registry.
-// Must be called under w.mu. The caller is responsible for locking/unlocking.
+// catalogInsertChunk is the number of mirror_saves rows packed into one
+// multi-row INSERT. Each row binds 5 parameters, so a chunk binds
+// catalogInsertChunk*5 = 2500 parameters — comfortably below the driver's
+// bound-parameter ceiling even as retained history (R) grows over the system's
+// life. Chunking keeps the rebuild at O(R/chunk) INSERT round-trips, never the
+// O(R) per-revision pattern that was the original N+1.
+const catalogInsertChunk = 500
+
+// refreshMirrorCatalog brings the mirror_saves catalog current with the
+// registry. Must be called under w.mu (the caller locks/unlocks); the cache
+// fields it reads/writes are therefore unsynchronized by design.
+//
+// It is fingerprint-gated: it computes a cheap CatalogFingerprint (one SQLite
+// aggregate) and, if the catalog has been built at least once and the
+// fingerprint is unchanged, returns immediately with NO DuckDB work — this is
+// the cache hit that kills rebuild-on-every-query (C4b). The fingerprint covers
+// new revisions (Count/MaxID) AND in-place tier/blob_present flips (StateSum),
+// so every catalog-affecting mutation moves it for free without per-mutator
+// invalidation hooks.
+//
+// When a rebuild IS needed it is O(1) registry/DuckDB round-trips plus work
+// linear in row count inside chunked statements, not O(R) round-trips:
+//   - one RevisionsForWorkspace JOIN (replaces ListWorlds + per-world loop),
+//   - one set-based scenes read into a map (replaces the per-revision SELECT),
+//   - chunked multi-row INSERTs (replaces the per-revision INSERT).
+//
+// The cache fields (w.catalogFP/w.catalogBuilt) are written ONLY after the
+// DuckDB COMMIT succeeds, so a failed/rolled-back rebuild never poisons the
+// cache into thinking it is current.
 func (w *Workspace) refreshMirrorCatalog(ctx context.Context) error {
 	db := w.duck()
 	if db == nil {
 		return fmt.Errorf("workspace: duckdb handle is nil")
+	}
+
+	// Fingerprint gate: skip the rebuild entirely when nothing catalog-affecting
+	// has changed since the last successful build. The very first build (or a
+	// brand-new empty workspace, whose zero fingerprint must NOT read as a hit)
+	// is forced by w.catalogBuilt being false.
+	fp, err := w.store().CatalogFingerprint(ctx, w.ID())
+	if err != nil {
+		return fmt.Errorf("workspace: catalog fingerprint: %w", err)
+	}
+	if w.catalogBuilt && fp == w.catalogFP {
+		return nil
 	}
 
 	conn, err := db.Conn(ctx)
@@ -73,6 +110,24 @@ func (w *Workspace) refreshMirrorCatalog(ctx context.Context) error {
 	// Ensure the table exists.
 	if _, err := conn.ExecContext(ctx, mirrorCatalogDDL); err != nil {
 		return fmt.Errorf("workspace: create mirror_saves table: %w", err)
+	}
+
+	// One workspace-scoped revision read (replaces ListWorlds + per-world
+	// RevisionsForWorld). This is sha256-keyed history only; the world-id working
+	// key never appears, preserving the dual-key mirror semantics.
+	revs, err := w.store().RevisionsForWorkspace(ctx, w.ID())
+	if err != nil {
+		return fmt.Errorf("workspace: revisions for workspace catalog refresh: %w", err)
+	}
+
+	// One set-based scenes read for every per-revision sim_time (replaces the
+	// per-revision SELECT — the N+1's DuckDB half). The WHERE has_simulated_time
+	// predicate matches the old per-revision filter, so a revision absent from
+	// the map (no scene row OR has_simulated_time = false) inserts SQL NULL via
+	// map-miss, reproducing the old *float64 nil semantics exactly.
+	simByID, err := w.readSceneSimTimes(ctx, conn)
+	if err != nil {
+		return err
 	}
 
 	// Wrap the full rebuild in one transaction so the catalog is never
@@ -93,50 +148,78 @@ func (w *Workspace) refreshMirrorCatalog(ctx context.Context) error {
 		return fmt.Errorf("workspace: clear mirror_saves: %w", err)
 	}
 
-	// Enumerate every world in this workspace and insert one row per revision.
-	worlds, err := w.store().ListWorlds(ctx, w.ID())
-	if err != nil {
-		return fmt.Errorf("workspace: list worlds for catalog refresh: %w", err)
-	}
-
-	for _, world := range worlds {
-		revisions, err := w.store().RevisionsForWorld(ctx, world.ID)
-		if err != nil {
-			return fmt.Errorf("workspace: list revisions for world %q: %w", world.ID, err)
+	// Chunked multi-row INSERT (replaces the per-revision INSERT — the N+1's
+	// other DuckDB half). Each chunk is one ExecContext binding chunkRows*5
+	// parameters, kept below the driver's parameter ceiling by catalogInsertChunk.
+	for start := 0; start < len(revs); start += catalogInsertChunk {
+		end := start + catalogInsertChunk
+		if end > len(revs) {
+			end = len(revs)
 		}
-		for _, rev := range revisions {
-			// Per-revision sim_time: source from scenes.simulated_time keyed by
-			// the history sha256 (= save_id). This gives the actual sim_time at
-			// that snapshot, not the head's current value. NULL when the revision's
-			// scene row has has_simulated_time = false or no scenes row exists.
-			//
-			// We use a sub-select rather than a Go-side lookup because scenes is
-			// a DuckDB table — the value is already there from ImportExtractedSave.
-			var simTime *float64
-			simErr := conn.QueryRowContext(ctx,
-				"SELECT simulated_time FROM scenes WHERE save_id = ? AND has_simulated_time LIMIT 1",
-				rev.SHA256,
-			).Scan(&simTime)
-			if simErr != nil && !errors.Is(simErr, sql.ErrNoRows) {
-				return fmt.Errorf("workspace: read sim_time for revision %q: %w", rev.SHA256, simErr)
-			}
-			// simTime remains nil when ErrNoRows (no scene or time absent).
+		chunk := revs[start:end]
 
-			_, err := conn.ExecContext(ctx,
-				"INSERT INTO mirror_saves (save_id, world_id, tier, blob_present, sim_time) VALUES (?, ?, ?, ?, ?)",
-				rev.SHA256, rev.WorldID, rev.Tier, rev.BlobPresent, simTime,
-			)
-			if err != nil {
-				return fmt.Errorf("workspace: insert mirror_saves row for revision %q: %w", rev.SHA256, err)
+		placeholders := make([]string, 0, len(chunk))
+		args := make([]any, 0, len(chunk)*5)
+		for _, rev := range chunk {
+			placeholders = append(placeholders, "(?, ?, ?, ?, ?)")
+			// map-miss -> nil -> SQL NULL (NULL sim_time fidelity).
+			var simTime any
+			if v, ok := simByID[rev.SHA256]; ok {
+				simTime = v
 			}
+			args = append(args, rev.SHA256, rev.WorldID, rev.Tier, rev.BlobPresent, simTime)
 		}
+
+		stmt := "INSERT INTO mirror_saves (save_id, world_id, tier, blob_present, sim_time) VALUES " +
+			strings.Join(placeholders, ", ")
+		if _, err := conn.ExecContext(ctx, stmt, args...); err != nil {
+			return fmt.Errorf("workspace: batch insert mirror_saves rows: %w", err)
+		}
+		w.insertExecCount++ // test-only perf-shape seam
 	}
 
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("workspace: commit catalog refresh: %w", err)
 	}
 	committed = true
+
+	// Cache the fingerprint ONLY after a successful COMMIT so a failed rebuild
+	// never marks itself current.
+	w.catalogFP = fp
+	w.catalogBuilt = true
+	w.rebuildCount++ // test-only seam: bumped once per actual rebuild, never on a cache hit
 	return nil
+}
+
+// readSceneSimTimes reads every per-revision sim_time in ONE set-based DuckDB
+// query into a map keyed by save_id (= revision sha256). The WHERE
+// has_simulated_time predicate matches the catalog's old per-revision filter, so
+// a save_id absent from the returned map (no scene row or has_simulated_time
+// false) maps to SQL NULL at insert time — preserving the *float64 nil
+// semantics. It increments the test-only scenesReadCount seam exactly once so
+// tests can prove there is no per-revision scenes loop.
+func (w *Workspace) readSceneSimTimes(ctx context.Context, conn *sql.Conn) (map[string]float64, error) {
+	w.scenesReadCount++ // test-only perf-shape seam
+	rows, err := conn.QueryContext(ctx,
+		"SELECT save_id, simulated_time FROM scenes WHERE has_simulated_time")
+	if err != nil {
+		return nil, fmt.Errorf("workspace: read scene sim_times: %w", err)
+	}
+	defer rows.Close()
+
+	simByID := make(map[string]float64)
+	for rows.Next() {
+		var saveID string
+		var simTime float64
+		if err := rows.Scan(&saveID, &simTime); err != nil {
+			return nil, fmt.Errorf("workspace: scan scene sim_time: %w", err)
+		}
+		simByID[saveID] = simTime
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("workspace: iterate scene sim_times: %w", err)
+	}
+	return simByID, nil
 }
 
 // Query runs a read-only SELECT over all history partitions in this workspace's

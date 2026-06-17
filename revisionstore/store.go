@@ -495,6 +495,112 @@ func (s *Store) RevisionsForWorld(ctx context.Context, worldID string) ([]Revisi
 	return revisions, nil
 }
 
+// RevisionsForWorkspace returns every revision whose world belongs to
+// workspaceID, ordered by insertion id (lineage/history order). It is the
+// workspace-scoped batched form of RevisionsForWorld: one JOIN replaces the
+// ListWorlds + per-world RevisionsForWorld loop the analytics mirror rebuild
+// used to drive, collapsing W+1 registry round-trips into one. The JOIN on
+// worlds.workspace_id also naturally excludes revisions whose world lives in a
+// different workspace sharing the same registry (metadata.sqlite is shared
+// across workspaces, so the scoping is load-bearing).
+func (s *Store) RevisionsForWorkspace(ctx context.Context, workspaceID string) ([]Revision, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("revisionstore: Store is nil")
+	}
+	ctx, err := usableContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT r.id, r.sha256, r.size, r.parent_id, r.source_path, r.blob_ref, r.inline_blob, r.script_run_id, r.created_at,
+			r.world_id, r.tier, r.blob_present, r.refcount, r.mirror_schema_version
+		FROM save_revisions r
+		JOIN worlds w ON r.world_id = w.id
+		WHERE w.workspace_id = ?
+		ORDER BY r.id
+	`, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("revisionstore: query revisions for workspace: %w", err)
+	}
+	defer rows.Close()
+
+	var revisions []Revision
+	for rows.Next() {
+		revision, err := scanRevisionRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		revisions = append(revisions, revision)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("revisionstore: iterate revisions for workspace: %w", err)
+	}
+	return revisions, nil
+}
+
+// CatalogFingerprint is a cheap, comparable summary of the catalog-affecting
+// state of one workspace's revisions. It is the invalidation key for the
+// analytics mirror catalog (workspace/query.go): the workspace caches the
+// last-built fingerprint and skips the rebuild entirely while it is unchanged.
+//
+// The three fields cover three orthogonal mutation shapes so ANY
+// catalog-affecting change moves the value:
+//   - Count   — number of revisions in the workspace (catches deletes/sanity).
+//   - MaxID    — highest revision id; ids are AUTOINCREMENT, so a new revision
+//     (commit/ingest/AddWorld) always raises it.
+//   - StateSum — a per-row checksum over (tier, blob_present) weighted by id, so
+//     an in-place flip (G2 evict full,present -> mirror_only,absent; or a
+//     ReconcileBlobs promote/demote) changes the value even when Count and MaxID
+//     are constant. The id weighting prevents two rows swapping states from
+//     cancelling out.
+//
+// The struct is comparable with == so the workspace can store and compare it
+// directly.
+type CatalogFingerprint struct {
+	Count    int64
+	MaxID    int64
+	StateSum int64
+}
+
+// CatalogFingerprint computes the fingerprint for workspaceID in ONE aggregate
+// query over the same workspace-scoped join RevisionsForWorkspace uses (it is a
+// single set-based statement, never a per-revision scan). The StateSum
+// expression weights each row's (tier, blob_present) contribution by r.id so:
+//   - a 'full' row contributes id*1, a 'mirror_only' row id*2 (the tier flips
+//     the multiplier);
+//   - blob_present adds id*4, blob_present=0 adds id*8 (the presence flips it);
+// so a G2 evict (full,1 -> mirror_only,0) changes both terms for that row, and
+// because every term is scaled by the row's unique id, no swap of two rows'
+// states can net to the same sum.
+func (s *Store) CatalogFingerprint(ctx context.Context, workspaceID string) (CatalogFingerprint, error) {
+	if s == nil || s.db == nil {
+		return CatalogFingerprint{}, fmt.Errorf("revisionstore: Store is nil")
+	}
+	ctx, err := usableContext(ctx)
+	if err != nil {
+		return CatalogFingerprint{}, err
+	}
+
+	var fp CatalogFingerprint
+	err = s.db.QueryRowContext(ctx, `
+		SELECT
+			COUNT(*) AS count,
+			COALESCE(MAX(r.id), 0) AS max_id,
+			COALESCE(SUM(
+				r.id * (CASE WHEN r.tier = 'full' THEN 1 ELSE 2 END) +
+				r.id * (CASE WHEN r.blob_present = 1 THEN 4 ELSE 8 END)
+			), 0) AS state_sum
+		FROM save_revisions r
+		JOIN worlds w ON r.world_id = w.id
+		WHERE w.workspace_id = ?
+	`, workspaceID).Scan(&fp.Count, &fp.MaxID, &fp.StateSum)
+	if err != nil {
+		return CatalogFingerprint{}, fmt.Errorf("revisionstore: compute catalog fingerprint: %w", err)
+	}
+	return fp, nil
+}
+
 // MirrorOnlyRevisions returns every tier='mirror_only' revision, ordered by
 // insertion id. Reconcile (G2) scans these to detect rows whose blob bytes
 // wrongly reappeared and are still legitimately referenced, re-promoting them

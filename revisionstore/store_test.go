@@ -1070,3 +1070,136 @@ func containsString(haystack []string, needle string) bool {
 	}
 	return false
 }
+
+// seedWorldRevision creates a workspace + world and records one full revision
+// against it (advancing the head), returning the workspace id and the revision.
+// Used by the C4b RevisionsForWorkspace / CatalogFingerprint tests.
+func seedWorldRevision(t *testing.T, ctx context.Context, store *Store, blobs *blobstore.FSStore, payload string) (wsID string, rev Revision) {
+	t.Helper()
+	ws, err := store.CreateWorkspace(ctx, WorkspaceInput{Owner: "owner", Name: "ws"})
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	world, err := store.CreateWorld(ctx, WorldInput{WorkspaceID: ws.ID, Name: "world"})
+	if err != nil {
+		t.Fatalf("CreateWorld: %v", err)
+	}
+	run, err := store.RecordScriptRun(ctx, ScriptRunInput{
+		ScriptSHA256: strings.Repeat("a", blobstore.SHA256HexLength),
+		Status:       "succeeded",
+	})
+	if err != nil {
+		t.Fatalf("RecordScriptRun: %v", err)
+	}
+	ref, err := blobs.Put(ctx, []byte(payload))
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	sim := 1.0
+	rev, err = store.RecordRevisionAdvancingHead(ctx, world.ID, &sim, RevisionInput{
+		BlobRef:     ref,
+		ScriptRunID: run.ID,
+	})
+	if err != nil {
+		t.Fatalf("RecordRevisionAdvancingHead: %v", err)
+	}
+	return ws.ID, rev
+}
+
+// TestRevisionsForWorkspaceScopesByWorkspace proves the shared-registry scoping
+// invariant: two workspaces in one registry, each with a world+revision, and
+// RevisionsForWorkspace returns ONLY the requested workspace's revision, ordered
+// by id. A leak here would attribute another workspace's history into this
+// workspace's analytics mirror.
+func TestRevisionsForWorkspaceScopesByWorkspace(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	store, err := Open(filepath.Join(dir, "metadata.sqlite"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	blobs, err := blobstore.NewFSStore(filepath.Join(dir, "blobs"), blobstore.WithInlineThreshold(0))
+	if err != nil {
+		t.Fatalf("NewFSStore: %v", err)
+	}
+	defer blobs.Close()
+
+	wsA, revA := seedWorldRevision(t, ctx, store, blobs, "workspace A save bytes")
+	wsB, revB := seedWorldRevision(t, ctx, store, blobs, "workspace B save bytes")
+
+	gotA, err := store.RevisionsForWorkspace(ctx, wsA)
+	if err != nil {
+		t.Fatalf("RevisionsForWorkspace(A): %v", err)
+	}
+	if len(gotA) != 1 || gotA[0].ID != revA.ID {
+		t.Fatalf("RevisionsForWorkspace(A) = %v, want exactly revA id %d", gotA, revA.ID)
+	}
+	for _, r := range gotA {
+		if r.ID == revB.ID {
+			t.Fatalf("RevisionsForWorkspace(A) leaked workspace B revision %d", revB.ID)
+		}
+	}
+
+	gotB, err := store.RevisionsForWorkspace(ctx, wsB)
+	if err != nil {
+		t.Fatalf("RevisionsForWorkspace(B): %v", err)
+	}
+	if len(gotB) != 1 || gotB[0].ID != revB.ID {
+		t.Fatalf("RevisionsForWorkspace(B) = %v, want exactly revB id %d", gotB, revB.ID)
+	}
+}
+
+// TestCatalogFingerprintMovesOnFlip proves the StateSum dimension catches an
+// in-place tier/blob_present flip that Count and MaxID would MISS — the
+// correctness invariant that keeps the analytics cache from going stale across a
+// G2 eviction.
+func TestCatalogFingerprintMovesOnFlip(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	store, err := Open(filepath.Join(dir, "metadata.sqlite"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	blobs, err := blobstore.NewFSStore(filepath.Join(dir, "blobs"), blobstore.WithInlineThreshold(0))
+	if err != nil {
+		t.Fatalf("NewFSStore: %v", err)
+	}
+	defer blobs.Close()
+
+	wsID, rev := seedWorldRevision(t, ctx, store, blobs, "evictable save bytes")
+
+	before, err := store.CatalogFingerprint(ctx, wsID)
+	if err != nil {
+		t.Fatalf("CatalogFingerprint(before): %v", err)
+	}
+
+	// MarkMirrorOnly flips tier='mirror_only', blob_present=0 in place without
+	// adding or removing a revision (so Count and MaxID stay constant).
+	if err := store.MarkMirrorOnly(ctx, rev.ID); err != nil {
+		t.Fatalf("MarkMirrorOnly: %v", err)
+	}
+
+	after, err := store.CatalogFingerprint(ctx, wsID)
+	if err != nil {
+		t.Fatalf("CatalogFingerprint(after): %v", err)
+	}
+
+	if after == before {
+		t.Fatalf("fingerprint unchanged after in-place flip: %+v", after)
+	}
+	if after.Count != before.Count {
+		t.Errorf("Count changed (%d -> %d); flip should not move count", before.Count, after.Count)
+	}
+	if after.MaxID != before.MaxID {
+		t.Errorf("MaxID changed (%d -> %d); flip should not move max id", before.MaxID, after.MaxID)
+	}
+	if after.StateSum == before.StateSum {
+		t.Errorf("StateSum unchanged (%d) after flip; the in-place dimension is broken", after.StateSum)
+	}
+}
