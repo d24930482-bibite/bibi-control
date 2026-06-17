@@ -49,6 +49,30 @@ type Workspace struct {
 	// nodes is the active-node set (nodeID -> runtime). Allocated empty here;
 	// populated by D1.
 	nodes map[string]*noderuntime.Runtime
+
+	// catalogFP / catalogBuilt cache the last successfully rebuilt mirror_saves
+	// catalog state so refreshMirrorCatalog can short-circuit the whole rebuild
+	// when the registry has not changed (C4b: kills the rebuild-on-every-query
+	// N+1). They are read and written ONLY inside refreshMirrorCatalog, which is
+	// always called holding w.mu, so they need no extra synchronization.
+	//
+	// catalogBuilt distinguishes "never built" (zero fingerprint of a brand-new
+	// empty workspace) from "built and the fingerprint legitimately is the zero
+	// value", forcing the first build. catalogFP is written ONLY after the
+	// rebuild COMMIT so a failed/rolled-back rebuild never poisons the cache.
+	catalogFP    revisionstore.CatalogFingerprint
+	catalogBuilt bool
+	// rebuildCount is a test-only seam: it is incremented exactly once per
+	// ACTUAL rebuild (after a successful COMMIT), never on a cache-hit early
+	// return. Tests assert N repeat queries trigger exactly one rebuild. It has
+	// no production behavior.
+	rebuildCount int64
+	// scenesReadCount / insertExecCount are test-only perf-shape seams: they
+	// count, per rebuild, the set-based scenes reads (must be exactly one) and
+	// the chunked INSERT ExecContext calls (must be ceil(R/catalogInsertChunk),
+	// not R). They prove the per-revision DuckDB N+1 is gone, not relocated.
+	scenesReadCount int64
+	insertExecCount int64
 }
 
 func registryPath(root string) string     { return filepath.Join(root, "metadata.sqlite") }
