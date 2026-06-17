@@ -495,6 +495,134 @@ func (s *Store) RevisionsForWorld(ctx context.Context, worldID string) ([]Revisi
 	return revisions, nil
 }
 
+// MirrorOnlyRevisions returns every tier='mirror_only' revision, ordered by
+// insertion id. Reconcile (G2) scans these to detect rows whose blob bytes
+// wrongly reappeared and are still legitimately referenced, re-promoting them
+// to 'full'.
+func (s *Store) MirrorOnlyRevisions(ctx context.Context) ([]Revision, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("revisionstore: Store is nil")
+	}
+	ctx, err := usableContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, sha256, size, parent_id, source_path, blob_ref, inline_blob, script_run_id, created_at,
+			world_id, tier, blob_present, refcount, mirror_schema_version
+		FROM save_revisions
+		WHERE tier = 'mirror_only'
+		ORDER BY id
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("revisionstore: query mirror_only revisions: %w", err)
+	}
+	defer rows.Close()
+
+	var revisions []Revision
+	for rows.Next() {
+		revision, err := scanRevisionRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		revisions = append(revisions, revision)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("revisionstore: iterate mirror_only revisions: %w", err)
+	}
+	return revisions, nil
+}
+
+// FullRevisions returns every tier='full' / blob_present=1 revision, ordered by
+// insertion id. Reconcile (G2) scans these to detect rows whose blob bytes went
+// missing, demoting the non-head ones to 'mirror_only' (and failing loudly on a
+// head with missing bytes).
+func (s *Store) FullRevisions(ctx context.Context) ([]Revision, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("revisionstore: Store is nil")
+	}
+	ctx, err := usableContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, sha256, size, parent_id, source_path, blob_ref, inline_blob, script_run_id, created_at,
+			world_id, tier, blob_present, refcount, mirror_schema_version
+		FROM save_revisions
+		WHERE tier = 'full' AND blob_present = 1
+		ORDER BY id
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("revisionstore: query full revisions: %w", err)
+	}
+	defer rows.Close()
+
+	var revisions []Revision
+	for rows.Next() {
+		revision, err := scanRevisionRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		revisions = append(revisions, revision)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("revisionstore: iterate full revisions: %w", err)
+	}
+	return revisions, nil
+}
+
+// IsRevisionHead reports whether revisionID is the current head of any world.
+// Reconcile uses it to distinguish a recoverable non-head full-but-missing row
+// (demote to mirror_only) from unrecoverable head corruption (fail loud).
+func (s *Store) IsRevisionHead(ctx context.Context, revisionID int64) (bool, error) {
+	if s == nil || s.db == nil {
+		return false, fmt.Errorf("revisionstore: Store is nil")
+	}
+	ctx, err := usableContext(ctx)
+	if err != nil {
+		return false, err
+	}
+	var isHead int64
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(1) FROM worlds WHERE head_revision_id = ?
+	`, revisionID).Scan(&isHead); err != nil {
+		return false, fmt.Errorf("revisionstore: check revision head: %w", err)
+	}
+	return isHead > 0, nil
+}
+
+// MarkMirrorOnly unconditionally demotes a revision to tier='mirror_only',
+// blob_present=0. Unlike EvictRevisionBlob it does NOT check head/refcount: it
+// is the reconcile-only repair for a non-head 'full' row whose bytes went
+// missing after a crash. Callers (ReconcileBlobs) gate the head check
+// themselves and fail loud on a head before reaching here. An unknown revision
+// (0 rows affected) is an error.
+func (s *Store) MarkMirrorOnly(ctx context.Context, revisionID int64) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("revisionstore: Store is nil")
+	}
+	ctx, err := usableContext(ctx)
+	if err != nil {
+		return err
+	}
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE save_revisions SET tier = 'mirror_only', blob_present = 0 WHERE id = ?
+	`, revisionID)
+	if err != nil {
+		return fmt.Errorf("revisionstore: mark mirror_only: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("revisionstore: mark mirror_only rows affected: %w", err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("revisionstore: mark mirror_only: unknown revision %d", revisionID)
+	}
+	return nil
+}
+
 // CreateWorkspace inserts a workspace with a freshly allocated UUID id and
 // returns the stored row.
 func (s *Store) CreateWorkspace(ctx context.Context, input WorkspaceInput) (Workspace, error) {
