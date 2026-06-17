@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -435,4 +436,528 @@ func assertRefEqual(t *testing.T, got, want blobstore.Ref) {
 
 func sameInstant(a, b time.Time) bool {
 	return a.Equal(b.UTC().Round(0))
+}
+
+func TestStoreWorkspaceWorldNodeCRUD(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	ws, err := store.CreateWorkspace(ctx, WorkspaceInput{Owner: "owner", Name: "ws"})
+	if err != nil {
+		t.Fatalf("CreateWorkspace() error = %v", err)
+	}
+	if _, err := uuid.Parse(ws.ID); err != nil {
+		t.Fatalf("workspace id %q is not a uuid: %v", ws.ID, err)
+	}
+	if ws.Owner != "owner" || ws.Name != "ws" || ws.CreatedAt.IsZero() {
+		t.Fatalf("workspace = %#v", ws)
+	}
+
+	gotWS, err := store.GetWorkspace(ctx, ws.ID)
+	if err != nil {
+		t.Fatalf("GetWorkspace() error = %v", err)
+	}
+	if gotWS.ID != ws.ID || gotWS.Owner != ws.Owner {
+		t.Fatalf("GetWorkspace() = %#v, want %#v", gotWS, ws)
+	}
+
+	listWS, err := store.ListWorkspaces(ctx)
+	if err != nil {
+		t.Fatalf("ListWorkspaces() error = %v", err)
+	}
+	if len(listWS) != 1 || listWS[0].ID != ws.ID {
+		t.Fatalf("ListWorkspaces() = %#v, want one workspace", listWS)
+	}
+
+	world, err := store.CreateWorld(ctx, WorldInput{WorkspaceID: ws.ID, Name: "world"})
+	if err != nil {
+		t.Fatalf("CreateWorld() error = %v", err)
+	}
+	if _, err := uuid.Parse(world.ID); err != nil {
+		t.Fatalf("world id %q is not a uuid: %v", world.ID, err)
+	}
+	if world.HeadRevisionID != nil || world.SimTime != nil {
+		t.Fatalf("new world head/sim_time = (%v, %v), want both nil", world.HeadRevisionID, world.SimTime)
+	}
+
+	gotWorld, err := store.GetWorld(ctx, world.ID)
+	if err != nil {
+		t.Fatalf("GetWorld() error = %v", err)
+	}
+	if gotWorld.ID != world.ID || gotWorld.WorkspaceID != ws.ID || gotWorld.Name != "world" {
+		t.Fatalf("GetWorld() = %#v", gotWorld)
+	}
+
+	listWorlds, err := store.ListWorlds(ctx, ws.ID)
+	if err != nil {
+		t.Fatalf("ListWorlds() error = %v", err)
+	}
+	if len(listWorlds) != 1 || listWorlds[0].ID != world.ID {
+		t.Fatalf("ListWorlds() = %#v, want one world", listWorlds)
+	}
+
+	// A world with an unknown workspace_id must be rejected by the FK.
+	if _, err := store.CreateWorld(ctx, WorldInput{WorkspaceID: uuid.NewString(), Name: "orphan"}); err == nil {
+		t.Fatalf("CreateWorld() with unknown workspace succeeded, want FK rejection")
+	}
+
+	node, err := store.CreateNode(ctx, NodeInput{
+		WorkspaceID: ws.ID,
+		NodeID:      "node-1",
+		RunID:       "run-1",
+		Status:      "idle",
+		CompatAddr:  "127.0.0.1:9000",
+		DropPath:    "/drops/node-1",
+	})
+	if err != nil {
+		t.Fatalf("CreateNode() error = %v", err)
+	}
+	if _, err := uuid.Parse(node.ID); err != nil {
+		t.Fatalf("node id %q is not a uuid: %v", node.ID, err)
+	}
+	if node.WorldID != "" {
+		t.Fatalf("new node world_id = %q, want empty (unbound)", node.WorldID)
+	}
+
+	if err := store.BindNode(ctx, node.ID, world.ID); err != nil {
+		t.Fatalf("BindNode() error = %v", err)
+	}
+	if err := store.SetNodeStatus(ctx, node.ID, "running"); err != nil {
+		t.Fatalf("SetNodeStatus() error = %v", err)
+	}
+
+	gotNode, err := store.GetNode(ctx, node.ID)
+	if err != nil {
+		t.Fatalf("GetNode() error = %v", err)
+	}
+	if gotNode.WorldID != world.ID || gotNode.Status != "running" {
+		t.Fatalf("GetNode() = %#v, want world bound and status running", gotNode)
+	}
+	if gotNode.CompatAddr != "127.0.0.1:9000" || gotNode.DropPath != "/drops/node-1" || gotNode.RunID != "run-1" {
+		t.Fatalf("GetNode() lost fields = %#v", gotNode)
+	}
+
+	listNodes, err := store.ListNodes(ctx, ws.ID)
+	if err != nil {
+		t.Fatalf("ListNodes() error = %v", err)
+	}
+	if len(listNodes) != 1 || listNodes[0].WorldID != world.ID || listNodes[0].Status != "running" {
+		t.Fatalf("ListNodes() = %#v", listNodes)
+	}
+
+	// Unknown node mutations must error.
+	if err := store.BindNode(ctx, uuid.NewString(), world.ID); err == nil {
+		t.Fatalf("BindNode() on unknown node succeeded, want error")
+	}
+	if err := store.SetNodeStatus(ctx, uuid.NewString(), "x"); err == nil {
+		t.Fatalf("SetNodeStatus() on unknown node succeeded, want error")
+	}
+}
+
+func TestStoreRecordRevisionAdvancingHead(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	store, err := Open(filepath.Join(dir, "metadata.sqlite"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	blobs, err := blobstore.NewFSStore(filepath.Join(dir, "blobs"), blobstore.WithInlineThreshold(0))
+	if err != nil {
+		t.Fatalf("NewFSStore() error = %v", err)
+	}
+	defer blobs.Close()
+
+	ws, err := store.CreateWorkspace(ctx, WorkspaceInput{Owner: "owner", Name: "ws"})
+	if err != nil {
+		t.Fatalf("CreateWorkspace() error = %v", err)
+	}
+	world, err := store.CreateWorld(ctx, WorldInput{WorkspaceID: ws.ID, Name: "world"})
+	if err != nil {
+		t.Fatalf("CreateWorld() error = %v", err)
+	}
+
+	run, err := store.RecordScriptRun(ctx, ScriptRunInput{
+		ScriptSHA256: strings.Repeat("a", blobstore.SHA256HexLength),
+		Status:       "succeeded",
+	})
+	if err != nil {
+		t.Fatalf("RecordScriptRun() error = %v", err)
+	}
+
+	firstRef, err := blobs.Put(ctx, []byte("first world save"))
+	if err != nil {
+		t.Fatalf("Put(first) error = %v", err)
+	}
+	firstSim := 10.0
+	first, err := store.RecordRevisionAdvancingHead(ctx, world.ID, &firstSim, RevisionInput{
+		BlobRef:     firstRef,
+		ScriptRunID: run.ID,
+	})
+	if err != nil {
+		t.Fatalf("RecordRevisionAdvancingHead(first) error = %v", err)
+	}
+	if first.WorldID != world.ID {
+		t.Fatalf("first revision world_id = %q, want %q", first.WorldID, world.ID)
+	}
+	if first.ParentID != nil {
+		t.Fatalf("first revision parent_id = %v, want nil", first.ParentID)
+	}
+	if first.Tier != "full" || !first.BlobPresent || first.Refcount != 0 || first.MirrorSchemaVersion != nil {
+		t.Fatalf("first revision tier defaults = (tier=%q, present=%v, refcount=%d, mirror=%v)", first.Tier, first.BlobPresent, first.Refcount, first.MirrorSchemaVersion)
+	}
+
+	afterFirst, err := store.GetWorld(ctx, world.ID)
+	if err != nil {
+		t.Fatalf("GetWorld() after first error = %v", err)
+	}
+	if afterFirst.HeadRevisionID == nil || *afterFirst.HeadRevisionID != first.ID {
+		t.Fatalf("world head = %v, want %d", afterFirst.HeadRevisionID, first.ID)
+	}
+	if afterFirst.SimTime == nil || *afterFirst.SimTime != firstSim {
+		t.Fatalf("world sim_time = %v, want %v", afterFirst.SimTime, firstSim)
+	}
+
+	secondRef, err := blobs.Put(ctx, []byte("second world save"))
+	if err != nil {
+		t.Fatalf("Put(second) error = %v", err)
+	}
+	secondSim := 20.0
+	second, err := store.RecordRevisionAdvancingHead(ctx, world.ID, &secondSim, RevisionInput{
+		ParentID:    &first.ID,
+		BlobRef:     secondRef,
+		ScriptRunID: run.ID,
+	})
+	if err != nil {
+		t.Fatalf("RecordRevisionAdvancingHead(second) error = %v", err)
+	}
+	if second.ParentID == nil || *second.ParentID != first.ID {
+		t.Fatalf("second revision parent_id = %v, want %d", second.ParentID, first.ID)
+	}
+
+	afterSecond, err := store.GetWorld(ctx, world.ID)
+	if err != nil {
+		t.Fatalf("GetWorld() after second error = %v", err)
+	}
+	if afterSecond.HeadRevisionID == nil || *afterSecond.HeadRevisionID != second.ID {
+		t.Fatalf("world head = %v, want %d", afterSecond.HeadRevisionID, second.ID)
+	}
+	if afterSecond.SimTime == nil || *afterSecond.SimTime != secondSim {
+		t.Fatalf("world sim_time = %v, want %v", afterSecond.SimTime, secondSim)
+	}
+
+	lineage, err := store.RevisionsForWorld(ctx, world.ID)
+	if err != nil {
+		t.Fatalf("RevisionsForWorld() error = %v", err)
+	}
+	if len(lineage) != 2 {
+		t.Fatalf("RevisionsForWorld() len = %d, want 2", len(lineage))
+	}
+	if lineage[0].ID != first.ID || lineage[1].ID != second.ID {
+		t.Fatalf("RevisionsForWorld() order = [%d, %d], want [%d, %d]", lineage[0].ID, lineage[1].ID, first.ID, second.ID)
+	}
+	if lineage[0].ParentID != nil {
+		t.Fatalf("lineage[0].ParentID = %v, want nil", lineage[0].ParentID)
+	}
+	if lineage[1].ParentID == nil || *lineage[1].ParentID != first.ID {
+		t.Fatalf("lineage[1].ParentID = %v, want %d", lineage[1].ParentID, first.ID)
+	}
+}
+
+func TestStoreRecordRevisionAdvancingHeadAtomic(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	store, err := Open(filepath.Join(dir, "metadata.sqlite"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	blobs, err := blobstore.NewFSStore(filepath.Join(dir, "blobs"), blobstore.WithInlineThreshold(0))
+	if err != nil {
+		t.Fatalf("NewFSStore() error = %v", err)
+	}
+	defer blobs.Close()
+
+	run, err := store.RecordScriptRun(ctx, ScriptRunInput{
+		ScriptSHA256: strings.Repeat("b", blobstore.SHA256HexLength),
+		Status:       "succeeded",
+	})
+	if err != nil {
+		t.Fatalf("RecordScriptRun() error = %v", err)
+	}
+	ref, err := blobs.Put(ctx, []byte("doomed save"))
+	if err != nil {
+		t.Fatalf("Put() error = %v", err)
+	}
+
+	// A world_id that does not exist: the INSERT's FK fails (or the head UPDATE
+	// finds no world); either way nothing must be committed.
+	badWorld := uuid.NewString()
+	sim := 5.0
+	if _, err := store.RecordRevisionAdvancingHead(ctx, badWorld, &sim, RevisionInput{
+		BlobRef:     ref,
+		ScriptRunID: run.ID,
+	}); err == nil {
+		t.Fatalf("RecordRevisionAdvancingHead() with unknown world succeeded, want error")
+	}
+
+	// No revision row may have leaked from the rolled-back tx.
+	leaked, err := store.RevisionsForWorld(ctx, badWorld)
+	if err != nil {
+		t.Fatalf("RevisionsForWorld() error = %v", err)
+	}
+	if len(leaked) != 0 {
+		t.Fatalf("RevisionsForWorld(badWorld) = %d rows, want 0 (rolled back)", len(leaked))
+	}
+	var total int64
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM save_revisions`).Scan(&total); err != nil {
+		t.Fatalf("count save_revisions: %v", err)
+	}
+	if total != 0 {
+		t.Fatalf("save_revisions count = %d, want 0 (no leaked insert)", total)
+	}
+}
+
+func TestStoreBlobRefcountLifecycle(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	store, err := Open(filepath.Join(dir, "metadata.sqlite"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	blobs, err := blobstore.NewFSStore(filepath.Join(dir, "blobs"), blobstore.WithInlineThreshold(0))
+	if err != nil {
+		t.Fatalf("NewFSStore() error = %v", err)
+	}
+	defer blobs.Close()
+
+	run, err := store.RecordScriptRun(ctx, ScriptRunInput{
+		ScriptSHA256: strings.Repeat("c", blobstore.SHA256HexLength),
+		Status:       "succeeded",
+	})
+	if err != nil {
+		t.Fatalf("RecordScriptRun() error = %v", err)
+	}
+	ref, err := blobs.Put(ctx, []byte("refcounted save"))
+	if err != nil {
+		t.Fatalf("Put() error = %v", err)
+	}
+	rev, err := store.RecordRevision(ctx, RevisionInput{
+		BlobRef:     ref,
+		ScriptRunID: run.ID,
+	})
+	if err != nil {
+		t.Fatalf("RecordRevision() error = %v", err)
+	}
+
+	if _, err := store.IncBlobRef(ctx, ref.SHA256); err != nil {
+		t.Fatalf("IncBlobRef() error = %v", err)
+	}
+	if _, err := store.IncBlobRef(ctx, ref.SHA256); err != nil {
+		t.Fatalf("IncBlobRef() error = %v", err)
+	}
+	if _, err := store.DecBlobRef(ctx, ref.SHA256); err != nil {
+		t.Fatalf("DecBlobRef() error = %v", err)
+	}
+	if got := rawRefcount(t, ctx, store, rev.ID); got != 1 {
+		t.Fatalf("refcount after inc x2 / dec = %d, want 1", got)
+	}
+
+	// Dec down to 0 then again: the WHERE refcount > 0 guard keeps it at 0
+	// (CHECK (refcount >= 0) must never be violated).
+	if _, err := store.DecBlobRef(ctx, ref.SHA256); err != nil {
+		t.Fatalf("DecBlobRef() to zero error = %v", err)
+	}
+	if affected, err := store.DecBlobRef(ctx, ref.SHA256); err != nil {
+		t.Fatalf("DecBlobRef() at zero error = %v", err)
+	} else if affected != 0 {
+		t.Fatalf("DecBlobRef() at zero affected = %d, want 0", affected)
+	}
+	if got := rawRefcount(t, ctx, store, rev.ID); got != 0 {
+		t.Fatalf("refcount after dec to zero = %d, want 0", got)
+	}
+
+	// UnreferencedBlobs: a refcount=0 hash that is still blob_present=1 is NOT a
+	// GC candidate (its bytes are still needed by a full revision).
+	unref, err := store.UnreferencedBlobs(ctx)
+	if err != nil {
+		t.Fatalf("UnreferencedBlobs() error = %v", err)
+	}
+	if containsString(unref, ref.SHA256) {
+		t.Fatalf("UnreferencedBlobs() = %v, must exclude still-present hash %s", unref, ref.SHA256)
+	}
+
+	// Evict the revision (non-head, single ref) so its blob_present flips to 0,
+	// then the hash becomes a GC candidate.
+	if err := store.EvictRevisionBlob(ctx, rev.ID); err != nil {
+		t.Fatalf("EvictRevisionBlob() error = %v", err)
+	}
+	unref, err = store.UnreferencedBlobs(ctx)
+	if err != nil {
+		t.Fatalf("UnreferencedBlobs() after evict error = %v", err)
+	}
+	if !containsString(unref, ref.SHA256) {
+		t.Fatalf("UnreferencedBlobs() = %v, want it to include evicted hash %s", unref, ref.SHA256)
+	}
+}
+
+func TestStoreEvictRevisionBlob(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	store, err := Open(filepath.Join(dir, "metadata.sqlite"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	blobs, err := blobstore.NewFSStore(filepath.Join(dir, "blobs"), blobstore.WithInlineThreshold(0))
+	if err != nil {
+		t.Fatalf("NewFSStore() error = %v", err)
+	}
+	defer blobs.Close()
+
+	ws, err := store.CreateWorkspace(ctx, WorkspaceInput{Owner: "owner", Name: "ws"})
+	if err != nil {
+		t.Fatalf("CreateWorkspace() error = %v", err)
+	}
+	world, err := store.CreateWorld(ctx, WorldInput{WorkspaceID: ws.ID, Name: "world"})
+	if err != nil {
+		t.Fatalf("CreateWorld() error = %v", err)
+	}
+	run, err := store.RecordScriptRun(ctx, ScriptRunInput{
+		ScriptSHA256: strings.Repeat("e", blobstore.SHA256HexLength),
+		Status:       "succeeded",
+	})
+	if err != nil {
+		t.Fatalf("RecordScriptRun() error = %v", err)
+	}
+
+	olderRef, err := blobs.Put(ctx, []byte("older world save"))
+	if err != nil {
+		t.Fatalf("Put(older) error = %v", err)
+	}
+	older, err := store.RecordRevisionAdvancingHead(ctx, world.ID, nil, RevisionInput{
+		BlobRef:     olderRef,
+		ScriptRunID: run.ID,
+	})
+	if err != nil {
+		t.Fatalf("RecordRevisionAdvancingHead(older) error = %v", err)
+	}
+
+	headRef, err := blobs.Put(ctx, []byte("head world save"))
+	if err != nil {
+		t.Fatalf("Put(head) error = %v", err)
+	}
+	head, err := store.RecordRevisionAdvancingHead(ctx, world.ID, nil, RevisionInput{
+		ParentID:    &older.ID,
+		BlobRef:     headRef,
+		ScriptRunID: run.ID,
+	})
+	if err != nil {
+		t.Fatalf("RecordRevisionAdvancingHead(head) error = %v", err)
+	}
+
+	// Evicting the non-head, single-ref older revision flips it to mirror_only.
+	if err := store.EvictRevisionBlob(ctx, older.ID); err != nil {
+		t.Fatalf("EvictRevisionBlob(older) error = %v", err)
+	}
+	gotOlder, err := store.RevisionByID(ctx, older.ID)
+	if err != nil {
+		t.Fatalf("RevisionByID(older) after evict error = %v", err)
+	}
+	if gotOlder.Tier != "mirror_only" || gotOlder.BlobPresent {
+		t.Fatalf("evicted revision = (tier=%q, present=%v), want (mirror_only, false)", gotOlder.Tier, gotOlder.BlobPresent)
+	}
+
+	// The row must still be present (history retained) and the blobstore bytes
+	// must be untouched (A2 never deletes them).
+	if has, err := blobs.Has(ctx, olderRef); err != nil {
+		t.Fatalf("blobs.Has(older) error = %v", err)
+	} else if !has {
+		t.Fatalf("blobstore lost evicted bytes; A2 must not delete blobstore bytes")
+	}
+
+	// Evicting the head is refused.
+	if err := store.EvictRevisionBlob(ctx, head.ID); !errors.Is(err, ErrRevisionIsHead) {
+		t.Fatalf("EvictRevisionBlob(head) error = %v, want ErrRevisionIsHead", err)
+	}
+
+	// A revision whose sha256 has refcount > 1 is refused. Use a fresh non-head
+	// revision and bump its refcount above 1.
+	sharedRef, err := blobs.Put(ctx, []byte("shared bytes save"))
+	if err != nil {
+		t.Fatalf("Put(shared) error = %v", err)
+	}
+	shared, err := store.RecordRevision(ctx, RevisionInput{
+		BlobRef:     sharedRef,
+		ScriptRunID: run.ID,
+	})
+	if err != nil {
+		t.Fatalf("RecordRevision(shared) error = %v", err)
+	}
+	if _, err := store.IncBlobRef(ctx, sharedRef.SHA256); err != nil {
+		t.Fatalf("IncBlobRef() error = %v", err)
+	}
+	if _, err := store.IncBlobRef(ctx, sharedRef.SHA256); err != nil {
+		t.Fatalf("IncBlobRef() error = %v", err)
+	}
+	if err := store.EvictRevisionBlob(ctx, shared.ID); !errors.Is(err, ErrBlobStillReferenced) {
+		t.Fatalf("EvictRevisionBlob(shared) error = %v, want ErrBlobStillReferenced", err)
+	}
+
+	// PromoteRevision restores the evicted older revision.
+	if err := store.PromoteRevision(ctx, older.ID); err != nil {
+		t.Fatalf("PromoteRevision(older) error = %v", err)
+	}
+	promoted, err := store.RevisionByID(ctx, older.ID)
+	if err != nil {
+		t.Fatalf("RevisionByID(older) after promote error = %v", err)
+	}
+	if promoted.Tier != "full" || !promoted.BlobPresent {
+		t.Fatalf("promoted revision = (tier=%q, present=%v), want (full, true)", promoted.Tier, promoted.BlobPresent)
+	}
+
+	// Promoting an already-full revision is a no-op (no error).
+	if err := store.PromoteRevision(ctx, older.ID); err != nil {
+		t.Fatalf("PromoteRevision(already full) error = %v", err)
+	}
+	stillFull, err := store.RevisionByID(ctx, older.ID)
+	if err != nil {
+		t.Fatalf("RevisionByID(older) after second promote error = %v", err)
+	}
+	if stillFull.Tier != "full" || !stillFull.BlobPresent {
+		t.Fatalf("re-promoted revision = (tier=%q, present=%v), want (full, true)", stillFull.Tier, stillFull.BlobPresent)
+	}
+}
+
+func rawRefcount(t *testing.T, ctx context.Context, store *Store, revisionID int64) int64 {
+	t.Helper()
+	var refcount int64
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT refcount FROM save_revisions WHERE id = ?
+	`, revisionID).Scan(&refcount); err != nil {
+		t.Fatalf("query refcount: %v", err)
+	}
+	return refcount
+}
+
+func containsString(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
 }
