@@ -526,31 +526,53 @@ func (ls *LoadedSave) WriteSave(path string) error {
 // produced bytes are reparsed exactly once and their hash asserted against the
 // blob ref (the only reparse this path ever performs). DuckDB is never touched.
 func (ls *LoadedSave) Commit(ctx context.Context, blobs blobstore.Store, revs *revisionstore.Store, scriptRunID int64, verify bool) (revisionstore.Revision, error) {
+	ref, err := ls.prepareCommit(ctx, blobs, verify)
+	if err != nil {
+		return revisionstore.Revision{}, err
+	}
+	return ls.recordRevision(ctx, revs, ref, scriptRunID)
+}
+
+// prepareCommit performs the fallible, side-effecting part of a commit that does
+// NOT need a script-run id: apply (idempotent) → serialize to bytes via
+// WriteArchiveTo → blobs.Put (+ optional verify). It is split out of Commit so
+// the host can produce the content-addressed blob BEFORE recording the script run,
+// letting the recorded run status reflect the actual commit outcome (provenance is
+// never recorded "succeeded" for a commit that failed). A content-addressed blob
+// written without a following revision is a harmless orphan.
+func (ls *LoadedSave) prepareCommit(ctx context.Context, blobs blobstore.Store, verify bool) (blobstore.Ref, error) {
 	if blobs == nil {
-		return revisionstore.Revision{}, fmt.Errorf("commit: blob store is nil")
+		return blobstore.Ref{}, fmt.Errorf("commit: blob store is nil")
 	}
 	if err := ls.ensureApplied(); err != nil {
-		return revisionstore.Revision{}, err
+		return blobstore.Ref{}, err
 	}
 
 	var buf bytes.Buffer
 	if err := tb.WriteArchiveTo(&buf, ls.session.Archive()); err != nil {
-		return revisionstore.Revision{}, fmt.Errorf("serialize save: %w", err)
+		return blobstore.Ref{}, fmt.Errorf("serialize save: %w", err)
 	}
 	ls.writeArchiveCount++
 	data := buf.Bytes()
 
 	ref, err := blobs.Put(ctx, data)
 	if err != nil {
-		return revisionstore.Revision{}, fmt.Errorf("store save blob: %w", err)
+		return blobstore.Ref{}, fmt.Errorf("store save blob: %w", err)
 	}
 
 	if verify {
 		if err := ls.verifyRoundTrip(data, ref); err != nil {
-			return revisionstore.Revision{}, err
+			return blobstore.Ref{}, err
 		}
 	}
+	return ref, nil
+}
 
+// recordRevision links an already-produced blob to scriptRunID as a provenance
+// revision. Split from prepareCommit so it runs strictly AFTER the script run is
+// recorded (the FK save_revisions.script_run_id -> script_runs.id requires the run
+// row first).
+func (ls *LoadedSave) recordRevision(ctx context.Context, revs *revisionstore.Store, ref blobstore.Ref, scriptRunID int64) (revisionstore.Revision, error) {
 	rev, err := revs.RecordRevision(ctx, revisionstore.RevisionInput{
 		SourcePath:  ls.path,
 		BlobRef:     ref,

@@ -121,10 +121,16 @@ func (e *Entity) SetField(name string, val starlark.Value) error {
 	}
 	ref, err := e.ls.entityLocatorRef(e.kind, e.entryName)
 	if err != nil {
+		// setRowField already wrote through; restore the prior value so a rejected
+		// set leaves no phantom in-memory value (no staged op backs it).
+		_, _ = setRowField(row, spec.fieldIndex, old)
 		return err
 	}
 	ref.Table, ref.Column = spec.table, spec.sourceColumn
 	if err := e.ls.session.StageSQLSet(ref.WithExpected(old), staged); err != nil {
+		// Roll back the in-memory write-through: the stage that would authorize it
+		// was rejected, so memory must not hold a value no staged op backs.
+		_, _ = setRowField(row, spec.fieldIndex, old)
 		return fmt.Errorf("%s.%s: %w", e.kind, name, err)
 	}
 	e.ls.stagedOps++

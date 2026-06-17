@@ -75,6 +75,30 @@ func runLoaded(ctx context.Context, ls *LoadedSave, program []byte, blobs blobst
 	recordedDryRun := opts.DryRun || !ls.willCommit
 	willWrite := runErr == nil && !opts.DryRun && ls.willCommit && ls.stagedOps > 0
 
+	// Do the fallible commit work (serialize + blobs.Put) BEFORE recording the run,
+	// so the recorded status reflects the actual commit outcome. Otherwise a run row
+	// could claim status="succeeded" with no save_revisions blob behind it (phantom
+	// provenance) when Commit fails after the run is already recorded. The produced
+	// blob is content-addressed, so a blob written without a following revision is a
+	// harmless orphan. Order is preserved for the FK: run is still recorded before
+	// the revision (recordRevision below).
+	var (
+		commitRef   blobstore.Ref
+		commitReady bool
+		commitErr   error
+	)
+	if willWrite {
+		commitRef, commitErr = ls.prepareCommit(ctx, blobs, opts.Verify)
+		if commitErr != nil {
+			// The commit failed: the run produced no revision. Record that truthfully
+			// rather than letting "succeeded" stand for a commit that never landed.
+			status = "commit_failed"
+			errMsg = commitErr.Error()
+		} else {
+			commitReady = true
+		}
+	}
+
 	run, recErr := revs.RecordScriptRun(ctx, revisionstore.ScriptRunInput{
 		ScriptSHA256: scriptSHA,
 		StartedAt:    startedAt,
@@ -96,8 +120,12 @@ func runLoaded(ctx context.Context, ls *LoadedSave, program []byte, blobs blobst
 		return res, fmt.Errorf("record script run: %w", recErr)
 	}
 
-	if willWrite {
-		rev, err := ls.Commit(ctx, blobs, revs, run.ID, opts.Verify)
+	if commitErr != nil {
+		return res, commitErr
+	}
+
+	if commitReady {
+		rev, err := ls.recordRevision(ctx, revs, commitRef, run.ID)
 		if err != nil {
 			return res, err
 		}

@@ -28,11 +28,16 @@ type Options struct {
 // Run executes program in a sandboxed Starlark thread using the supplied
 // predeclared globals. It captures print output and returns normalized
 // diagnostics for syntax, evaluation, budget, and context failures.
-func Run(ctx context.Context, program []byte, globals starlark.StringDict, opts Options) (Result, error) {
+//
+// A panic in any host builtin is recovered and converted into a clean RunError
+// (rather than unwinding the caller), so the host's "record the run on every exit"
+// invariant holds even when a builtin panics — runLoaded still records the failed
+// run instead of having the panic escape past RecordScriptRun.
+func Run(ctx context.Context, program []byte, globals starlark.StringDict, opts Options) (result Result, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	result := Result{
+	result = Result{
 		StagedOps:   opts.StagedOps,
 		RevisionRef: opts.RevisionRef,
 		DryRun:      opts.DryRun,
@@ -41,6 +46,20 @@ func Run(ctx context.Context, program []byte, globals starlark.StringDict, opts 
 	if filename == "" {
 		filename = defaultFilename
 	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			cause := fmt.Errorf("script panicked: %v", r)
+			result.Diagnostics = []Diagnostic{{
+				Severity: SeverityError,
+				Code:     "panic",
+				Message:  cause.Error(),
+				Detail:   cause.Error(),
+				Filename: filename,
+			}}
+			err = &RunError{Diagnostics: result.Diagnostics, Cause: cause}
+		}
+	}()
 
 	if err := ctx.Err(); err != nil {
 		result.Diagnostics = diagnosticsForError(filename, err, false, true)
@@ -73,15 +92,15 @@ func Run(ctx context.Context, program []byte, globals starlark.StringDict, opts 
 	})
 	defer stopCancel()
 
-	_, err := starlark.ExecFileOptions(&syntax.FileOptions{}, thread, filename, program, globals)
+	_, execErr := starlark.ExecFileOptions(&syntax.FileOptions{}, thread, filename, program, globals)
 	result.Output = output.String()
-	if err != nil {
-		result.Diagnostics = diagnosticsForError(filename, err, budgetExceeded.Load(), contextCancelled.Load())
-		return result, &RunError{Diagnostics: result.Diagnostics, Cause: err}
+	if execErr != nil {
+		result.Diagnostics = diagnosticsForError(filename, execErr, budgetExceeded.Load(), contextCancelled.Load())
+		return result, &RunError{Diagnostics: result.Diagnostics, Cause: execErr}
 	}
-	if err := ctx.Err(); err != nil {
-		result.Diagnostics = diagnosticsForError(filename, err, false, true)
-		return result, &RunError{Diagnostics: result.Diagnostics, Cause: err}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		result.Diagnostics = diagnosticsForError(filename, ctxErr, false, true)
+		return result, &RunError{Diagnostics: result.Diagnostics, Cause: ctxErr}
 	}
 	return result, nil
 }

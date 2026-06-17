@@ -238,6 +238,42 @@ mutate()
 	}
 }
 
+// TestRunAndCommitFailureRecordsNonSucceededRun: when the commit work fails (here a
+// nil blob store), the run must NOT be recorded as "succeeded" with no revision
+// behind it. The recorded status reflects the commit failure and no revision row is
+// produced (no phantom provenance).
+func TestRunAndCommitFailureRecordsNonSucceededRun(t *testing.T) {
+	ctx := context.Background()
+	root, _, revs := newStores(t)
+	ls := loadFixture(t)
+	target := firstBibiteEntry(t, ls)
+
+	// nil blob store forces prepareCommit to fail on an otherwise-committing run.
+	res, err := runLoaded(ctx, ls, setEnergyProgram(target, 4321.0), nil, revs, RunOptions{})
+	if err == nil {
+		t.Fatal("runLoaded succeeded, want a commit failure from the nil blob store")
+	}
+	if res.RevisionRef != "" {
+		t.Errorf("RevisionRef = %q, want empty when the commit failed", res.RevisionRef)
+	}
+
+	// The run was still recorded (record-every-run invariant) but NOT as succeeded.
+	run, rerr := revs.ScriptRunByID(ctx, 1)
+	if rerr != nil {
+		t.Fatalf("ScriptRunByID(1): %v", rerr)
+	}
+	if run.Status == "succeeded" {
+		t.Errorf("run status = %q, want a non-succeeded status for a failed commit", run.Status)
+	}
+	if run.Status != "commit_failed" {
+		t.Errorf("run status = %q, want commit_failed", run.Status)
+	}
+	// No blob produced, so nothing the run could falsely claim a revision over.
+	if got := countObjectBlobs(t, root); got != 0 {
+		t.Errorf("object blobs on disk = %d, want 0 (commit never produced a blob)", got)
+	}
+}
+
 // TestRunAndCommitChurn is the headline assertion: a pure-mutation commit performs
 // exactly one WriteArchive, zero reparses, and never opens DuckDB.
 func TestRunAndCommitChurn(t *testing.T) {

@@ -3,6 +3,7 @@ package thebibites
 import (
 	"database/sql"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -388,14 +389,29 @@ func (ls *LoadedSave) bulkSet(kind, where, column string, value starlark.Value) 
 
 	for _, r := range refs {
 		staged := goVal
+		var (
+			wroteRow   reflect.Value
+			restorePri any
+			restore    bool
+		)
 		if row, ok := ls.rowForEntry(spec.table, r.Ref.EntryName); ok {
+			prior, err := goScalar(row.FieldByIndex(spec.fieldIndex))
+			if err != nil {
+				return 0, fmt.Errorf("%s.%s: %w", kind, column, err)
+			}
 			coerced, err := setRowField(row, spec.fieldIndex, goVal)
 			if err != nil {
 				return 0, fmt.Errorf("%s.%s: %w", kind, column, err)
 			}
 			staged = coerced
+			wroteRow, restorePri, restore = row, prior, true
 		}
 		if err := ls.session.StageSQLSet(r.Ref.WithExpected(r.CurrentValue), staged); err != nil {
+			// Roll back this row's write-through: a rejected stage must not leave a
+			// phantom in-memory value (same class as the scalar SetField path).
+			if restore {
+				_, _ = setRowField(wroteRow, spec.fieldIndex, restorePri)
+			}
 			return 0, fmt.Errorf("%s.%s: %w", kind, column, err)
 		}
 		ls.stagedOps++

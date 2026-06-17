@@ -113,6 +113,34 @@ func TestSetFieldPersists(t *testing.T) {
 	}
 }
 
+// TestSetFieldRejectedStageLeavesNoPhantom: a set that fails to stage (here a
+// post-apply set, rejected by the session) must not leave a phantom in-memory
+// value. The write-through is rolled back, so a later plain read returns the
+// applied value, not the rejected one.
+func TestSetFieldRejectedStageLeavesNoPhantom(t *testing.T) {
+	ls := loadFixture(t)
+	name := firstBibiteEntry(t, ls)
+	e := &Entity{ls: ls, kind: "bibite", entryName: name}
+
+	const applied = 1234.0
+	if err := e.SetField("energy", starlark.Float(applied)); err != nil {
+		t.Fatalf("SetField (staged): %v", err)
+	}
+	// Apply the session: further staging is now rejected ("cannot stage after apply").
+	if err := ls.ensureApplied(); err != nil {
+		t.Fatalf("ensureApplied: %v", err)
+	}
+
+	const rejected = 9999.0
+	if err := e.SetField("energy", starlark.Float(rejected)); err == nil {
+		t.Fatal("SetField after apply succeeded, want a stage rejection")
+	}
+	// The rejected set must not have left its value in memory.
+	if got := attrFloat(t, e, "energy"); got != applied {
+		t.Errorf("post-rejection energy = %v, want %v (no phantom write-through)", got, applied)
+	}
+}
+
 // TestInRunReadAfterWriteSQL: a query -> set -> query sequence observes the new
 // value via DuckDB with no reparse, DuckDB opened exactly once, and the mutation
 // applied as a single mirror UPDATE.
