@@ -192,6 +192,13 @@ func (ls *LoadedSave) stageEntityDelete(kind, entryName string, prune bool) erro
 	}
 	ref.Table = table
 	if prune && kind == "bibite" {
+		// Parity with the non-prune path: bibiteTargetFromSQLRef rejects a missing
+		// body_id via requireSQLRefFlag. The prune path keys the delete on body.id,
+		// so a bibite with has_body_id=false would otherwise stage a delete guarded
+		// by a zero body id — reject it here too rather than proceed loosely.
+		if !ref.HasBodyID {
+			return fmt.Errorf("%s.delete: missing body_id", kind)
+		}
 		err = ls.session.StageDeleteBibiteWithOptions(
 			mutator.BibiteRef{EntryName: entryName, BodyID: ref.BodyID},
 			mutator.DeleteOptions{PruneParentLinks: true},

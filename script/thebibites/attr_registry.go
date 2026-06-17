@@ -282,7 +282,7 @@ type subCollectionSpec struct {
 	indexField   []int
 	elementAttrs map[string]attrSpec // friendly column -> spec (reads + append kwargs)
 	writableCols []string            // writable element columns, sorted (append/guard)
-	guardColumn  string              // first writable column, used as the delete stale guard
+	guardColumn  string              // chosen high-cardinality writable column, the delete stale guard
 }
 
 var (
@@ -352,11 +352,31 @@ func buildSubRegistry() {
 				}
 			}
 			sort.Strings(sc.writableCols)
-			if len(sc.writableCols) > 0 {
-				sc.guardColumn = sc.writableCols[0]
-			}
+			sc.guardColumn = chooseGuardColumn(sc)
 			out[attr] = sc
 		}
 		subRegistryMap[kind] = out
 	}
+}
+
+// chooseGuardColumn picks the delete stale-guard column for a sub-collection. The
+// guard's job is to fail loudly when a shifted/stale array index would delete the
+// wrong element, so a boolean column is a poor guard: with only two values it
+// rarely distinguishes a shifted element from its neighbor (synapses, sorted, lead
+// with the bool `enabled`; nearly every synapse is enabled=true). Prefer the first
+// writable column whose generated SQLType is NOT boolean — a higher-cardinality
+// column (weight/innovation/node_in) catches a positional shift far more often.
+// Fall back to writableCols[0] only if every writable column is boolean (so a guard
+// still exists), and "" if there are no writable columns. Data-driven off the
+// spec's sqlType — no hardcoded column names.
+func chooseGuardColumn(sc *subCollectionSpec) string {
+	if len(sc.writableCols) == 0 {
+		return ""
+	}
+	for _, col := range sc.writableCols {
+		if deriveType(sc.elementAttrs[col].sqlType) != kindBool {
+			return col
+		}
+	}
+	return sc.writableCols[0]
 }

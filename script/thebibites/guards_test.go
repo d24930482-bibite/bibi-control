@@ -1,6 +1,7 @@
 package thebibites
 
 import (
+	"math"
 	"strings"
 	"testing"
 
@@ -184,6 +185,43 @@ func TestValidateValueTypeMatrix(t *testing.T) {
 		if !tc.valid && err == nil {
 			t.Errorf("%v with %T(%v): expected error, got nil", tc.kind, tc.val, tc.val)
 		}
+	}
+}
+
+// TestValidateValueRejectsNonFinite: NaN/±Inf slip past Min/Max comparisons (all of
+// NaN<min, NaN>max, +Inf>max-on-unbounded are false) yet would abort the commit at
+// json.Marshal. The guard must reject them up front for every numeric kind.
+func TestValidateValueRejectsNonFinite(t *testing.T) {
+	for _, kind := range []valueKind{kindNumber, kindInt, kindUint, kindUnknown} {
+		for _, f := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+			if err := validateValue(Rule{Type: kind}, f); err == nil {
+				t.Errorf("%v with %v: expected rejection of non-finite, got nil", kind, f)
+			}
+		}
+	}
+	// A bounded non-negative column (Min:0) must also reject NaN/+Inf, not let them
+	// pass the f < min / f > max comparisons.
+	bounded := Rule{Type: kindNumber, Min: &zeroMin}
+	for _, f := range []float64{math.NaN(), math.Inf(1)} {
+		if err := validateValue(bounded, f); err == nil {
+			t.Errorf("bounded column with %v: expected rejection, got nil", f)
+		}
+	}
+}
+
+// TestSetFieldRejectsNonFinite: b.energy = float("nan")/inf is rejected at set time
+// (localized) rather than aborting the later commit, and nothing stages.
+func TestSetFieldRejectsNonFinite(t *testing.T) {
+	ls := loadFixture(t)
+	e := &Entity{ls: ls, kind: "bibite", entryName: firstBibiteEntry(t, ls)}
+
+	for _, f := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		if err := e.SetField("energy", starlark.Float(f)); err == nil {
+			t.Errorf("energy = %v: expected rejection, got nil", f)
+		}
+	}
+	if ls.stagedOps != 0 {
+		t.Errorf("stagedOps = %d after non-finite sets, want 0", ls.stagedOps)
 	}
 }
 

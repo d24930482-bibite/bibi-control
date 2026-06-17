@@ -2,6 +2,7 @@ package thebibites
 
 import (
 	"fmt"
+	"math"
 
 	tb "github.com/asemones/bibicontrol/saveparser/thebibites"
 )
@@ -161,6 +162,15 @@ func scalarTypeRule(t tb.ScalarType) Rule {
 // It reuses asFloat64/asInt64 (convert.go) so its type acceptance is identical to
 // what setRowField will coerce.
 func validateValue(r Rule, goVal any) error {
+	// A non-finite float (NaN/±Inf) is the wrong kind of number for every numeric
+	// column: it slips past the Min/Max comparison below (NaN < min and NaN > max
+	// are both false; +Inf has no Max on the unbounded columns) yet aborts the whole
+	// commit later at json.Marshal ("unsupported value: NaN"), far from this set.
+	// Reject it here so the diagnostic is localized to the offending value.
+	if f, ok := goVal.(float64); ok && (math.IsNaN(f) || math.IsInf(f, 0)) {
+		return fmt.Errorf("expects a finite number, got %v", f)
+	}
+
 	switch r.Type {
 	case kindNumber:
 		if _, ok := asFloat64(goVal); !ok {

@@ -426,6 +426,50 @@ print("staged=%%d" %% mutate())
 	}
 }
 
+// TestSubCollectionGuardColumnNotBool: the delete stale-guard must be a
+// higher-cardinality column, never a boolean. For synapses the sorted writable set
+// leads with the bool `enabled`, which is a near-constant true and so a useless
+// guard against a shifted index. chooseGuardColumn must skip it. Every
+// sub-collection with a writable column must land a guard whose derived type is not
+// kindBool (unless, defensively, all its writable columns are bool).
+func TestSubCollectionGuardColumnNotBool(t *testing.T) {
+	syn := subCollectionRegistry()["bibite"]["synapses"]
+	if syn == nil {
+		t.Fatal("no synapses sub-collection registered")
+	}
+	if syn.guardColumn == "enabled" {
+		t.Errorf("synapse guard column = %q (the bool); want a higher-cardinality column", syn.guardColumn)
+	}
+	if syn.guardColumn == "" {
+		t.Fatal("synapse guard column is empty; want a writable guard")
+	}
+	if got := deriveType(syn.elementAttrs[syn.guardColumn].sqlType); got == kindBool {
+		t.Errorf("synapse guard column %q is a boolean type; want non-bool", syn.guardColumn)
+	}
+
+	for kind, subs := range subCollectionRegistry() {
+		for attr, sc := range subs {
+			if len(sc.writableCols) == 0 {
+				continue
+			}
+			allBool := true
+			for _, col := range sc.writableCols {
+				if deriveType(sc.elementAttrs[col].sqlType) != kindBool {
+					allBool = false
+					break
+				}
+			}
+			if allBool {
+				continue // defensive fallback to writableCols[0] is acceptable
+			}
+			if got := deriveType(sc.elementAttrs[sc.guardColumn].sqlType); got == kindBool {
+				t.Errorf("%s.%s guard column %q is bool despite a non-bool writable column existing",
+					kind, attr, sc.guardColumn)
+			}
+		}
+	}
+}
+
 // TestSetFieldRejectsSubCollection: assigning to a sub-collection name is a clean
 // error (it is a collection, not a scalar).
 func TestSetFieldRejectsSubCollection(t *testing.T) {
