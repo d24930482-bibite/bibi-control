@@ -1070,3 +1070,132 @@ func containsString(haystack []string, needle string) bool {
 	}
 	return false
 }
+
+// orphanedSHAs collapses an OrphanedBlobs result to its sha256 set for assertion.
+func orphanedSHAs(revs []Revision) []string {
+	out := make([]string, 0, len(revs))
+	for _, r := range revs {
+		out = append(out, r.SHA256)
+	}
+	return out
+}
+
+// TestStoreOrphanedBlobs proves OrphanedBlobs catches the refcount-1 orphan that
+// UnreferencedBlobs (refcount-gated) silently misses: G2's EvictRevisionBlob
+// flips tier/blob_present only and leaves refcount=1. It also proves a still
+// blob_present=1 sha and a dedup-shared (one full + one mirror) sha are excluded.
+func TestStoreOrphanedBlobs(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	store, err := Open(filepath.Join(dir, "metadata.sqlite"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	blobs, err := blobstore.NewFSStore(filepath.Join(dir, "blobs"), blobstore.WithInlineThreshold(0))
+	if err != nil {
+		t.Fatalf("NewFSStore() error = %v", err)
+	}
+	defer blobs.Close()
+
+	run, err := store.RecordScriptRun(ctx, ScriptRunInput{
+		ScriptSHA256: strings.Repeat("f", blobstore.SHA256HexLength),
+		Status:       "succeeded",
+	})
+	if err != nil {
+		t.Fatalf("RecordScriptRun() error = %v", err)
+	}
+
+	// Orphan: a non-head, single-ref revision evicted to mirror_only. Its refcount
+	// stays 1, so UnreferencedBlobs misses it but OrphanedBlobs must catch it.
+	orphanRef, err := blobs.Put(ctx, []byte("orphan save bytes"))
+	if err != nil {
+		t.Fatalf("Put(orphan) error = %v", err)
+	}
+	orphan, err := store.RecordRevision(ctx, RevisionInput{
+		BlobRef:     orphanRef,
+		ScriptRunID: run.ID,
+	})
+	if err != nil {
+		t.Fatalf("RecordRevision(orphan) error = %v", err)
+	}
+	if err := store.EvictRevisionBlob(ctx, orphan.ID); err != nil {
+		t.Fatalf("EvictRevisionBlob(orphan) error = %v", err)
+	}
+	// Sanity: the evicted orphan keeps refcount 1, so UnreferencedBlobs misses it.
+	if got := rawRefcount(t, ctx, store, orphan.ID); got != 1 {
+		t.Fatalf("evicted orphan refcount = %d, want 1 (eviction flips tier only)", got)
+	}
+	if unref, err := store.UnreferencedBlobs(ctx); err != nil {
+		t.Fatalf("UnreferencedBlobs() error = %v", err)
+	} else if containsString(unref, orphanRef.SHA256) {
+		t.Fatalf("UnreferencedBlobs() = %v, refcount-gated query must MISS the refcount-1 orphan", unref)
+	}
+
+	// Still-present: a full/blob_present=1 revision must NOT be an orphan.
+	presentRef, err := blobs.Put(ctx, []byte("present save bytes"))
+	if err != nil {
+		t.Fatalf("Put(present) error = %v", err)
+	}
+	if _, err := store.RecordRevision(ctx, RevisionInput{
+		BlobRef:     presentRef,
+		ScriptRunID: run.ID,
+	}); err != nil {
+		t.Fatalf("RecordRevision(present) error = %v", err)
+	}
+
+	// Dedup-shared: one full + one mirror row of the same sha. The bytes are still
+	// needed by the full row, so the sha must NOT be an orphan even though a
+	// mirror_only row of it exists.
+	sharedRef, err := blobs.Put(ctx, []byte("dedup shared save bytes"))
+	if err != nil {
+		t.Fatalf("Put(shared) error = %v", err)
+	}
+	sharedFull, err := store.RecordRevision(ctx, RevisionInput{
+		BlobRef:     sharedRef,
+		ScriptRunID: run.ID,
+	})
+	if err != nil {
+		t.Fatalf("RecordRevision(shared full) error = %v", err)
+	}
+	sharedMirror, err := store.RecordRevision(ctx, RevisionInput{
+		BlobRef:     sharedRef,
+		ScriptRunID: run.ID,
+	})
+	if err != nil {
+		t.Fatalf("RecordRevision(shared mirror) error = %v", err)
+	}
+	_ = sharedFull
+	if err := store.MarkMirrorOnly(ctx, sharedMirror.ID); err != nil {
+		t.Fatalf("MarkMirrorOnly(shared mirror) error = %v", err)
+	}
+
+	orphans, err := store.OrphanedBlobs(ctx)
+	if err != nil {
+		t.Fatalf("OrphanedBlobs() error = %v", err)
+	}
+	shas := orphanedSHAs(orphans)
+	if !containsString(shas, orphanRef.SHA256) {
+		t.Fatalf("OrphanedBlobs() = %v, must include the refcount-1 evicted orphan %s", shas, orphanRef.SHA256)
+	}
+	if containsString(shas, presentRef.SHA256) {
+		t.Fatalf("OrphanedBlobs() = %v, must exclude still-present sha %s", shas, presentRef.SHA256)
+	}
+	if containsString(shas, sharedRef.SHA256) {
+		t.Fatalf("OrphanedBlobs() = %v, must exclude dedup-shared sha %s (a full row still needs it)", shas, sharedRef.SHA256)
+	}
+
+	// One representative row per orphan sha (MIN(id) collapse): the orphan sha
+	// appears exactly once.
+	count := 0
+	for _, sha := range shas {
+		if sha == orphanRef.SHA256 {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("orphan sha %s appears %d times, want exactly one representative row", orphanRef.SHA256, count)
+	}
+}

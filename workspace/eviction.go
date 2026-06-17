@@ -232,8 +232,10 @@ func (w *Workspace) EvictRevisionBlob(ctx context.Context, revisionID int64) err
 // A Delete error after a successful commit is a SOFT error: the revision is
 // correctly mirror_only and there is nothing to roll back; the orphan bytes are
 // reconcile/G3's to sweep. It is recorded in result.DeleteErrors (when result is
-// non-nil) and also returned so the single-revision caller sees it, but it does
-// NOT undo the catalog.
+// non-nil) but the core returns (false, nil), NOT the soft error — the catalog is
+// not undone. The public EvictRevisionBlob wrapper passes result=nil, so it sees
+// only that no bytes were deleted (returns nil) and leaves the orphan for G3's
+// GCUnreferencedBlobs to sweep.
 func (w *Workspace) evictRevisionBlobLocked(ctx context.Context, revisionID int64, result *EvictResult) (bool, error) {
 	// 1. Catalog flip, committed and fsynced, with the head/refcount gates.
 	if err := w.store().EvictRevisionBlob(ctx, revisionID); err != nil {
