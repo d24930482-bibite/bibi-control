@@ -76,7 +76,9 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("revisionstore: path is required")
 	}
 
-	db, err := sql.Open("sqlite", path)
+	// foreign_keys is connection-scoped in SQLite, so it must be set per
+	// connection via the DSN rather than relying on a one-time migration exec.
+	db, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(1)")
 	if err != nil {
 		return nil, err
 	}

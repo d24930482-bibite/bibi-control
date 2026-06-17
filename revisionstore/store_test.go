@@ -193,6 +193,37 @@ func TestStoreLookupMissingRevision(t *testing.T) {
 	}
 }
 
+func TestStoreRejectsRevisionWithMissingScriptRun(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	store, err := Open(filepath.Join(dir, "metadata.sqlite"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	blobs, err := blobstore.NewFSStore(filepath.Join(dir, "blobs"), blobstore.WithInlineThreshold(0))
+	if err != nil {
+		t.Fatalf("NewFSStore() error = %v", err)
+	}
+	defer blobs.Close()
+
+	ref, err := blobs.Put(ctx, []byte("orphan save bytes"))
+	if err != nil {
+		t.Fatalf("Put() error = %v", err)
+	}
+
+	_, err = store.RecordRevision(ctx, RevisionInput{
+		SourcePath:  "/saves/orphan.zip",
+		BlobRef:     ref,
+		ScriptRunID: 999, // no such script run
+	})
+	if err == nil {
+		t.Fatalf("RecordRevision() with missing script_run_id succeeded, want foreign-key rejection")
+	}
+}
+
 func assertRawInlineBlob(t *testing.T, ctx context.Context, store *Store, revisionID int64, want []byte) {
 	t.Helper()
 
