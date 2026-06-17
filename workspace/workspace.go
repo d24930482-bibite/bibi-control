@@ -234,14 +234,20 @@ func openDuck(ctx context.Context, root, id string) (*sql.DB, error) {
 // safe on a nil or partially constructed workspace, and idempotent (handles are
 // niled after closing so a second Close is a no-op).
 //
-// Later tickets (C2/D1) drain the worlds working set (Unload) and stop the node
-// runtimes here before closing the DuckDB handle; B2's maps are empty so there
-// is nothing to drain.
+// D1 drain: active node runtimes are killed and closed before the DuckDB /
+// registry handles are torn down. Status rows are not updated here (the
+// registry handle may already be closing); best-effort kill is the contract.
 func (w *Workspace) Close() error {
 	if w == nil {
 		return nil
 	}
 	var errs []error
+	// D1: drain active nodes before closing the DB handles.
+	for nodeID, rt := range w.nodes {
+		errs = append(errs, rt.Kill())
+		errs = append(errs, rt.Close())
+		delete(w.nodes, nodeID)
+	}
 	if w.duckDB != nil {
 		errs = append(errs, w.duckDB.Close())
 		w.duckDB = nil
