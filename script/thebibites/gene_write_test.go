@@ -222,12 +222,14 @@ func TestGeneWriteViaScript(t *testing.T) {
 	tmp := filepath.Join(t.TempDir(), "out.zip")
 
 	program := []byte(fmt.Sprintf(`
+s = open()
+
 def mutate():
-    for b in save.bibites:
+    for b in s.bibites:
         if b.entry_name == %q:
             b.genes[%q] = 88.0
             break
-    return save.commit(%q)
+    return s.commit(%q)
 
 print("staged=%%d" %% mutate())
 `, entry, gene, tmp))

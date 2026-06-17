@@ -402,12 +402,14 @@ func TestSubCollectionAppendViaScript(t *testing.T) {
 	tmp := filepath.Join(t.TempDir(), "out.zip")
 
 	program := []byte(fmt.Sprintf(`
+s = open()
+
 def mutate():
-    for b in save.bibites:
+    for b in s.bibites:
         if b.entry_name == %q:
             b.synapses.append(enabled=True, innovation=42, node_in=0, node_out=1, weight=0.75)
             break
-    return save.commit(%q)
+    return s.commit(%q)
 
 print("staged=%%d" %% mutate())
 `, name, tmp))

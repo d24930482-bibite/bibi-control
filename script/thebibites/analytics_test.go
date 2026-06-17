@@ -474,11 +474,12 @@ func TestFlushMirrorNoop(t *testing.T) {
 func TestAnalyticsViaScript(t *testing.T) {
 	ls := loadFixture(t)
 	program := []byte(`
-rows = save.sql("SELECT species_id, energy FROM bibites")
+s = open()
+rows = s.sql("SELECT species_id, energy FROM bibites")
 print("rows=%d" % len(rows))
-med = save.bibites.median("energy")
+med = s.bibites.median("energy")
 print("median=%s" % str(med))
-groups = save.bibites.group_by("species_id").mean("energy")
+groups = s.bibites.group_by("species_id").mean("energy")
 print("groups=%d" % len(groups))
 host = median([1.0, 2.0, 3.0, 4.0])
 print("host=%s" % str(host))
