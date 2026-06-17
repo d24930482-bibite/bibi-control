@@ -1,12 +1,16 @@
 package thebibites
 
 // This file defines the seam for cross-save append (the "query save A, store,
-// append into save B" flow). Only the destination-side primitives are
-// implemented today: StageAppend / StageDelete for typed JSON arrays,
+// append into save B" flow). The destination-side primitives live in session.go
+// and sqlref.go: StageAppend / StageDelete for typed JSON arrays,
 // StageAppendBibite / StageDeleteBibite for whole entries, and the SQL-ref
-// resolvers SQLAppend / SQLDelete. Coordinating two saves, extracting the
-// source element, and re-linking identity/species is intentionally left
-// unimplemented until a real multi-save workspace exists.
+// resolvers SQLAppend / SQLDelete. The cross-save coordinator that drives them —
+// opening a source and destination Session, extracting the source element, and
+// re-linking identity/species — is the *transfer type in transfer.go and
+// transfer_identity.go (constructor NewTransfer). This stays a pure-archive
+// mechanism: it never opens a database, touches a revision store, or commits a
+// world head. The workspace layer (a higher package) decides when to Commit and
+// how to advance a head; the interface below is the mockable seam it depends on.
 
 // CollectedElement is one value pulled from a source save by a query and held
 // in a store between the query and a later append. JSON is the array element or
@@ -17,14 +21,12 @@ type CollectedElement struct {
 	JSON       any
 }
 
-// Workspace is the cross-save append seam: it would open multiple saves, expose
-// a destination Session, and append collected source elements into it. It is
-// deliberately not implemented here; the destination Session already supports
-// every append/delete primitive a Workspace would drive.
-//
-// TODO(cross-save): implement multi-session coordination plus a source-element
-// extractor that produces EntryPayload / array-element JSON, then feed it into
-// the destination session's StageSQLAppend / StageAppendBibite.
+// Workspace is the cross-save append seam: it opens multiple saves, exposes a
+// destination Session, and appends collected source elements into it. The
+// concrete implementer is *transfer (transfer.go); this interface stays so the
+// workspace layer can mock the coordinator. The settings-copy path is a scalar
+// set rather than an append, so it lives on *transfer (SetFromCollected) and is
+// not part of this interface.
 type Workspace interface {
 	// Destination returns the session that collected elements are appended into.
 	Destination() *Session
