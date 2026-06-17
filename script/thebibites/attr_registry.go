@@ -135,12 +135,24 @@ func buildRegistry() {
 	}
 }
 
+// nonScalarColumns are projected columns excluded from the friendly scalar
+// attribute surface. save_id is pure locator noise. raw_json is the whole
+// serialized blob for the row (no SQLRefPath, so never writable) — exposing it as
+// a readable attribute (e.g. save.zones[i].raw_json) would leak the entire payload
+// as a friendly attr, so it is excluded like save_id. Shared across the entity,
+// zone, and pellet registries that go through tableScalarSpecs.
+var nonScalarColumns = map[string]bool{
+	"save_id":  true,
+	"raw_json": true,
+}
+
 // tableScalarSpecs derives the friendly scalar attribute specs for one normalized
 // table straight from tb.NormalizedTables (no hand-maintained column allowlist):
-// every projected column except save_id becomes a readable attrSpec, writable iff
-// the field carries an sqlref path. Shared by the entity registry (buildRegistry)
-// and the zone/pellet registries. The map key and friendly column default to the
-// generated DuckDB column; callers apply any alias overrides afterward.
+// every projected column except the nonScalarColumns (save_id, raw_json) becomes a
+// readable attrSpec, writable iff the field carries an sqlref path. Shared by the
+// entity registry (buildRegistry) and the zone/pellet registries. The map key and
+// friendly column default to the generated DuckDB column; callers apply any alias
+// overrides afterward.
 func tableScalarSpecs(table string) map[string]attrSpec {
 	var spec tb.NormalizedTableSpec
 	found := false
@@ -161,8 +173,8 @@ func tableScalarSpecs(table string) map[string]attrSpec {
 	}
 	attrs := make(map[string]attrSpec, len(spec.Fields))
 	for _, field := range spec.Fields {
-		if field.Column == "save_id" {
-			continue // pure locator noise
+		if nonScalarColumns[field.Column] {
+			continue // pure locator noise (save_id) / whole-row blob (raw_json)
 		}
 		sf, ok := rowType.FieldByName(field.Field)
 		if !ok {
