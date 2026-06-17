@@ -103,8 +103,11 @@ func (c *GeneCollection) Get(k starlark.Value) (starlark.Value, bool, error) {
 // SetKey implements b.genes["Name"] = v: stage a guarded gene-value write. The
 // value is validated against the gene's scalar type, written through to the
 // in-memory GeneRow (so b.gene/b.genes read it back), staged on the session, and
-// mirrored into DuckDB keyed by (entry_name, gene_name) so an in-run SQL read
-// observes it too (mirror-everything). Unknown gene names are rejected — genes are
+// mirrored into DuckDB keyed by (entry_name, path) so an in-run SQL read
+// observes it too (mirror-everything). path is keyed (not gene_name) because the
+// two gene nesting levels flatten into one table sharing the gene_name namespace,
+// so a leaf-name collision would otherwise rewrite both rows; path is unique per
+// gene entry. Unknown gene names are rejected — genes are
 // keyed by the names already present on the entity, not created here.
 func (c *GeneCollection) SetKey(k, v starlark.Value) error {
 	name, ok := starlark.AsString(k)
@@ -160,7 +163,7 @@ func (ls *LoadedSave) setGeneValue(kind string, row *tb.GeneRow, v starlark.Valu
 	ls.stagedOps++
 	ls.recordMirrorRow(table, column, sqlType, []mirrorLocator{
 		{column: "entry_name", value: row.EntryName},
-		{column: "gene_name", value: row.GeneName},
+		{column: "path", value: row.Path},
 	}, staged)
 	return nil
 }

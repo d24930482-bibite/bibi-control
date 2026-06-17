@@ -132,6 +132,74 @@ func TestGeneWriteMirrorEverything(t *testing.T) {
 	}
 }
 
+// geneNumberSQLByPath reads one gene's number_value back through DuckDB keyed by
+// path, so colliding leaf gene_names across the two gene nesting levels are
+// distinguishable — exactly the discriminator the mirror keys on.
+func geneNumberSQLByPath(t *testing.T, ls *LoadedSave, entry, path string) float64 {
+	t.Helper()
+	rows, err := ls.query(
+		"SELECT number_value FROM bibite_genes WHERE save_id = ? AND entry_name = ? AND path = ?",
+		ls.saveID, entry, path)
+	if err != nil {
+		t.Fatalf("gene query: %v", err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		t.Fatalf("no gene row for %s/%s", entry, path)
+	}
+	var v float64
+	if err := rows.Scan(&v); err != nil {
+		t.Fatalf("scan gene: %v", err)
+	}
+	return v
+}
+
+// TestGeneWriteMirrorKeyedByPath: when two gene rows on one entity share a leaf
+// gene_name but differ by path (the two JSON nesting levels flatten into one table
+// sharing the gene_name namespace), an in-run write to one mirrors exactly that
+// path's row in DuckDB and leaves the sibling untouched. Keying the mirror on
+// gene_name instead would rewrite both rows — the bug this guards.
+func TestGeneWriteMirrorKeyedByPath(t *testing.T) {
+	ls := loadFixture(t)
+	entry, gene := firstNumberGene(t, ls)
+
+	// Force a leaf-name collision: clone the target row under a second, distinct
+	// path with the SAME gene_name, in both the in-memory backing and DuckDB.
+	set := ls.genesFor("bibite", entry)
+	idx := set.byName[gene]
+	target := set.backing[idx]
+	targetPath := target.Path
+
+	sibling := target
+	sibling.Path = target.Path + "::collision"
+	const siblingBaseline = -7.0
+	sibling.NumberValue = siblingBaseline
+	set.backing = append(set.backing, sibling)
+	// Re-point byName at the appended sibling's backing index, then back, so both
+	// indices are valid; the write below uses the original target index explicitly.
+	siblingIdx := len(set.backing) - 1
+	set.order = append(set.order, siblingIdx)
+
+	_ = geneNumberSQL(t, ls, entry, gene) // open DuckDB (snapshot)
+	if _, err := ls.db.ExecContext(context.Background(),
+		"INSERT INTO bibite_genes (save_id, entry_name, gene_name, path, number_value) VALUES (?, ?, ?, ?, ?)",
+		ls.saveID, entry, gene, sibling.Path, siblingBaseline); err != nil {
+		t.Fatalf("seed sibling row: %v", err)
+	}
+
+	const want = 555.5
+	if err := ls.setGeneValue("bibite", &set.backing[idx], starlark.Float(want)); err != nil {
+		t.Fatalf("setGeneValue: %v", err)
+	}
+
+	if got := geneNumberSQLByPath(t, ls, entry, targetPath); got != want {
+		t.Errorf("target path gene = %v, want %v (mirror missed target)", got, want)
+	}
+	if got := geneNumberSQLByPath(t, ls, entry, sibling.Path); got != siblingBaseline {
+		t.Errorf("sibling path gene = %v, want %v (mirror keyed on gene_name, not path)", got, siblingBaseline)
+	}
+}
+
 // TestGeneWriteUnknownRejected: writing an unknown gene name is rejected and stages
 // nothing (genes are addressed by names already present, not created).
 func TestGeneWriteUnknownRejected(t *testing.T) {
