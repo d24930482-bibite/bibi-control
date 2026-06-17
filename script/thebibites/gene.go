@@ -166,7 +166,11 @@ func (ls *LoadedSave) setGeneValue(kind string, row *tb.GeneRow, v starlark.Valu
 	return nil
 }
 
-// geneTable maps an entity kind to its normalized gene table.
+// geneTable maps an entity kind to its normalized gene table. Deliberate small
+// hand-map (not derived like identityTable): gene tables are 1:many, so they are
+// intentionally excluded from entityTables, and the kind->gene-table source lives
+// in another file/package — deriving it here would mean a cross-file dependency
+// for a 2-entry loud-default map. The switch stays the localized source of truth.
 func geneTable(kind string) (string, error) {
 	switch kind {
 	case "bibite":
@@ -178,7 +182,16 @@ func geneTable(kind string) (string, error) {
 	}
 }
 
-func (c *GeneCollection) Len() int { return len(c.rows()) }
+// Len counts genes without materializing a copy of every row. Starlark calls
+// Len/Truth opportunistically (truthiness tests, for-loop setup), so this stays
+// off the allocating rows() path used for iteration/reads.
+func (c *GeneCollection) Len() int {
+	set := c.ls.genesFor(c.kind, c.entryName)
+	if set == nil {
+		return 0
+	}
+	return len(set.order)
+}
 
 func (c *GeneCollection) Iterate() starlark.Iterator {
 	return &geneIterator{rows: c.rows()}
