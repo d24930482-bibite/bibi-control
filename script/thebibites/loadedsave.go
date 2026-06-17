@@ -116,7 +116,10 @@ type geneSet struct {
 }
 
 // Load parses and normalizes a save file once and prepares it for scripting. It
-// does not open DuckDB.
+// does not open DuckDB. The partition key (saveID) is derived from the archive
+// hash (falling back to the file name); analytics open a fresh in-memory DuckDB
+// lazily on the first query. For the workspace-driven seam that supplies an
+// explicit world id and a shared handle, use LoadInto.
 func Load(path string) (*LoadedSave, error) {
 	archive, err := tb.ParseFile(path, nil)
 	if err != nil {
@@ -126,16 +129,53 @@ func Load(path string) (*LoadedSave, error) {
 	if saveID == "" {
 		saveID = archive.FileName
 	}
+	return newLoadedSave(path, saveID, archive, nil), nil
+}
+
+// LoadInto parses and normalizes a save file for scripting under an explicit,
+// stable world id (the working-partition key) and a shared, caller-owned
+// *sql.DB. The workspace drives this seam: it pins the partition key (rather
+// than deriving it from the file hash) so the in-memory ExtractedSave rows that
+// back mirror locators carry the same save_id as the DuckDB rows the workspace
+// seeded under worldID; and it injects a per-workspace DuckDB handle reused
+// across worlds, so the lazy openDB short-circuits the in-memory import.
+//
+// B1 wires the seam only: it does NOT import any rows into db — the workspace
+// (C1/C3) owns when/where the world's history and working partitions are
+// seeded. db is caller-owned; LoadInto never closes it.
+func LoadInto(path, worldID string, db *sql.DB) (*LoadedSave, error) {
+	if worldID == "" {
+		return nil, fmt.Errorf("load save %q: worldID must not be empty", path)
+	}
+	if db == nil {
+		return nil, fmt.Errorf("load save %q: db must not be nil", path)
+	}
+	archive, err := tb.ParseFile(path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("load save %q: %w", path, err)
+	}
+	return newLoadedSave(path, worldID, archive, db), nil
+}
+
+// newLoadedSave builds a LoadedSave from an already-parsed archive under the
+// given partition key and indexes its tables. db is the analytics handle: nil
+// for the standalone Load path (DuckDB opens lazily and in-memory on first
+// query), or a shared caller-owned handle for the workspace LoadInto seam (the
+// lazy open short-circuits to this handle and never imports in-memory). saveID
+// flows into tb.ExtractTables so the in-memory rows and ExtractedSave.Archive
+// are stamped with the same key the analytics path filters on.
+func newLoadedSave(path, saveID string, archive *tb.Archive, db *sql.DB) *LoadedSave {
 	ls := &LoadedSave{
 		path:       path,
 		saveID:     saveID,
 		archive:    archive,
 		tables:     tb.ExtractTables(saveID, archive),
+		db:         db,
 		session:    mutator.NewSession(archive),
 		willCommit: true,
 	}
 	ls.buildAccess()
-	return ls, nil
+	return ls
 }
 
 // buildAccess indexes every table referenced by entityTables by entry_name so
@@ -376,6 +416,13 @@ func (ls *LoadedSave) allocZoneID() (int64, bool) {
 // analytical query, then reuses the handle. DuckDB therefore opens at most once
 // per run. The import is the in-memory ExtractedSave already parsed at Load time —
 // no reparse. A run is single-threaded (one Starlark thread), so no locking.
+//
+// When ls.db is already non-nil it is returned as-is without importing: this is
+// the LoadInto seam, where the workspace injects a shared, caller-owned handle
+// whose rows are already seeded under save_id = ls.saveID. The early return must
+// NOT import (the workspace owns seeding) and must NOT increment dbOpenCount (the
+// counter measures only the in-memory lazy open, which the injected path
+// bypasses). LoadedSave never closes ls.db — the caller owns its lifetime.
 func (ls *LoadedSave) openDB(ctx context.Context) (*sql.DB, error) {
 	if ls.db != nil {
 		return ls.db, nil
