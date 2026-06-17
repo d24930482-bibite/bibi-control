@@ -187,7 +187,14 @@ func asInt64(v any) (int64, bool) {
 	case int64:
 		return x, true
 	case float64:
-		if x == math.Trunc(x) {
+		// Only an integral float maps to an int64. Reject values that fall
+		// outside the int64 range before the conversion: float64(int64) is
+		// implementation-defined on overflow, so e.g. 1e19 (> MaxInt64) would
+		// otherwise silently truncate to a garbage int rather than being
+		// rejected. float64(math.MaxInt64) rounds up to 2^63 (one past the max),
+		// so the upper bound is a strict <; float64(math.MinInt64) == -2^63 is
+		// exactly representable and a valid int64, so the lower bound is >=.
+		if x == math.Trunc(x) && x >= float64(math.MinInt64) && x < float64(math.MaxInt64) {
 			return int64(x), true
 		}
 		return 0, false
