@@ -16,6 +16,17 @@ type EntityCollection struct {
 	ls    *LoadedSave
 	kind  string
 	where string // raw, un-rewritten predicate; "" means unfiltered
+
+	// resolved memoizes the predicate push-down for Len/Iterate/Truth on a
+	// filtered collection so a len()+iteration pair runs the query once. Only set
+	// for a filtered collection (where != ""); unfiltered uses the identity table's
+	// in-memory order directly. resolveErr captures a push-down failure (e.g. an
+	// unknown column in the predicate); since Len/Iterate cannot return an error,
+	// it is surfaced through the iterator and treated as an empty (NOT full) set —
+	// a filtered collection never silently iterates the whole population.
+	resolved    []string
+	resolvedSet bool
+	resolveErr  error
 }
 
 var (
@@ -149,21 +160,39 @@ func (c *EntityCollection) identityAccess() *tableAccess {
 	return c.ls.access[tables[0]]
 }
 
+// entryNames returns the entry_names this collection enumerates. An unfiltered
+// collection (where == "") uses the identity table's in-memory order — the fast
+// path, no DuckDB. A filtered collection resolves the matching entry_names by
+// pushing the predicate down through matchingEntryNames (the same builder bulk
+// delete uses), memoized so Len()+Iterate() share one query. On a push-down error
+// it returns nil + the error so the caller treats the collection as empty rather
+// than silently enumerating the whole population.
+func (c *EntityCollection) entryNames() ([]string, error) {
+	if c.where == "" {
+		ta := c.identityAccess()
+		if ta == nil {
+			return nil, nil
+		}
+		return ta.order, nil
+	}
+	if !c.resolvedSet {
+		c.resolved, c.resolveErr = c.ls.matchingEntryNames(c.kind, c.where)
+		c.resolvedSet = true
+	}
+	return c.resolved, c.resolveErr
+}
+
 func (c *EntityCollection) Len() int {
-	ta := c.identityAccess()
-	if ta == nil {
+	names, err := c.entryNames()
+	if err != nil {
 		return 0
 	}
-	return len(ta.order)
+	return len(names)
 }
 
 func (c *EntityCollection) Iterate() starlark.Iterator {
-	ta := c.identityAccess()
-	var names []string
-	if ta != nil {
-		names = ta.order
-	}
-	return &entityIterator{ls: c.ls, kind: c.kind, names: names}
+	names, err := c.entryNames()
+	return &entityIterator{ls: c.ls, kind: c.kind, names: names, err: err}
 }
 
 type entityIterator struct {
@@ -171,9 +200,13 @@ type entityIterator struct {
 	kind  string
 	names []string
 	pos   int
+	err   error // push-down resolution error; iteration yields nothing
 }
 
 func (it *entityIterator) Next(p *starlark.Value) bool {
+	if it.err != nil {
+		return false
+	}
 	if it.pos >= len(it.names) {
 		return false
 	}

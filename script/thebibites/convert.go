@@ -3,6 +3,7 @@ package thebibites
 import (
 	"fmt"
 	"math"
+	"math/big"
 	"reflect"
 
 	"go.starlark.net/starlark"
@@ -72,6 +73,14 @@ func fromSQLValue(v any) (starlark.Value, error) {
 		return starlark.Float(float64(x)), nil
 	case float64:
 		return starlark.Float(x), nil
+	case *big.Int:
+		// DuckDB returns HUGEINT (128-bit) for sum() over an integer column (and
+		// for raw HUGEINT columns); the duckdb driver scans those into *big.Int.
+		// MakeBigInt yields an arbitrary-precision Starlark Int.
+		if x == nil {
+			return starlark.None, nil
+		}
+		return starlark.MakeBigInt(x), nil
 	default:
 		return nil, fmt.Errorf("unsupported SQL value type %T", v)
 	}

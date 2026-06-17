@@ -160,6 +160,23 @@ func aggExpr(kind string, agg aggCall) (expr, table string, err error) {
 	return expr, table, nil
 }
 
+// oneToManyTables is the set of tables registered as 1:many element
+// sub-collections (brain nodes/synapses, stomach contents) across all entity
+// kinds. fromClause asserts no such table is scalar-joined: a LEFT JOIN against a
+// 1:many table multiplies identity rows and silently skews every count/sum/median.
+// Today entityTables (1:1) and entitySubCollections (1:many) are disjoint by
+// design; this turns a future save-format revision that lists a 1:many table in
+// entityTables into a loud, localized error instead of wrong analytics.
+func oneToManyTables() map[string]bool {
+	out := map[string]bool{}
+	for _, subs := range entitySubCollections {
+		for _, info := range subs {
+			out[info.table] = true
+		}
+	}
+	return out
+}
+
 // fromClause builds "FROM <identity> [LEFT JOIN <subtable> ON …]" including only
 // the sub-tables actually referenced (in entityTables order, for determinism).
 // Every sub-table is 1:1 with identity on (save_id, entry_name), so LEFT JOIN
@@ -169,6 +186,7 @@ func fromClause(kind string, needed map[string]bool) (string, error) {
 	if len(tables) == 0 {
 		return "", fmt.Errorf("unknown entity kind %q", kind)
 	}
+	oneToMany := oneToManyTables()
 	identity := tables[0]
 	var b strings.Builder
 	b.WriteString("FROM ")
@@ -176,6 +194,10 @@ func fromClause(kind string, needed map[string]bool) (string, error) {
 	for _, t := range tables[1:] {
 		if !needed[t] {
 			continue
+		}
+		if oneToMany[t] {
+			return "", fmt.Errorf("internal: refusing to scalar-join 1:many table %q for %s "+
+				"(would inflate aggregate rows); it must be exposed as an element sub-collection, not a scalar attribute table", t, kind)
 		}
 		b.WriteString(" LEFT JOIN ")
 		b.WriteString(quoteIdent(t))

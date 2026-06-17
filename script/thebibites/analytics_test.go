@@ -311,6 +311,80 @@ func TestWhereCollisionPredicate(t *testing.T) {
 	}
 }
 
+// TestFilteredCollectionLenAndIterate asserts a filtered collection honors its
+// where predicate on len(), iteration, and truth-test, and that all three agree
+// with .count() — the F2 regression (previously Len/Iterate walked the full
+// identity table, disagreeing with the predicate-aware .count()).
+func TestFilteredCollectionLenAndIterate(t *testing.T) {
+	ls := loadFixture(t)
+
+	// Pick a threshold that actually partitions the population so the predicate is
+	// non-trivial (not all rows, not zero rows).
+	energies := bibiteEnergies(ls)
+	threshold := medianOf(append([]float64(nil), energies...))
+	var wantNames []string
+	for _, b := range ls.tables.Bibites {
+		if b.Energy > threshold {
+			wantNames = append(wantNames, b.EntryName)
+		}
+	}
+	if len(wantNames) == 0 || len(wantNames) == len(ls.tables.Bibites) {
+		t.Fatalf("threshold %v does not partition the population (matched %d of %d)",
+			threshold, len(wantNames), len(ls.tables.Bibites))
+	}
+
+	bibites := &EntityCollection{ls: ls, kind: "bibite"}
+	narrowedV, err := callMethod(t, bibites, "where",
+		starlark.String(fmt.Sprintf("energy > %v", threshold)))
+	if err != nil {
+		t.Fatalf("where: %v", err)
+	}
+	narrowed := narrowedV.(*EntityCollection)
+
+	// Len() honors the predicate.
+	if got := narrowed.Len(); got != len(wantNames) {
+		t.Errorf("filtered Len()=%d, want %d", got, len(wantNames))
+	}
+
+	// Truth() reflects the filtered (non-empty) set.
+	if narrowed.Truth() != starlark.True {
+		t.Errorf("filtered Truth()=false, want true (set is non-empty)")
+	}
+
+	// .count() agrees with Len().
+	countV, err := callMethod(t, narrowed, "count")
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if int(mustFloat(t, countV)) != len(wantNames) {
+		t.Errorf("filtered count()=%v, want %d", mustFloat(t, countV), len(wantNames))
+	}
+
+	// Iteration yields exactly the matching entities (compared as a set, since the
+	// push-down order is unspecified).
+	want := make(map[string]bool, len(wantNames))
+	for _, n := range wantNames {
+		want[n] = true
+	}
+	got := make(map[string]bool)
+	for _, e := range collect(t, narrowed) {
+		got[e.entryName] = true
+	}
+	if len(got) != len(want) {
+		t.Errorf("iteration yielded %d entities, want %d", len(got), len(want))
+	}
+	for n := range want {
+		if !got[n] {
+			t.Errorf("iteration missing matching entity %q", n)
+		}
+	}
+	for n := range got {
+		if !want[n] {
+			t.Errorf("iteration yielded non-matching entity %q", n)
+		}
+	}
+}
+
 // TestRewritePredicate unit-tests the identifier tokenizer directly: friendly
 // columns get qualified, keywords/functions/literals are left intact.
 func TestRewritePredicate(t *testing.T) {
