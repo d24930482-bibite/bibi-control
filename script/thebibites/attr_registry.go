@@ -69,23 +69,41 @@ var entityTables = map[string][]string{
 	},
 }
 
+// transformAliases is the shared friendly alias -> source column mapping for the
+// generated transform_* position/rotation columns. It lives once here and is merged
+// into every entity's overrides (and the pellet overrides, which adds transform_scale),
+// so the bibite/egg/pellet short position surface stays defined in a single place.
+var transformAliases = map[string]string{
+	"position_x": "transform_position_x",
+	"position_y": "transform_position_y",
+	"rotation":   "transform_rotation",
+}
+
 // overrides renames/aliases generated column names to friendlier ones, keyed by
 // entity kind then friendly alias -> source column. It is the only hand-edited
 // surface in the registry and is intentionally tiny. The friendly alias becomes
 // the registry key + b.<name> surface; spec.sourceColumn stays the generated
 // column so SQL/mutator/mirror/guard keying is unaffected. (Gene-backed aliases
 // like "diet" are not added here because genes resolve through gene(), not columns.)
+// Each kind's map is seeded from the shared transformAliases so the position/rotation
+// triple is not hand-listed per kind.
 var overrides = map[string]map[string]string{
-	"bibite": {
-		"position_x": "transform_position_x",
-		"position_y": "transform_position_y",
-		"rotation":   "transform_rotation",
-	},
-	"egg": {
-		"position_x": "transform_position_x",
-		"position_y": "transform_position_y",
-		"rotation":   "transform_rotation",
-	},
+	"bibite": mergeAliases(transformAliases),
+	"egg":    mergeAliases(transformAliases),
+}
+
+// mergeAliases returns a fresh alias map containing every entry from the given
+// alias maps (later maps win on key collision). Used to compose the shared
+// transformAliases into per-kind / pellet override maps without mutating the
+// shared map.
+func mergeAliases(srcs ...map[string]string) map[string]string {
+	out := make(map[string]string)
+	for _, src := range srcs {
+		for alias, source := range src {
+			out[alias] = source
+		}
+	}
+	return out
 }
 
 var (
@@ -180,14 +198,12 @@ func applyOverrides(attrs map[string]attrSpec, aliases map[string]string) {
 
 // pelletOverrides aliases the generated transform_* pellet columns to the short
 // position_x/position_y/rotation/scale surface used for bibites/eggs, keeping the
-// pellet scalar surface consistent across entities. Tiny and hand-edited, like
-// overrides; the columns themselves stay generated.
-var pelletOverrides = map[string]string{
-	"position_x": "transform_position_x",
-	"position_y": "transform_position_y",
-	"rotation":   "transform_rotation",
-	"scale":      "transform_scale",
-}
+// pellet scalar surface consistent across entities. It reuses the shared
+// transformAliases (position/rotation triple) and adds the pellet-only scale alias,
+// so the triple is not re-listed; the columns themselves stay generated.
+var pelletOverrides = mergeAliases(transformAliases, map[string]string{
+	"scale": "transform_scale",
+})
 
 var (
 	zoneRegOnce   sync.Once
@@ -214,6 +230,18 @@ func pelletRegistry() map[string]attrSpec {
 		pelletRegMap = m
 	})
 	return pelletRegMap
+}
+
+// saveFieldByTable derives the normalized table -> ExtractedSave field name lookup
+// straight from tb.NormalizedTables (spec.SaveField). It is the single source for
+// "which ExtractedSave slice backs this table", shared by buildAccess (loadedsave.go)
+// so that mapping is not re-derived inline. No hand-maintained list.
+func saveFieldByTable() map[string]string {
+	out := make(map[string]string, len(tb.NormalizedTables))
+	for _, spec := range tb.NormalizedTables {
+		out[spec.Table] = spec.SaveField
+	}
+	return out
 }
 
 // rowTypeFor returns the element struct type of the ExtractedSave field named

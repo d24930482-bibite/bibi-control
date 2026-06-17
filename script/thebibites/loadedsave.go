@@ -84,8 +84,12 @@ type LoadedSave struct {
 	// appends, lazily seeded from max(existing zone id)+1 so cloned zones do not
 	// collide on id with the template or each other within a run. Zone-group
 	// membership and other id references are not reconciled (see zones.go).
+	// zoneIDNextReady records that the one-time seeding scan of SettingsZones ran;
+	// zoneIDNone records that the scan found no id-bearing zone, so allocZoneID
+	// reports (0,false) on every later call WITHOUT re-scanning.
 	zoneIDNext      int64
 	zoneIDNextReady bool
+	zoneIDNone      bool
 
 	// dbOpenCount / rowsMaterialized / flushStmtCount are test instrumentation:
 	// the analytics path opens DuckDB at most once per run and never materializes
@@ -141,10 +145,7 @@ func (ls *LoadedSave) buildAccess() {
 	extracted := reflect.ValueOf(ls.tables)
 	extractedType := extracted.Type()
 
-	saveFieldByTable := make(map[string]string)
-	for _, spec := range tb.NormalizedTables {
-		saveFieldByTable[spec.Table] = spec.SaveField
-	}
+	saveFields := saveFieldByTable()
 
 	seen := make(map[string]bool)
 	for _, tables := range entityTables {
@@ -153,7 +154,7 @@ func (ls *LoadedSave) buildAccess() {
 				continue
 			}
 			seen[table] = true
-			saveField, ok := saveFieldByTable[table]
+			saveField, ok := saveFields[table]
 			if !ok {
 				continue
 			}
@@ -359,11 +360,12 @@ func (ls *LoadedSave) allocZoneID() (int64, bool) {
 				}
 			}
 		}
-		if !any {
-			return 0, false
-		}
 		ls.zoneIDNext = max + 1
-		ls.zoneIDNextReady = true
+		ls.zoneIDNone = !any
+		ls.zoneIDNextReady = true // mark scanned BEFORE the id-less early return so it runs once
+	}
+	if ls.zoneIDNone {
+		return 0, false
 	}
 	id := ls.zoneIDNext
 	ls.zoneIDNext++
