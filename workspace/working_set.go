@@ -56,13 +56,11 @@ func (w *Workspace) Load(ctx context.Context, worldID string) (*thebibites.Loade
 		return nil, fmt.Errorf("workspace: get head revision for world %q: %w", worldID, err)
 	}
 
-	// 4. Blob-present guard (forward-compat with G4 blob eviction).
-	// A world's head is never evictable for well-formed workspaces, but we
-	// guard it anyway: C2 returns a plain error; G4 replaces it with the typed
-	// ErrNotRematerializable.
-	// G4: replace with ErrNotRematerializable
+	// 4. Blob-present guard (defense-in-depth; a well-formed world's head is
+	// never evictable, but guard anyway so a catalog-flipped head fails loud
+	// with the typed sentinel rather than an opaque blobstore miss downstream).
 	if !rev.BlobPresent {
-		return nil, fmt.Errorf("workspace: world %q head revision %d is mirror_only (blob evicted): cannot load", worldID, rev.ID)
+		return nil, notRematerializable(worldID, rev.ID, "load")
 	}
 
 	// 5. Fetch the head blob bytes from the content-addressed store.
