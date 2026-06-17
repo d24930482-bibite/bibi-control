@@ -581,7 +581,14 @@ func (s *Session) speciesHasOtherMembers(skipName string, removed []string, sid 
 // already absent — staleness here is not parser-validated, so a missing path
 // degrades quietly, consistent with the other delete-cascade helpers.
 func (s *Session) removeActiveSpecies(updates map[string]*entryUpdate, sid int64) error {
-	if s.archive.Entry(SpeciesEntryName) == nil {
+	entry := s.archive.Entry(SpeciesEntryName)
+	if entry == nil {
+		return nil
+	}
+	// A present-but-undecoded species entry (parser kept it after a
+	// json_decode_failed diagnostic) has no activeSpeciesList to reconcile.
+	// Degrade quietly rather than aborting the whole delete via entryUpdate.
+	if _, staged := updates[SpeciesEntryName]; !staged && entry.JSON == nil {
 		return nil
 	}
 	update, err := s.entryUpdate(updates, SpeciesTarget())

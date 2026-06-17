@@ -617,6 +617,44 @@ func TestStageDeleteReconcilesActiveSpecies(t *testing.T) {
 	})
 }
 
+// TestStageDeleteWithUndecodedSpeciesData covers F6: a species entry that is
+// present but has nil decoded JSON (the parser keeps it after a
+// json_decode_failed diagnostic). Deleting the last member of a species must
+// degrade quietly instead of aborting the whole delete in entryUpdate. We null
+// the decoded JSON directly to model that state deterministically, independent
+// of how the parser handles malformed bytes.
+func TestStageDeleteWithUndecodedSpeciesData(t *testing.T) {
+	archive := parseSpeciesArchive(t)
+	species := archive.Entry("speciesData.json")
+	if species == nil {
+		t.Fatalf("species entry missing from synthetic archive")
+	}
+	species.JSON = nil
+
+	session := NewSession(archive)
+	// bibite_0 is the last (only) member of species 1.
+	if err := session.StageDeleteBibite(BibiteRef{EntryName: "bibites/bibite_0.bb8", BodyID: 42}); err != nil {
+		t.Fatalf("StageDeleteBibite() error = %v", err)
+	}
+	if err := session.Apply(); err != nil {
+		t.Fatalf("Apply() error = %v, want quiet degrade on undecoded speciesData.json", err)
+	}
+	if session.Archive().Entry("bibites/bibite_0.bb8") != nil {
+		t.Fatalf("bibite entry still present after delete")
+	}
+	// Other entries remain intact; the undecoded species entry is left as-is.
+	if session.Archive().Entry("bibites/bibite_1.bb8") == nil {
+		t.Fatalf("unrelated bibite_1 missing after delete")
+	}
+	leftover := session.Archive().Entry("speciesData.json")
+	if leftover == nil {
+		t.Fatalf("species entry dropped by delete")
+	}
+	if leftover.JSON != nil {
+		t.Fatalf("species entry JSON = %v, want nil (left untouched)", leftover.JSON)
+	}
+}
+
 func parseChildLinkArchive(t *testing.T) *tb.Archive {
 	t.Helper()
 
