@@ -6,10 +6,10 @@ import (
 	"go.starlark.net/starlark"
 )
 
-// Save is the top-level Starlark binding (the predeclared `save` global). It
-// exposes read-only entity collections (save.bibites/save.eggs), analytics
-// (save.sql + collection push-down), the settings namespace (save.settings), and
-// commit (save.commit). save.zones/save.pellets attach here in P2.
+// Save is the top-level Starlark value returned by open(). It exposes read-only
+// entity collections (s.bibites/s.eggs), analytics (s.sql + collection
+// push-down), the settings namespace (s.settings), and commit (s.commit).
+// s.zones/s.pellets attach here in P2.
 type Save struct {
 	ls *LoadedSave
 }

@@ -32,11 +32,13 @@ func newStores(t *testing.T) (string, *blobstore.FSStore, *revisionstore.Store) 
 }
 
 // setEnergyProgram returns a pure-mutation program that sets one bibite's energy.
-// It never calls save.commit — the host owns persistence.
+// It never calls s.commit — the host owns persistence.
 func setEnergyProgram(entry string, energy float64) []byte {
 	return []byte(fmt.Sprintf(`
+s = open()
+
 def mutate():
-    for b in save.bibites:
+    for b in s.bibites:
         if b.entry_name == %q:
             b.energy = %v
             break
@@ -203,9 +205,10 @@ func TestRunAndCommitAutocommitOptOut(t *testing.T) {
 
 	program := []byte(fmt.Sprintf(`
 autocommit(False)
+s = open()
 
 def mutate():
-    for b in save.bibites:
+    for b in s.bibites:
         if b.entry_name == %q:
             b.energy = 4321.0
             break

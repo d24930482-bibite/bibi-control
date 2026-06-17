@@ -556,7 +556,7 @@ func TestPendingZoneValueRejects(t *testing.T) {
 }
 
 // TestPendingZoneValueViaScript: the end-to-end Starlark surface
-// z = save.zones.clone(0); z.name = "X"; z.values["k"] = v; z.append(); save.commit(tmp)
+// s = open(); z = s.zones.clone(0); z.name = "X"; z.values["k"] = v; z.append(); s.commit(tmp)
 // creates a new zone whose name and edited value both persist.
 func TestPendingZoneValueViaScript(t *testing.T) {
 	ls := loadFixture(t)
@@ -572,12 +572,14 @@ func TestPendingZoneValueViaScript(t *testing.T) {
 	const wantName = "ScriptedValueZone"
 	const wantVal = 0.91234
 	program := []byte(fmt.Sprintf(`
+s = open()
+
 def mutate():
-    z = save.zones.clone(0)
+    z = s.zones.clone(0)
     z.name = %q
     z.values[%q] = %v
     z.append()
-    return save.commit(%q)
+    return s.commit(%q)
 
 print("staged=%%d" %% mutate())
 `, wantName, key, wantVal, tmp))

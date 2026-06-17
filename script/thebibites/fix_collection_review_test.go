@@ -98,7 +98,8 @@ func TestBadPredicateLenPanicsLoudly(t *testing.T) {
 func TestBadPredicateIterationDiagnostic(t *testing.T) {
 	ls := loadFixture(t)
 	program := []byte(`
-n = len(save.bibites.where("enrgy > 100"))
+s = open()
+n = len(s.bibites.where("enrgy > 100"))
 print("processed %d" % n)
 `)
 	res, err := script.Run(context.Background(), program, Globals(ls), script.Options{Filename: "bad.star"})

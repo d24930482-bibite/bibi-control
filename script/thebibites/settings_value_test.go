@@ -273,9 +273,11 @@ func TestSettingsViaScript(t *testing.T) {
 	tmp := filepath.Join(t.TempDir(), "out.zip")
 
 	program := []byte(fmt.Sprintf(`
+s = open()
+
 def mutate():
-    save.settings.simulation[%q].set(999.0)
-    return save.commit(%q)
+    s.settings.simulation[%q].set(999.0)
+    return s.commit(%q)
 
 print("staged=%%d" %% mutate())
 `, row.SettingName, tmp))

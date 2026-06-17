@@ -160,8 +160,10 @@ func TestGeneCollectionIter(t *testing.T) {
 func TestGeneCollectionViaScript(t *testing.T) {
 	ls := loadFixture(t)
 	program := []byte(`
+s = open()
+
 def first_bibite():
-    for b in save.bibites:
+    for b in s.bibites:
         return b
     return None
 
@@ -196,9 +198,11 @@ func TestMissingAttr(t *testing.T) {
 func TestScriptRunReads(t *testing.T) {
 	ls := loadFixture(t)
 	program := []byte(`
+s = open()
+
 def count():
     n = 0
-    for b in save.bibites:
+    for b in s.bibites:
         n += 1
         _ = b.energy
     return n
@@ -222,8 +226,10 @@ print("count=%d" % count())
 func TestScriptMissingAttrDiagnostic(t *testing.T) {
 	ls := loadFixture(t)
 	program := []byte(`
+s = open()
+
 def show():
-    for b in save.bibites:
+    for b in s.bibites:
         print(b.nonsense)
 show()
 `)
