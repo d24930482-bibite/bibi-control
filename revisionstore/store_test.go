@@ -3,12 +3,14 @@ package revisionstore
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/asemones/bibicontrol/blobstore"
+	"github.com/google/uuid"
 )
 
 func TestStoreRecordsScriptRunAndRevision(t *testing.T) {
@@ -222,6 +224,186 @@ func TestStoreRejectsRevisionWithMissingScriptRun(t *testing.T) {
 	if err == nil {
 		t.Fatalf("RecordRevision() with missing script_run_id succeeded, want foreign-key rejection")
 	}
+}
+
+func TestSchemaAppliesAndIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	// Re-applying migrations on the same DB must be a no-op. This is the
+	// idempotency contract the inline CREATE ... IF NOT EXISTS must satisfy.
+	if err := ApplyMigrations(ctx, store.db); err != nil {
+		t.Fatalf("ApplyMigrations() second call error = %v", err)
+	}
+
+	// New registry tables must exist.
+	wantTables := map[string]bool{"workspaces": false, "worlds": false, "nodes": false}
+	tableRows, err := store.db.QueryContext(ctx, `
+		SELECT name FROM sqlite_master
+		WHERE type = 'table' AND name IN ('workspaces', 'worlds', 'nodes')
+	`)
+	if err != nil {
+		t.Fatalf("query tables: %v", err)
+	}
+	defer tableRows.Close()
+	for tableRows.Next() {
+		var name string
+		if err := tableRows.Scan(&name); err != nil {
+			t.Fatalf("scan table name: %v", err)
+		}
+		wantTables[name] = true
+	}
+	if err := tableRows.Err(); err != nil {
+		t.Fatalf("iterate tables: %v", err)
+	}
+	for name, found := range wantTables {
+		if !found {
+			t.Fatalf("table %q missing from schema", name)
+		}
+	}
+
+	// New save_revisions columns must exist with the expected defaults.
+	type colInfo struct {
+		dflt sql.NullString
+	}
+	cols := map[string]colInfo{}
+	colRows, err := store.db.QueryContext(ctx, `PRAGMA table_info(save_revisions)`)
+	if err != nil {
+		t.Fatalf("PRAGMA table_info(save_revisions): %v", err)
+	}
+	defer colRows.Close()
+	for colRows.Next() {
+		var (
+			cid     int
+			name    string
+			ctype   string
+			notNull int
+			dflt    sql.NullString
+			pk      int
+		)
+		if err := colRows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err != nil {
+			t.Fatalf("scan column info: %v", err)
+		}
+		cols[name] = colInfo{dflt: dflt}
+	}
+	if err := colRows.Err(); err != nil {
+		t.Fatalf("iterate columns: %v", err)
+	}
+	for _, name := range []string{"world_id", "tier", "blob_present", "refcount", "mirror_schema_version"} {
+		if _, ok := cols[name]; !ok {
+			t.Fatalf("save_revisions column %q missing from schema", name)
+		}
+	}
+	wantDefaults := map[string]string{
+		"tier":         "'full'",
+		"blob_present": "1",
+		"refcount":     "0",
+	}
+	for name, want := range wantDefaults {
+		got := cols[name].dflt
+		if !got.Valid || got.String != want {
+			t.Fatalf("save_revisions.%s default = %q (valid=%v), want %q", name, got.String, got.Valid, want)
+		}
+	}
+
+	// New indexes must exist.
+	wantIndexes := map[string]bool{
+		"worlds_workspace_id_idx":     false,
+		"nodes_workspace_id_idx":      false,
+		"nodes_world_id_idx":          false,
+		"save_revisions_world_id_idx": false,
+	}
+	idxRows, err := store.db.QueryContext(ctx, `
+		SELECT name FROM sqlite_master
+		WHERE type = 'index' AND name IN (
+			'worlds_workspace_id_idx',
+			'nodes_workspace_id_idx',
+			'nodes_world_id_idx',
+			'save_revisions_world_id_idx'
+		)
+	`)
+	if err != nil {
+		t.Fatalf("query indexes: %v", err)
+	}
+	defer idxRows.Close()
+	for idxRows.Next() {
+		var name string
+		if err := idxRows.Scan(&name); err != nil {
+			t.Fatalf("scan index name: %v", err)
+		}
+		wantIndexes[name] = true
+	}
+	if err := idxRows.Err(); err != nil {
+		t.Fatalf("iterate indexes: %v", err)
+	}
+	for name, found := range wantIndexes {
+		if !found {
+			t.Fatalf("index %q missing from schema", name)
+		}
+	}
+
+	// The registry schema must accept rows through the workspace -> world FK
+	// chain, with uuid-allocated ids (the id allocation A2 will perform).
+	createdAt := nowUTC().Format(time.RFC3339Nano)
+	workspaceID := uuid.NewString()
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO workspaces (id, owner, name, created_at) VALUES (?, ?, ?, ?)
+	`, workspaceID, "owner", "ws", createdAt); err != nil {
+		t.Fatalf("insert workspace: %v", err)
+	}
+	worldID := uuid.NewString()
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO worlds (id, workspace_id, name, created_at) VALUES (?, ?, ?, ?)
+	`, worldID, workspaceID, "world", createdAt); err != nil {
+		t.Fatalf("insert world: %v", err)
+	}
+
+	// A world_id referencing a non-existent world must be rejected by the FK.
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO worlds (id, workspace_id, name, created_at) VALUES (?, ?, ?, ?)
+	`, uuid.NewString(), uuid.NewString(), "orphan", createdAt); err == nil {
+		t.Fatalf("insert world with missing workspace_id succeeded, want FK rejection")
+	}
+
+	// Defaulted save_revisions columns must be observable on a fresh insert.
+	runID := insertScriptRunForSchemaTest(t, ctx, store)
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO save_revisions (
+			sha256, size, source_path, blob_ref, script_run_id, created_at, world_id
+		) VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, strings.Repeat("c", blobstore.SHA256HexLength), 0, "", "{}", runID, createdAt, worldID); err != nil {
+		t.Fatalf("insert save_revision with world_id: %v", err)
+	}
+	var (
+		tier        string
+		blobPresent int64
+		refcount    int64
+	)
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT tier, blob_present, refcount FROM save_revisions WHERE world_id = ?
+	`, worldID).Scan(&tier, &blobPresent, &refcount); err != nil {
+		t.Fatalf("read defaulted save_revisions row: %v", err)
+	}
+	if tier != "full" || blobPresent != 1 || refcount != 0 {
+		t.Fatalf("defaulted save_revisions row = (tier=%q, blob_present=%d, refcount=%d), want (full, 1, 0)", tier, blobPresent, refcount)
+	}
+}
+
+func insertScriptRunForSchemaTest(t *testing.T, ctx context.Context, store *Store) int64 {
+	t.Helper()
+	run, err := store.RecordScriptRun(ctx, ScriptRunInput{
+		ScriptSHA256: strings.Repeat("d", blobstore.SHA256HexLength),
+		Status:       "succeeded",
+	})
+	if err != nil {
+		t.Fatalf("RecordScriptRun() error = %v", err)
+	}
+	return run.ID
 }
 
 func assertRawInlineBlob(t *testing.T, ctx context.Context, store *Store, revisionID int64, want []byte) {
