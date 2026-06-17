@@ -373,11 +373,13 @@ var (
 	_ starlark.HasSetKey = (*pendingZoneValues)(nil)
 )
 
-func (pv *pendingZoneValues) String() string        { return "pending_zone.values" }
-func (pv *pendingZoneValues) Type() string          { return "pending_zone_values" }
-func (pv *pendingZoneValues) Freeze()               {}
-func (pv *pendingZoneValues) Truth() starlark.Bool  { return starlark.True }
-func (pv *pendingZoneValues) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable type: pending_zone_values") }
+func (pv *pendingZoneValues) String() string       { return "pending_zone.values" }
+func (pv *pendingZoneValues) Type() string         { return "pending_zone_values" }
+func (pv *pendingZoneValues) Freeze()              {}
+func (pv *pendingZoneValues) Truth() starlark.Bool { return starlark.True }
+func (pv *pendingZoneValues) Hash() (uint32, error) {
+	return 0, fmt.Errorf("unhashable type: pending_zone_values")
+}
 
 // pendingZoneValueScalarType infers a settings ScalarType from the underlying Go
 // scalar a clone carries for a zone value. A clone is produced by plain json.Unmarshal
@@ -477,16 +479,21 @@ func (pv *pendingZoneValues) SetKey(k, v starlark.Value) error {
 	}
 	// Write at the same path/shape the clone already uses: into data[key]["Value"] when
 	// the value is wrapped (preserving the wrapper object and its sibling keys), else
-	// data[key] directly. The bare write is a plain top-level assignment (not routed
-	// through the dotted-path helper) so a value key containing '.'/'[' cannot be
-	// misparsed; the wrapped write reuses setNestedPellet to navigate into the existing
-	// "Value" leaf.
+	// data[key] directly. BOTH branches navigate explicitly off data[name] rather than
+	// routing through the dotted-path helper (setNestedPellet/parsePelletPath), because
+	// a zone-value key can legitimately contain '.'/'[' (the exact reason the bare branch
+	// writes data[name] directly). Building name+".Value" and re-parsing it would split
+	// such a key into the wrong nested path. data[name] is the wrapper object we already
+	// probed (pendingZoneValueWrapper found a "Value" key on it), so we assert it back to
+	// a map and set "Value" in place — preserving the wrapper object and its siblings.
 	if !wrapped {
 		pv.pz.data[name] = coerced
 		return nil
 	}
-	if err := setNestedPellet(pv.pz.data, name+".Value", coerced); err != nil {
-		return fmt.Errorf("zone value %q: %w", name, err)
+	wrapper, ok := pv.pz.data[name].(map[string]any)
+	if !ok {
+		return fmt.Errorf("zone value %q: expected wrapper object, got %T", name, pv.pz.data[name])
 	}
+	wrapper["Value"] = coerced
 	return nil
 }

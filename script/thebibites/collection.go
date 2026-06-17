@@ -79,13 +79,26 @@ type EntityCollection struct {
 	// resolved memoizes the predicate push-down for Len/Iterate/Truth on a
 	// filtered collection so a len()+iteration pair runs the query once. Only set
 	// for a filtered collection (where != ""); unfiltered uses the identity table's
-	// in-memory order directly. resolveErr captures a push-down failure (e.g. an
-	// unknown column in the predicate); since Len/Iterate cannot return an error,
-	// it is surfaced through the iterator and treated as an empty (NOT full) set —
-	// a filtered collection never silently iterates the whole population.
-	resolved    []string
-	resolvedSet bool
-	resolveErr  error
+	// in-memory order directly. The push-down is resolved EAGERLY in whereBuiltin
+	// (one query at .where() time) and reused here.
+	//
+	// resolveErr captures a push-down failure (e.g. an unknown column in the
+	// predicate). Len/Iterate cannot return an error, so rather than mapping the
+	// failure to a silent empty set (which would let a typo'd predicate report
+	// "processed nothing" as success), they surface it LOUDLY: len(c)/iteration
+	// panic with the error, which the script engine's host-panic recovery turns
+	// into a clean diagnostic. A valid predicate that simply matches nothing still
+	// iterates empty with no error.
+	//
+	// resolvedAtOps snapshots ls.stagedOps when resolved was last computed. Since
+	// stagedOps advances on every staging path (scalar/bulk set, delete, append,
+	// zone clone), entryNames re-resolves when it observes a different value, so a
+	// filtered collection's Len/Iterate cannot go stale against a fresh count()
+	// after an in-run mutation touches a predicate-relevant column.
+	resolved      []string
+	resolvedSet   bool
+	resolveErr    error
+	resolvedAtOps int
 }
 
 var (
@@ -179,6 +192,12 @@ func (c *EntityCollection) deleteBuiltin(thread *starlark.Thread, b *starlark.Bu
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "prune?", &prune); err != nil {
 		return nil, err
 	}
+	// Refuse a whole-population delete on an unfiltered collection: a dropped or
+	// typo'd .where() must not silently stage delete-all. An intentional
+	// delete-all opts in explicitly with .where("true").
+	if c.where == "" {
+		return nil, fmt.Errorf("delete() on an unfiltered %s collection would delete the whole population; scope it with .where(...) (use .where(\"true\") to delete all intentionally)", c.kind)
+	}
 	n, err := c.ls.bulkDelete(c.kind, c.where, prune)
 	if err != nil {
 		return nil, err
@@ -187,12 +206,29 @@ func (c *EntityCollection) deleteBuiltin(thread *starlark.Thread, b *starlark.Bu
 }
 
 // whereBuiltin narrows the collection, returning a new unmaterialized collection.
+// It eagerly resolves the combined predicate (a single push-down query, memoized
+// on the new collection so Len/Iterate reuse it) and captures any resolution
+// failure in resolveErr. The error is NOT returned here: the analytics path
+// (count/aggregates) re-validates the predicate and reports the failure on its own,
+// so .where() itself stays non-erroring (a narrow handle is always returned).
+// Len/Iterate then surface resolveErr loudly instead of iterating a silent empty
+// set — see entryNames.
 func (c *EntityCollection) whereBuiltin(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var predicate string
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "predicate", &predicate); err != nil {
 		return nil, err
 	}
-	return &EntityCollection{ls: c.ls, kind: c.kind, where: combineWhere(c.where, predicate)}, nil
+	where := combineWhere(c.where, predicate)
+	names, err := c.ls.matchingEntryNames(c.kind, where)
+	return &EntityCollection{
+		ls:            c.ls,
+		kind:          c.kind,
+		where:         where,
+		resolved:      names,
+		resolvedSet:   true,
+		resolveErr:    err,
+		resolvedAtOps: c.ls.stagedOps,
+	}, nil
 }
 
 func (c *EntityCollection) groupByBuiltin(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -212,13 +248,13 @@ func (c *EntityCollection) identityAccess() *tableAccess {
 	return c.ls.access[tables[0]]
 }
 
-// entryNames returns the entry_names this collection enumerates. An unfiltered
-// collection (where == "") uses the identity table's in-memory order — the fast
-// path, no DuckDB. A filtered collection resolves the matching entry_names by
-// pushing the predicate down through matchingEntryNames (the same builder bulk
-// delete uses), memoized so Len()+Iterate() share one query. On a push-down error
-// it returns nil + the error so the caller treats the collection as empty rather
-// than silently enumerating the whole population.
+// entryNames returns the entry_names this collection enumerates plus any push-down
+// resolution error. An unfiltered collection (where == "") uses the identity
+// table's in-memory order — the fast path, no DuckDB. A filtered collection reuses
+// the set resolved eagerly in whereBuiltin, re-resolving only when ls.stagedOps
+// differs from the snapshot taken at resolution time — i.e. an in-run mutation may
+// have changed which entities match — so Len/Iterate stay consistent with a fresh
+// count() after a mutation touches a predicate-relevant column.
 func (c *EntityCollection) entryNames() ([]string, error) {
 	if c.where == "" {
 		ta := c.identityAccess()
@@ -227,24 +263,32 @@ func (c *EntityCollection) entryNames() ([]string, error) {
 		}
 		return ta.order, nil
 	}
-	if !c.resolvedSet {
+	if !c.resolvedSet || c.resolvedAtOps != c.ls.stagedOps {
 		c.resolved, c.resolveErr = c.ls.matchingEntryNames(c.kind, c.where)
 		c.resolvedSet = true
+		c.resolvedAtOps = c.ls.stagedOps
 	}
 	return c.resolved, c.resolveErr
 }
 
-func (c *EntityCollection) Len() int {
+// resolveOrPanic returns the matching entry_names, panicking on a resolution error.
+// Len/Iterate cannot return an error; a panic here is recovered by the script
+// engine into a clean diagnostic, so a malformed predicate fails loudly instead of
+// silently iterating nothing.
+func (c *EntityCollection) resolveOrPanic() []string {
 	names, err := c.entryNames()
 	if err != nil {
-		return 0
+		panic(err)
 	}
-	return len(names)
+	return names
+}
+
+func (c *EntityCollection) Len() int {
+	return len(c.resolveOrPanic())
 }
 
 func (c *EntityCollection) Iterate() starlark.Iterator {
-	names, err := c.entryNames()
-	return &entityIterator{ls: c.ls, kind: c.kind, names: names, err: err}
+	return &entityIterator{ls: c.ls, kind: c.kind, names: c.resolveOrPanic()}
 }
 
 type entityIterator struct {
@@ -252,13 +296,9 @@ type entityIterator struct {
 	kind  string
 	names []string
 	pos   int
-	err   error // push-down resolution error; iteration yields nothing
 }
 
 func (it *entityIterator) Next(p *starlark.Value) bool {
-	if it.err != nil {
-		return false
-	}
 	if it.pos >= len(it.names) {
 		return false
 	}

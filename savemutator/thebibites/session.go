@@ -139,7 +139,7 @@ func (s *Session) Apply() error {
 	updates := make(map[string]*entryUpdate)
 	var removed []string
 	var added []tb.Entry
-	for i, op := range s.ops {
+	for i, op := range orderElementDeletes(s.ops) {
 		switch op.Kind {
 		case OperationDeleteEntry, OperationAppendEntry:
 			if err := s.applyEntryOperation(updates, &removed, &added, op); err != nil {
@@ -625,4 +625,82 @@ func cloneOperation(op Operation) Operation {
 		op.EntryPayload.JSON = cloneJSON(op.EntryPayload.JSON)
 	}
 	return op
+}
+
+// orderElementDeletes returns a re-ordered view of ops in which array-element
+// deletes (OperationDelete) that target the SAME parent array are applied in
+// DESCENDING trailing-index order. This makes sibling element deletes
+// commit-correct regardless of stage order: removing a higher index never shifts
+// a lower pending index, so each delete still addresses the element its
+// load-time positional index named (and its value guard still validates against
+// the right element, since lower indices have not moved yet).
+//
+// The re-order is a slot-preserving permutation: it touches only the positions a
+// same-array delete group already occupies, reassigning those exact slots with the
+// group's deletes sorted by descending trailing index. Every other operation
+// (sets, appends, entry ops, deletes against other arrays) keeps its original
+// position, so order-sensitive cascades (scene-count reconciliation, parent-link
+// pruning) are unaffected. Operations whose path cannot be parsed are left in
+// place — Apply re-validates and surfaces the error.
+func orderElementDeletes(ops []Operation) []Operation {
+	// Group the indices of element deletes by (entry name + parent array path).
+	type elementDelete struct {
+		pos   int // position in ops
+		index int // trailing array index
+	}
+	groups := make(map[string][]elementDelete)
+	multi := false
+	for i, op := range ops {
+		if op.Kind != OperationDelete {
+			continue
+		}
+		array, index, ok := deleteArrayKey(op)
+		if !ok {
+			continue
+		}
+		key := op.Target.EntryName + "\x00" + array
+		groups[key] = append(groups[key], elementDelete{pos: i, index: index})
+		if len(groups[key]) > 1 {
+			multi = true
+		}
+	}
+	if !multi {
+		return ops
+	}
+
+	out := append([]Operation(nil), ops...)
+	for _, group := range groups {
+		if len(group) < 2 {
+			continue
+		}
+		// The slots these deletes occupy (kept in original order) receive the same
+		// deletes sorted by descending trailing index.
+		slots := make([]int, len(group))
+		for i, d := range group {
+			slots[i] = d.pos
+		}
+		sort.Slice(slots, func(a, b int) bool { return slots[a] < slots[b] })
+		ordered := append([]elementDelete(nil), group...)
+		sort.Slice(ordered, func(a, b int) bool { return ordered[a].index > ordered[b].index })
+		for i, slot := range slots {
+			out[slot] = ops[ordered[i].pos]
+		}
+	}
+	return out
+}
+
+// deleteArrayKey returns the parent array path (the op path with its trailing
+// "[n]" removed) and the trailing array index for an element-delete operation.
+// ok is false when the path does not end in an array index (e.g. a malformed or
+// non-array delete), in which case the caller leaves the op in place.
+func deleteArrayKey(op Operation) (array string, index int, ok bool) {
+	parts, err := parsePath(op.Path)
+	if err != nil || len(parts) == 0 {
+		return "", 0, false
+	}
+	last := parts[len(parts)-1]
+	if !last.isIndex {
+		return "", 0, false
+	}
+	return renderPath(parts[:len(parts)-1]), last.index, true
 }

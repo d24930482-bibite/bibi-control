@@ -6,10 +6,12 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 
 	"go.starlark.net/starlark"
 
 	"github.com/asemones/bibicontrol/duckdb"
+	mutator "github.com/asemones/bibicontrol/savemutator/thebibites"
 )
 
 // sql.go is the T5 analytics path: the raw save.sql escape hatch plus the
@@ -164,6 +166,11 @@ func aggExpr(kind string, agg aggCall) (expr, table string, err error) {
 	return expr, table, nil
 }
 
+var (
+	oneToManyOnce sync.Once
+	oneToManySet  map[string]bool
+)
+
 // oneToManyTables is the set of tables registered as 1:many element
 // sub-collections (brain nodes/synapses, stomach contents) across all entity
 // kinds. fromClause asserts no such table is scalar-joined: a LEFT JOIN against a
@@ -171,14 +178,21 @@ func aggExpr(kind string, agg aggCall) (expr, table string, err error) {
 // Today entityTables (1:1) and entitySubCollections (1:many) are disjoint by
 // design; this turns a future save-format revision that lists a 1:many table in
 // entityTables into a loud, localized error instead of wrong analytics.
+//
+// entitySubCollections is static, so the set is built once via sync.Once (matching
+// the registry singletons in attr_registry.go) rather than reallocated on every
+// fromClause() push-down query. The returned map is shared read-only — callers must
+// not mutate it.
 func oneToManyTables() map[string]bool {
-	out := map[string]bool{}
-	for _, subs := range entitySubCollections {
-		for _, info := range subs {
-			out[info.table] = true
+	oneToManyOnce.Do(func() {
+		oneToManySet = map[string]bool{}
+		for _, subs := range entitySubCollections {
+			for _, info := range subs {
+				oneToManySet[info.table] = true
+			}
 		}
-	}
-	return out
+	})
+	return oneToManySet
 }
 
 // fromClause builds "FROM <identity> [LEFT JOIN <subtable> ON …]" including only
@@ -391,36 +405,53 @@ func (ls *LoadedSave) bulkSet(kind, where, column string, value starlark.Value) 
 	}
 
 	for _, r := range refs {
-		staged := goVal
-		var (
-			wroteRow   reflect.Value
-			restorePri any
-			restore    bool
-		)
-		if row, ok := ls.rowForEntry(spec.table, r.Ref.EntryName); ok {
-			prior, err := goScalar(row.FieldByIndex(spec.fieldIndex))
-			if err != nil {
-				return 0, fmt.Errorf("%s.%s: %w", kind, column, err)
-			}
-			coerced, err := setRowField(row, spec.fieldIndex, goVal)
-			if err != nil {
-				return 0, fmt.Errorf("%s.%s: %w", kind, column, err)
-			}
-			staged = coerced
-			wroteRow, restorePri, restore = row, prior, true
-		}
-		// Roll back this row's write-through on stage failure: a rejected stage must
-		// not leave a phantom in-memory value (same class as the scalar SetField path).
-		var rollback func()
-		if restore {
-			rollback = func() { _, _ = setRowField(wroteRow, spec.fieldIndex, restorePri) }
-		}
-		if err := ls.stageScalarSet(r.Ref, r.CurrentValue, staged, spec.table, spec.sourceColumn, spec.sqlType,
-			[]mirrorLocator{{column: "entry_name", value: r.Ref.EntryName}}, rollback); err != nil {
-			return 0, fmt.Errorf("%s.%s: %w", kind, column, err)
+		if err := ls.writeThroughAndStage(spec, r.Ref, r.CurrentValue, goVal, kind, column); err != nil {
+			return 0, err
 		}
 	}
 	return len(refs), nil
+}
+
+// writeThroughAndStage applies one per-row scalar set for a bulk operation: it
+// captures the row's prior value, writes writeVal through to the in-memory row
+// (coercing it into the column's Go kind), and stages a stale-value-guarded set
+// keyed on entry_name with the concrete coerced value mirrored, so the deferred
+// UPDATE never diverges from the guarded value. If the in-memory row is missing
+// (only staged), writeVal is staged directly. On stage failure the write-through
+// is rolled back so a rejected stage never leaves a phantom in-memory value (same
+// class as the scalar SetField path). Errors are wrapped "%s.%s: %w" with kind and
+// column. Shared verbatim between bulkSet (constant) and bulkSetExpr (per-row
+// computed value) so the rollback/guard invariant lives in one place.
+func (ls *LoadedSave) writeThroughAndStage(spec attrSpec, ref mutator.SQLValueRef, currentVal, writeVal any, kind, column string) error {
+	staged := writeVal
+	var (
+		wroteRow   reflect.Value
+		restorePri any
+		restore    bool
+	)
+	if row, ok := ls.rowForEntry(spec.table, ref.EntryName); ok {
+		prior, err := goScalar(row.FieldByIndex(spec.fieldIndex))
+		if err != nil {
+			return fmt.Errorf("%s.%s: %w", kind, column, err)
+		}
+		coerced, err := setRowField(row, spec.fieldIndex, writeVal)
+		if err != nil {
+			return fmt.Errorf("%s.%s: %w", kind, column, err)
+		}
+		staged = coerced
+		wroteRow, restorePri, restore = row, prior, true
+	}
+	// Roll back this row's write-through on stage failure: a rejected stage must
+	// not leave a phantom in-memory value (same class as the scalar SetField path).
+	var rollback func()
+	if restore {
+		rollback = func() { _, _ = setRowField(wroteRow, spec.fieldIndex, restorePri) }
+	}
+	if err := ls.stageScalarSet(ref, currentVal, staged, spec.table, spec.sourceColumn, spec.sqlType,
+		[]mirrorLocator{{column: "entry_name", value: ref.EntryName}}, rollback); err != nil {
+		return fmt.Errorf("%s.%s: %w", kind, column, err)
+	}
+	return nil
 }
 
 // bulkSetExpr stages a per-row SQL expression onto every entity matching the
@@ -445,6 +476,12 @@ func (ls *LoadedSave) bulkSetExpr(kind, where, column, expr string) (int, error)
 		return 0, fmt.Errorf("%s.%s is read-only (derived or locator column, not writable)", kind, column)
 	}
 	if err := validateExprSafety(expr); err != nil {
+		return 0, fmt.Errorf("%s.%s: %w", kind, column, err)
+	}
+	// Structurally reject an unknown column referenced in the expression BEFORE the
+	// query runs, so the clean diagnostic does not depend on DuckDB's binder wording
+	// (which wrapExpr still string-matches as a fallback for shapes this can't see).
+	if err := validateExprColumns(kind, expr); err != nil {
 		return 0, fmt.Errorf("%s.%s: %w", kind, column, err)
 	}
 
@@ -473,32 +510,8 @@ func (ls *LoadedSave) bulkSetExpr(kind, where, column, expr string) (int, error)
 		if err := validateSet(spec, coerced); err != nil {
 			return 0, fmt.Errorf("%s.%s: %w", kind, column, err)
 		}
-
-		staged := coerced
-		var (
-			wroteRow   reflect.Value
-			restorePri any
-			restore    bool
-		)
-		if row, ok := ls.rowForEntry(spec.table, r.Ref.EntryName); ok {
-			prior, err := goScalar(row.FieldByIndex(spec.fieldIndex))
-			if err != nil {
-				return 0, fmt.Errorf("%s.%s: %w", kind, column, err)
-			}
-			written, err := setRowField(row, spec.fieldIndex, coerced)
-			if err != nil {
-				return 0, fmt.Errorf("%s.%s: %w", kind, column, err)
-			}
-			staged = written
-			wroteRow, restorePri, restore = row, prior, true
-		}
-		var rollback func()
-		if restore {
-			rollback = func() { _, _ = setRowField(wroteRow, spec.fieldIndex, restorePri) }
-		}
-		if err := ls.stageScalarSet(r.Ref, r.CurrentValue, staged, spec.table, spec.sourceColumn, spec.sqlType,
-			[]mirrorLocator{{column: "entry_name", value: r.Ref.EntryName}}, rollback); err != nil {
-			return 0, fmt.Errorf("%s.%s: %w", kind, column, err)
+		if err := ls.writeThroughAndStage(spec, r.Ref, r.CurrentValue, coerced, kind, column); err != nil {
+			return 0, err
 		}
 	}
 	return len(refs), nil
@@ -562,13 +575,22 @@ func (ls *LoadedSave) bulkSetExprQuery(kind, where string, spec attrSpec, expr s
 	return q, args, nil
 }
 
-// validateExprSafety rejects two shapes a single-projection SQL expression must
-// never contain: a raw statement terminator (';' outside a string literal, which
-// could chain a second statement) and a subquery ('(' immediately followed by a
-// case-insensitive SELECT). It reuses the same literal-aware scan as
-// rewritePredicate so quotes and '' escapes are honored. The expression is still
-// strictly weaker than the raw save.sql() hatch — it is one SELECT projection over
-// the in-memory save — so this is defense in depth, not the only gate.
+// validateExprSafety rejects shapes a single-projection SQL expression must never
+// contain:
+//   - a raw statement terminator (';' outside a string literal, which could chain
+//     a second statement);
+//   - a subquery ('(' immediately followed by a case-insensitive SELECT);
+//   - a SQL comment — line ('--') or block ('/* */') — which would comment out the
+//     rest of the generated single-line SELECT (including the trailing save_id
+//     placeholder), turning a clean diagnostic into a low-level parse error and
+//     opening a comment-injection seam.
+//
+// It reuses the same literal-aware scan as rewritePredicate so quoted strings and
+// their doubled-quote escapes are honored — a '--', '/*' or ';' inside a string
+// literal is fine. The
+// expression is still strictly weaker than the raw save.sql() hatch — it is one
+// SELECT projection over the in-memory save — so this is defense in depth, not the
+// only gate.
 func validateExprSafety(expr string) error {
 	s := expr
 	i := 0
@@ -599,6 +621,19 @@ func validateExprSafety(expr string) error {
 			}
 		case ';':
 			return fmt.Errorf("expression must not contain ';'")
+		case '-':
+			// SQL line comment: '--' comments out the rest of the generated
+			// single-line SELECT, including the save_id placeholder.
+			if i+1 < len(s) && s[i+1] == '-' {
+				return fmt.Errorf("expression must not contain a SQL comment ('--')")
+			}
+			i++
+		case '/':
+			// SQL block comment: '/* ... */' hides part of the generated SELECT.
+			if i+1 < len(s) && s[i+1] == '*' {
+				return fmt.Errorf("expression must not contain a SQL comment ('/* */')")
+			}
+			i++
 		case '(':
 			j := i + 1
 			for j < len(s) && isSpace(s[j]) {
@@ -615,10 +650,112 @@ func validateExprSafety(expr string) error {
 	return nil
 }
 
+// exprColumnLiterals are the bare value-keywords a column-position identifier may
+// legitimately be even though they are not registry columns. They are excluded
+// from the structural unknown-column check so e.g. set_expr(col, "NULL") still
+// reaches the post-compute coerce/validate gate (where a NULL is rejected) rather
+// than being misreported here as an unknown column.
+var exprColumnLiterals = map[string]bool{
+	"null": true, "true": true, "false": true,
+}
+
+// validateExprColumns structurally rejects a bare identifier referenced in a
+// value position of a set_expr expression that is not a registry column for kind,
+// BEFORE the query runs — so the unknown-column diagnostic no longer depends on
+// DuckDB's binder error wording (wrapExpr keeps the substring match only as a
+// fallback for shapes this scanner deliberately does not flag).
+//
+// It reuses rewritePredicate's literal-aware tokenizer rules: it ignores quoted
+// strings/identifiers, already-dotted (qualified) refs, function calls (name
+// followed by '('), and numeric literals. A bare identifier is treated as a
+// column reference ONLY when it stands alone in a value slot — i.e. both its
+// nearest significant neighbors are non-word (operator/paren/comma/comparison, or
+// the start/end of the expression). This conservatively skips keyword constructs
+// (CASE/WHEN/THEN/ELSE/END, IS NULL, x AND y), whose tokens are word-adjacent, so
+// the check fires for the dominant failure mode — a misspelled column like
+// "enrgy + 1" — without rejecting expressions DuckDB would otherwise accept.
+func validateExprColumns(kind, expr string) error {
+	reg := attrRegistry()[kind]
+	s := expr
+	i := 0
+	var prev byte // last significant byte before the current token (0 == start)
+	setPrev := func(b byte) {
+		if !isSpace(b) {
+			prev = b
+		}
+	}
+	for i < len(s) {
+		c := s[i]
+		switch {
+		case c == '\'':
+			setPrev(c)
+			i++
+			for i < len(s) {
+				if s[i] == '\'' {
+					if i+1 < len(s) && s[i+1] == '\'' {
+						i += 2
+						continue
+					}
+					i++
+					break
+				}
+				i++
+			}
+			prev = '\''
+		case c == '"':
+			setPrev(c)
+			i++
+			for i < len(s) {
+				if s[i] == '"' {
+					i++
+					break
+				}
+				i++
+			}
+			prev = '"'
+		case isIdentStart(c):
+			j := i + 1
+			for j < len(s) && isIdentPart(s[j]) {
+				j++
+			}
+			word := s[i:j]
+			dotted := prev == '.'
+			// next significant byte after the identifier
+			k := j
+			for k < len(s) && isSpace(s[k]) {
+				k++
+			}
+			var next byte // 0 == end of expression
+			if k < len(s) {
+				next = s[k]
+			}
+			isCall := next == '('
+			lower := strings.ToLower(word)
+			_, known := reg[lower]
+			// Word-adjacent on either side => part of a keyword construct, not a
+			// lone value-slot column reference; leave it for DuckDB / the fallback.
+			wordAdjacent := isIdentPart(prev) || isIdentStart(next)
+			if !dotted && !isCall && !known && !wordAdjacent && !exprColumnLiterals[lower] {
+				return fmt.Errorf("unknown column %q in expression", word)
+			}
+			// prev for the token following this identifier is its last byte.
+			prev = s[j-1]
+			i = j
+		default:
+			setPrev(c)
+			i++
+		}
+	}
+	return nil
+}
+
 // wrapExpr names the set_expr expression in an error and rewrites the raw DuckDB
 // "column ... does not exist" / "Referenced column ... not found" binder error
 // into a clean "unknown column in expression" diagnostic, the set_expr analogue of
-// wrapWhere for the projected expression.
+// wrapWhere for the projected expression. validateExprColumns now catches the
+// common unknown-column case structurally before the query runs; this substring
+// match remains as a fallback for shapes that pre-check deliberately does not flag
+// (e.g. an unknown column buried inside a keyword construct).
 func wrapExpr(expr string, err error) error {
 	if err == nil {
 		return nil

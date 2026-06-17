@@ -47,8 +47,16 @@ func Run(ctx context.Context, program []byte, globals starlark.StringDict, opts 
 		filename = defaultFilename
 	}
 
+	// output is captured by the thread's Print closure below. It is declared before
+	// the recovery defer so a builtin panic preserves whatever the script printed up
+	// to the panic: the recover sets result.Output here (the normal-path assignment at
+	// the end of Run is skipped on panic). Both assignments read the same builder, so
+	// there is no double-capture — only one of the two runs per call.
+	var output strings.Builder
+
 	defer func() {
 		if r := recover(); r != nil {
+			result.Output = output.String()
 			cause := fmt.Errorf("script panicked: %v", r)
 			result.Diagnostics = []Diagnostic{{
 				Severity: SeverityError,
@@ -66,7 +74,6 @@ func Run(ctx context.Context, program []byte, globals starlark.StringDict, opts 
 		return result, &RunError{Diagnostics: result.Diagnostics, Cause: err}
 	}
 
-	var output strings.Builder
 	thread := &starlark.Thread{
 		Name: opts.ThreadName,
 		Load: opts.Load,
