@@ -99,7 +99,7 @@ func ScanSQLRefs(rows *sql.Rows, spec SQLRefScanSpec) ([]SQLRefRow, error) {
 
 		row := SQLRefRow{Ref: ref}
 		if valueIndex >= 0 {
-			row.CurrentValue = normalizeSQLScanValue(values[valueIndex])
+			row.CurrentValue = NormalizeSQLScanValue(values[valueIndex])
 		}
 		out = append(out, row)
 		rowIndex++
@@ -289,7 +289,7 @@ func rowString(columns map[string]int, values []any, column string) (string, boo
 	if value == nil {
 		return "", false, nil
 	}
-	switch v := normalizeSQLScanValue(value).(type) {
+	switch v := NormalizeSQLScanValue(value).(type) {
 	case string:
 		return v, true, nil
 	default:
@@ -305,7 +305,7 @@ func rowBool(columns map[string]int, values []any, column string) (bool, bool, e
 	if value == nil {
 		return false, false, nil
 	}
-	switch v := normalizeSQLScanValue(value).(type) {
+	switch v := NormalizeSQLScanValue(value).(type) {
 	case bool:
 		return v, true, nil
 	default:
@@ -332,7 +332,7 @@ func rowInt64(columns map[string]int, values []any, column string) (int64, bool,
 	if value == nil {
 		return 0, false, nil
 	}
-	normalized := normalizeSQLScanValue(value)
+	normalized := NormalizeSQLScanValue(value)
 	switch v := normalized.(type) {
 	case int64:
 		return v, true, nil
@@ -355,7 +355,13 @@ func rowValue(columns map[string]int, values []any, column string) (any, bool) {
 	return values[i], true
 }
 
-func normalizeSQLScanValue(value any) any {
+// NormalizeSQLScanValue coerces a value scanned from a DuckDB result column into
+// a canonical Go scalar: []byte->string, narrow signed ints->int64, unsigned
+// ints->int64 (or uint64 when they overflow int64), float32->float64. Everything
+// else (including int64, large uint64, float64, bool, string, *big.Int and nil)
+// passes through unchanged. Exported so the analytics converter in
+// script/thebibites reuses this exact coercion instead of re-implementing it.
+func NormalizeSQLScanValue(value any) any {
 	switch v := value.(type) {
 	case []byte:
 		return string(v)

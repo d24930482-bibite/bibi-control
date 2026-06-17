@@ -129,7 +129,7 @@ type execContext interface {
 
 func deleteSaveRows(ctx context.Context, execer execContext, saveID string) error {
 	for _, table := range allTables {
-		query := fmt.Sprintf("DELETE FROM %s WHERE save_id = ?", quoteIdent(table))
+		query := fmt.Sprintf("DELETE FROM %s WHERE save_id = ?", QuoteIdent(table))
 		if _, err := execer.ExecContext(ctx, query, saveID); err != nil {
 			return fmt.Errorf("delete %s rows for save_id %q: %w", table, saveID, err)
 		}
@@ -341,7 +341,10 @@ func fieldValue(value reflect.Value) (driver.Value, error) {
 	}
 }
 
-func quoteIdent(identifier string) string {
+// QuoteIdent double-quotes a SQL identifier for DuckDB, escaping embedded quotes.
+// Exported so the analytics query builder in script/thebibites reuses the exact
+// same identifier quoting instead of keeping a private copy.
+func QuoteIdent(identifier string) string {
 	return `"` + strings.ReplaceAll(identifier, `"`, `""`) + `"`
 }
 

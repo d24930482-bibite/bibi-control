@@ -20,9 +20,12 @@ import (
 // quoteIdent double-quotes a SQL identifier for DuckDB, escaping embedded quotes.
 // Table and column names come from generated metadata (safe), but quoting keeps
 // the builder correct for any identifier and case-exact against the migration's
-// lowercase column names.
+// lowercase column names. It delegates to duckdb.QuoteIdent so the import path and
+// the analytics push-down builder quote identifiers identically (one source of
+// truth); this package-local alias keeps the many call sites here and in mirror.go
+// terse.
 func quoteIdent(identifier string) string {
-	return `"` + strings.ReplaceAll(identifier, `"`, `""`) + `"`
+	return duckdb.QuoteIdent(identifier)
 }
 
 // identityTable returns the identity (one-row-per-entity) table backing a kind.

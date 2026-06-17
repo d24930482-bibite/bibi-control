@@ -8,6 +8,7 @@ import (
 
 	"go.starlark.net/starlark"
 
+	"github.com/asemones/bibicontrol/duckdb"
 	tb "github.com/asemones/bibicontrol/saveparser/thebibites"
 )
 
@@ -34,49 +35,34 @@ func toStarlark(v reflect.Value) (starlark.Value, error) {
 
 // fromSQLValue converts a value scanned from a DuckDB result column into a
 // Starlark value. It is the counterpart of toStarlark for the analytics path:
-// rows come back as driver scalars (the duckdb driver scans into the concrete Go
-// types below), and SQL NULL arrives as a nil interface, surfaced as None. It
-// folds in the type coercion duckdb.normalizeSQLScanValue performs internally
-// ([]byte->string, narrow ints/floats->int64/float64) so a single converter
-// serves both raw save.sql rows and aggregate scalars.
+// rows come back as driver scalars, and SQL NULL arrives as a nil interface,
+// surfaced as None. The driver-scalar coercion ([]byte->string, narrow signed
+// ints->int64, unsigned ints->int64/uint64, float32->float64) is delegated to
+// duckdb.NormalizeSQLScanValue so a single normalizer serves both the SQLValueRef
+// scan path and this converter; this function only adds the Starlark mapping plus
+// the *big.Int (HUGEINT) case the normalizer passes through untouched.
 func fromSQLValue(v any) (starlark.Value, error) {
-	switch x := v.(type) {
+	switch x := duckdb.NormalizeSQLScanValue(v).(type) {
 	case nil:
 		return starlark.None, nil
 	case bool:
 		return starlark.Bool(x), nil
 	case string:
 		return starlark.String(x), nil
-	case []byte:
-		return starlark.String(x), nil
-	case int:
-		return starlark.MakeInt64(int64(x)), nil
-	case int8:
-		return starlark.MakeInt64(int64(x)), nil
-	case int16:
-		return starlark.MakeInt64(int64(x)), nil
-	case int32:
-		return starlark.MakeInt64(int64(x)), nil
 	case int64:
 		return starlark.MakeInt64(x), nil
-	case uint:
-		return starlark.MakeUint64(uint64(x)), nil
-	case uint8:
-		return starlark.MakeUint64(uint64(x)), nil
-	case uint16:
-		return starlark.MakeUint64(uint64(x)), nil
-	case uint32:
-		return starlark.MakeUint64(uint64(x)), nil
 	case uint64:
+		// Only a uint64 that overflows int64 survives normalization as uint64;
+		// smaller unsigned values arrive as int64 above. MakeUint64 preserves the
+		// full magnitude either way.
 		return starlark.MakeUint64(x), nil
-	case float32:
-		return starlark.Float(float64(x)), nil
 	case float64:
 		return starlark.Float(x), nil
 	case *big.Int:
 		// DuckDB returns HUGEINT (128-bit) for sum() over an integer column (and
-		// for raw HUGEINT columns); the duckdb driver scans those into *big.Int.
-		// MakeBigInt yields an arbitrary-precision Starlark Int.
+		// for raw HUGEINT columns); the duckdb driver scans those into *big.Int,
+		// which the normalizer passes through unchanged. MakeBigInt yields an
+		// arbitrary-precision Starlark Int.
 		if x == nil {
 			return starlark.None, nil
 		}
