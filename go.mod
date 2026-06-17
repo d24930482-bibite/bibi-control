@@ -6,6 +6,7 @@ toolchain go1.24.5
 
 require (
 	github.com/duckdb/duckdb-go/v2 v2.10503.1
+	github.com/google/uuid v1.6.0
 	go.starlark.net v0.0.0-20260324133313-ffb3f39dd27a
 	gocloud.dev v0.45.0
 	modernc.org/sqlite v1.45.0
@@ -26,7 +27,6 @@ require (
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/goccy/go-json v0.10.5 // indirect
 	github.com/google/flatbuffers v25.12.19+incompatible // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/googleapis/gax-go/v2 v2.15.0 // indirect
 	github.com/klauspost/compress v1.18.3 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
