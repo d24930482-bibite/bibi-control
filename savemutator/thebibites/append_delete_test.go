@@ -527,9 +527,13 @@ func wantActiveSpecies(t *testing.T, got []int64, want ...int64) {
 }
 
 // parseSpeciesArchive builds a save with a speciesData.json (activeSpeciesList
-// [1,2,3]) and members so each branch of species reconciliation is exercised:
-// species 1 has one bibite (bibite_0), species 2 has two bibites (bibite_1,
-// bibite_2), and species 3 has one egg (egg_0).
+// [1,2,3], a recordedSpecies record per id with a distinct template.genes/name,
+// and a nextSpeciesID) and members so each branch of species reconciliation is
+// exercised: species 1 has one bibite (bibite_0), species 2 has two bibites
+// (bibite_1, bibite_2), and species 3 has one egg (egg_0). The non-empty records
+// let the F3 remap tests observe that the dest's coincidental same-id record is
+// left untouched (no conflation) and that nextSpeciesID is the allocator's
+// preferred path.
 func parseSpeciesArchive(t *testing.T) *tb.Archive {
 	t.Helper()
 
@@ -538,11 +542,17 @@ func parseSpeciesArchive(t *testing.T) *tb.Archive {
 		return append(raw, []byte(body)...)
 	}
 
+	speciesData := `{"nextSpeciesID":4,"activeSpeciesList":[1,2,3],"recordedSpecies":[` +
+		`{"speciesID":1,"parentID":0,"name":"dest-alpha","template":{"genes":{"SizeRatio":1.1}}},` +
+		`{"speciesID":2,"parentID":0,"name":"dest-beta","template":{"genes":{"SizeRatio":2.2}}},` +
+		`{"speciesID":3,"parentID":0,"name":"dest-gamma","template":{"genes":{"SizeRatio":3.3}}}` +
+		`]}`
+
 	sourcePath := filepath.Join(t.TempDir(), "species.zip")
 	archive := &tb.Archive{
 		Entries: []tb.Entry{
 			{Index: 0, Name: "scene.bb8scene", Kind: tb.EntryScene, Method: zip.Deflate, Raw: withBOM(`{"nBibites":3}`)},
-			{Index: 1, Name: "speciesData.json", Kind: tb.EntrySpecies, Method: zip.Deflate, Raw: withBOM(`{"activeSpeciesList":[1,2,3],"recordedSpecies":[]}`)},
+			{Index: 1, Name: "speciesData.json", Kind: tb.EntrySpecies, Method: zip.Deflate, Raw: withBOM(speciesData)},
 			{Index: 2, Name: "bibites/bibite_0.bb8", Kind: tb.EntryBibite, Method: zip.Deflate, Raw: withBOM(`{"body":{"id":42},"genes":{"speciesID":1},"brain":{"Nodes":[],"Synapses":[]}}`)},
 			{Index: 3, Name: "bibites/bibite_1.bb8", Kind: tb.EntryBibite, Method: zip.Deflate, Raw: withBOM(`{"body":{"id":43},"genes":{"speciesID":2},"brain":{"Nodes":[],"Synapses":[]}}`)},
 			{Index: 4, Name: "bibites/bibite_2.bb8", Kind: tb.EntryBibite, Method: zip.Deflate, Raw: withBOM(`{"body":{"id":44},"genes":{"speciesID":2},"brain":{"Nodes":[],"Synapses":[]}}`)},
