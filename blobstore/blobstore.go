@@ -21,6 +21,12 @@ type Store interface {
 	Put(ctx context.Context, blob []byte) (Ref, error)
 	Get(ctx context.Context, ref Ref) ([]byte, error)
 	Has(ctx context.Context, ref Ref) (bool, error)
+	// Delete removes the backing object for ref. Deleting a missing object is a
+	// no-op that returns nil: idempotency is part of the contract so a
+	// crash-safe re-run of an eviction (catalog flip already committed, byte
+	// delete retried) is safe. Inline refs have no backing object and are a
+	// no-op too.
+	Delete(ctx context.Context, ref Ref) error
 }
 
 // Ref identifies a stored blob by digest and size. Inline is populated for

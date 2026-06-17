@@ -180,6 +180,37 @@ func (s *FSStore) Has(ctx context.Context, ref Ref) (bool, error) {
 	return attrs.Size == ref.Size, nil
 }
 
+// Delete removes the backing object for ref. It is idempotent: deleting an
+// object that is already absent returns nil (gcerrors.NotFound is treated as
+// success, the same pattern Has/storedObjectMatches use). Inline refs carry
+// their bytes in the ref itself and have no backing object, so deleting one is
+// a no-op. This is the only byte-destructive primitive; the crash-safe
+// eviction sequence (catalog flip committed first) relies on its idempotency so
+// a re-run after a mid-evict crash is safe.
+func (s *FSStore) Delete(ctx context.Context, ref Ref) error {
+	if s == nil || s.bucket == nil {
+		return fmt.Errorf("blobstore: FSStore is nil")
+	}
+	ctx, err := usableContext(ctx)
+	if err != nil {
+		return err
+	}
+	if err := ref.Validate(); err != nil {
+		return err
+	}
+	if ref.Inline != nil {
+		return nil
+	}
+
+	if err := s.bucket.Delete(ctx, s.objectKey(ref.SHA256)); err != nil {
+		if gcerrors.Code(err) == gcerrors.NotFound {
+			return nil
+		}
+		return fmt.Errorf("blobstore: delete object %s: %w", ref.SHA256, err)
+	}
+	return nil
+}
+
 func (s *FSStore) objectKey(digest string) string {
 	return "objects/" + digest[:2] + "/" + digest[2:4] + "/" + digest
 }
