@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -249,8 +250,9 @@ func TestReloadNode_MirrorOnlyHeadRefused(t *testing.T) {
 	dropPath := filepath.Join(t.TempDir(), "current.zip")
 	fake := newReloadFakeNode(t, ws, "node-mirror", world.ID, dropPath, "")
 
-	if _, err := ws.ReloadNode(ctx, "node-mirror"); err == nil {
-		t.Fatalf("ReloadNode on mirror_only head: want error, got nil")
+	_, reloadErr := ws.ReloadNode(ctx, "node-mirror")
+	if !errors.Is(reloadErr, ErrNotRematerializable) {
+		t.Fatalf("ReloadNode on mirror_only head: err = %v, want ErrNotRematerializable", reloadErr)
 	}
 	// The guard fires before any file write or RELOAD.
 	if _, err := os.Stat(dropPath); err == nil {

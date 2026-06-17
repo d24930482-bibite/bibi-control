@@ -117,12 +117,11 @@ func (w *Workspace) headBlobBytes(ctx context.Context, worldID string) ([]byte, 
 	if err != nil {
 		return nil, fmt.Errorf("get head revision for world %q: %w", worldID, err)
 	}
-	// Blob-present guard (forward-compat with G4 blob eviction). A well-formed
-	// world's head is never evictable, but guard it anyway: this returns a plain
-	// error today; G4 replaces it with the typed ErrNotRematerializable.
-	// G4: replace with ErrNotRematerializable
+	// Blob-present guard (defense-in-depth; a well-formed world's head is
+	// never evictable, but guard anyway so a catalog-flipped head fails loud
+	// with the typed sentinel rather than an opaque blobstore miss downstream).
 	if !rev.BlobPresent {
-		return nil, fmt.Errorf("head revision %d is mirror_only (blob evicted): cannot reload", rev.ID)
+		return nil, notRematerializable(worldID, rev.ID, "reload")
 	}
 	data, err := w.blobs().Get(ctx, rev.BlobRef)
 	if err != nil {

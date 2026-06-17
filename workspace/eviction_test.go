@@ -253,8 +253,9 @@ func TestEvictThenLoadIsNotRematerializable(t *testing.T) {
 		t.Fatalf("SetWorldHead(evicted): %v", err)
 	}
 	_ = ws.Unload(world.ID)
-	if _, err := ws.Load(ctx, world.ID); err == nil {
-		t.Fatalf("Load of world whose head is an evicted (mirror_only) revision succeeded; want blob-evicted error")
+	_, err := ws.Load(ctx, world.ID)
+	if !errors.Is(err, ErrNotRematerializable) {
+		t.Fatalf("Load of mirror_only head: err = %v, want ErrNotRematerializable", err)
 	}
 }
 
