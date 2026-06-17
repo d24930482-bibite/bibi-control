@@ -260,9 +260,18 @@ func (s *Store) RecordRevision(ctx context.Context, input RevisionInput) (Revisi
 		return Revision{}, err
 	}
 
-	id, err := insertRevisionTx(ctx, s.db, revision, blobRefJSON, inlineBlob)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Revision{}, fmt.Errorf("revisionstore: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	id, err := insertRevisionTx(ctx, tx, revision, blobRefJSON, inlineBlob)
 	if err != nil {
 		return Revision{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Revision{}, fmt.Errorf("revisionstore: commit record tx: %w", err)
 	}
 	return s.RevisionByID(ctx, id)
 }
@@ -312,9 +321,19 @@ func (s *Store) RecordRevisionAdvancingHead(ctx context.Context, worldID string,
 }
 
 // insertRevisionTx inserts a save revision row via q (either *sql.DB or *sql.Tx)
-// and returns the new row id. The tier/blob_present/refcount/mirror_schema_version
-// columns are intentionally omitted so the schema defaults ('full'/1/0/NULL)
-// apply.
+// and returns the new row id. The tier/blob_present/mirror_schema_version
+// columns are intentionally omitted so the schema defaults ('full'/1/NULL)
+// apply. The row's refcount is seeded from the current per-hash shared count
+// (the COALESCE(MAX(refcount) over the pre-existing rows sharing this sha256),
+// 0 when the hash is new) and the row is then incremented via the same q (so
+// the increment commits atomically with the insert). The increment is per-hash:
+// it lifts every row sharing this sha256 — the just-inserted row plus any
+// pre-existing dedup-sharing rows — by one, keeping the shared count equal on
+// all of them and equal to the number of revisions referencing the hash. This
+// establishes the revision's own blob reference the instant it exists, so a
+// crash can never leave a refcount-0 row for GC to wrongly reap; it also keeps
+// the per-hash, all-rows model (every sharing row carries the same count) that
+// EvictRevisionBlob/UnreferencedBlobs read.
 func insertRevisionTx(ctx context.Context, q sqlExec, revision Revision, blobRefJSON string, inlineBlob []byte) (int64, error) {
 	parentID := sql.NullInt64{}
 	if revision.ParentID != nil {
@@ -334,8 +353,11 @@ func insertRevisionTx(ctx context.Context, q sqlExec, revision Revision, blobRef
 			inline_blob,
 			script_run_id,
 			created_at,
-			world_id
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			world_id,
+			refcount
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,
+			COALESCE((SELECT MAX(refcount) FROM save_revisions WHERE sha256 = ?), 0)
+		)
 	`,
 		revision.SHA256,
 		revision.Size,
@@ -346,6 +368,7 @@ func insertRevisionTx(ctx context.Context, q sqlExec, revision Revision, blobRef
 		revision.ScriptRunID,
 		formatTime(revision.CreatedAt),
 		worldID,
+		revision.SHA256,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("revisionstore: insert revision: %w", err)
@@ -353,6 +376,9 @@ func insertRevisionTx(ctx context.Context, q sqlExec, revision Revision, blobRef
 	id, err := result.LastInsertId()
 	if err != nil {
 		return 0, fmt.Errorf("revisionstore: revision id: %w", err)
+	}
+	if err := incBlobRefTx(ctx, q, revision.SHA256); err != nil {
+		return 0, err
 	}
 	return id, nil
 }
@@ -791,9 +817,7 @@ func (s *Store) IncBlobRef(ctx context.Context, sha256 string) (int64, error) {
 	if err := validateSHA256(sha256); err != nil {
 		return 0, err
 	}
-	result, err := s.db.ExecContext(ctx, `
-		UPDATE save_revisions SET refcount = refcount + 1 WHERE sha256 = ?
-	`, sha256)
+	result, err := s.db.ExecContext(ctx, incBlobRefSQL, sha256)
 	if err != nil {
 		return 0, fmt.Errorf("revisionstore: inc blob ref: %w", err)
 	}
@@ -802,6 +826,23 @@ func (s *Store) IncBlobRef(ctx context.Context, sha256 string) (int64, error) {
 		return 0, fmt.Errorf("revisionstore: inc blob ref rows affected: %w", err)
 	}
 	return affected, nil
+}
+
+// incBlobRefSQL is the per-hash refcount increment shared by the public
+// IncBlobRef lever and the recorder's tx-scoped self-reference (incBlobRefTx).
+const incBlobRefSQL = `UPDATE save_revisions SET refcount = refcount + 1 WHERE sha256 = ?`
+
+// incBlobRefTx runs the per-hash refcount increment on q (a *sql.Tx or *sql.DB)
+// so it can commit atomically with another statement in the caller's
+// transaction. Unlike the public IncBlobRef it skips the nil-guard,
+// usableContext, validateSHA256, and rows-affected accounting because its only
+// caller (insertRevisionTx) has already validated sha256 via normalizeRevision
+// and shares the caller's context.
+func incBlobRefTx(ctx context.Context, q sqlExec, sha256 string) error {
+	if _, err := q.ExecContext(ctx, incBlobRefSQL, sha256); err != nil {
+		return fmt.Errorf("revisionstore: inc blob ref: %w", err)
+	}
+	return nil
 }
 
 // DecBlobRef decrements the refcount of every revision sharing sha256, floored

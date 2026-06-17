@@ -609,8 +609,8 @@ func TestStoreRecordRevisionAdvancingHead(t *testing.T) {
 	if first.ParentID != nil {
 		t.Fatalf("first revision parent_id = %v, want nil", first.ParentID)
 	}
-	if first.Tier != "full" || !first.BlobPresent || first.Refcount != 0 || first.MirrorSchemaVersion != nil {
-		t.Fatalf("first revision tier defaults = (tier=%q, present=%v, refcount=%d, mirror=%v)", first.Tier, first.BlobPresent, first.Refcount, first.MirrorSchemaVersion)
+	if first.Tier != "full" || !first.BlobPresent || first.Refcount != 1 || first.MirrorSchemaVersion != nil {
+		t.Fatalf("first revision tier defaults = (tier=%q, present=%v, refcount=%d (want 1, the self-ref), mirror=%v)", first.Tier, first.BlobPresent, first.Refcount, first.MirrorSchemaVersion)
 	}
 
 	afterFirst, err := store.GetWorld(ctx, world.ID)
@@ -770,12 +770,17 @@ func TestStoreBlobRefcountLifecycle(t *testing.T) {
 	if _, err := store.DecBlobRef(ctx, ref.SHA256); err != nil {
 		t.Fatalf("DecBlobRef() error = %v", err)
 	}
-	if got := rawRefcount(t, ctx, store, rev.ID); got != 1 {
-		t.Fatalf("refcount after inc x2 / dec = %d, want 1", got)
+	// RecordRevision establishes the revision's own self-ref (refcount 1), so
+	// after self-ref(1) + inc x2(3) - dec(1) the count is 2.
+	if got := rawRefcount(t, ctx, store, rev.ID); got != 2 {
+		t.Fatalf("refcount after record self-ref + inc x2 / dec = %d, want 2", got)
 	}
 
 	// Dec down to 0 then again: the WHERE refcount > 0 guard keeps it at 0
-	// (CHECK (refcount >= 0) must never be violated).
+	// (CHECK (refcount >= 0) must never be violated). Two more decs bring 2 -> 0.
+	if _, err := store.DecBlobRef(ctx, ref.SHA256); err != nil {
+		t.Fatalf("DecBlobRef() toward zero error = %v", err)
+	}
 	if _, err := store.DecBlobRef(ctx, ref.SHA256); err != nil {
 		t.Fatalf("DecBlobRef() to zero error = %v", err)
 	}
@@ -809,6 +814,110 @@ func TestStoreBlobRefcountLifecycle(t *testing.T) {
 	}
 	if !containsString(unref, ref.SHA256) {
 		t.Fatalf("UnreferencedBlobs() = %v, want it to include evicted hash %s", unref, ref.SHA256)
+	}
+}
+
+func TestStoreRecordEstablishesBlobRef(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	store, err := Open(filepath.Join(dir, "metadata.sqlite"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	blobs, err := blobstore.NewFSStore(filepath.Join(dir, "blobs"), blobstore.WithInlineThreshold(0))
+	if err != nil {
+		t.Fatalf("NewFSStore() error = %v", err)
+	}
+	defer blobs.Close()
+
+	run, err := store.RecordScriptRun(ctx, ScriptRunInput{
+		ScriptSHA256: strings.Repeat("d", blobstore.SHA256HexLength),
+		Status:       "succeeded",
+	})
+	if err != nil {
+		t.Fatalf("RecordScriptRun() error = %v", err)
+	}
+
+	// A freshly recorded revision establishes its own blob reference atomically
+	// with the insert: refcount lands at 1, not the schema default 0.
+	ref, err := blobs.Put(ctx, []byte("self-referenced save"))
+	if err != nil {
+		t.Fatalf("Put() error = %v", err)
+	}
+	first, err := store.RecordRevision(ctx, RevisionInput{
+		BlobRef:     ref,
+		ScriptRunID: run.ID,
+	})
+	if err != nil {
+		t.Fatalf("RecordRevision(first) error = %v", err)
+	}
+	if first.Refcount != 1 {
+		t.Fatalf("first.Refcount = %d, want 1 (the revision's own self-ref)", first.Refcount)
+	}
+	if got := rawRefcount(t, ctx, store, first.ID); got != 1 {
+		t.Fatalf("on-disk refcount after first record = %d, want 1", got)
+	}
+
+	// Recording a second revision with the SAME BlobRef (dedup) shares the hash;
+	// the per-hash count tracks the number of referencing revisions, so both
+	// rows now read refcount 2.
+	second, err := store.RecordRevision(ctx, RevisionInput{
+		BlobRef:     ref,
+		ScriptRunID: run.ID,
+	})
+	if err != nil {
+		t.Fatalf("RecordRevision(second, same hash) error = %v", err)
+	}
+	if got := rawRefcount(t, ctx, store, first.ID); got != 2 {
+		t.Fatalf("first row refcount after dedup-share = %d, want 2", got)
+	}
+	if got := rawRefcount(t, ctx, store, second.ID); got != 2 {
+		t.Fatalf("second row refcount after dedup-share = %d, want 2", got)
+	}
+
+	// A distinct-hash revision recorded into a world via the advancing-head path
+	// also self-refs in the one atomic tx. The crash-equivalent check: the
+	// freshly recorded, still-blob_present hash must NOT appear in
+	// UnreferencedBlobs (its bytes are still needed), proving the +1 committed
+	// with the insert rather than leaving a refcount-0 window.
+	ws, err := store.CreateWorkspace(ctx, WorkspaceInput{Owner: "owner", Name: "ws"})
+	if err != nil {
+		t.Fatalf("CreateWorkspace() error = %v", err)
+	}
+	world, err := store.CreateWorld(ctx, WorldInput{WorkspaceID: ws.ID, Name: "world"})
+	if err != nil {
+		t.Fatalf("CreateWorld() error = %v", err)
+	}
+	headRef, err := blobs.Put(ctx, []byte("head save bytes"))
+	if err != nil {
+		t.Fatalf("Put(head) error = %v", err)
+	}
+	headSim := 5.0
+	head, err := store.RecordRevisionAdvancingHead(ctx, world.ID, &headSim, RevisionInput{
+		BlobRef:     headRef,
+		ScriptRunID: run.ID,
+	})
+	if err != nil {
+		t.Fatalf("RecordRevisionAdvancingHead(head) error = %v", err)
+	}
+	if head.Refcount != 1 {
+		t.Fatalf("head.Refcount = %d, want 1 (the revision's own self-ref)", head.Refcount)
+	}
+	if got := rawRefcount(t, ctx, store, head.ID); got != 1 {
+		t.Fatalf("on-disk refcount after head record = %d, want 1", got)
+	}
+	unref, err := store.UnreferencedBlobs(ctx)
+	if err != nil {
+		t.Fatalf("UnreferencedBlobs() error = %v", err)
+	}
+	if containsString(unref, headRef.SHA256) {
+		t.Fatalf("UnreferencedBlobs() = %v, must not list freshly recorded hash %s", unref, headRef.SHA256)
+	}
+	if containsString(unref, ref.SHA256) {
+		t.Fatalf("UnreferencedBlobs() = %v, must not list dedup-shared hash %s", unref, ref.SHA256)
 	}
 }
 
