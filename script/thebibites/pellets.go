@@ -340,10 +340,51 @@ func (pp *PendingPellet) SetField(name string, val starlark.Value) error {
 	if err := validateSet(spec, goVal); err != nil {
 		return fmt.Errorf("pellet.%s: %w", name, err)
 	}
-	if err := setNestedPellet(pp.data, spec.jsonKey, goVal); err != nil {
+	// Coerce to the field's type before writing into the clone so the pending and
+	// committed pellet paths produce identical on-disk JSON: the committed path runs
+	// goVal through setRowField (DOUBLE -> float64), so e.g. p.amount = 5 must stage
+	// 5.0 here too, not the raw integer goVal from fromStarlark.
+	coerced, err := coercePelletScalar(spec.sqlType, goVal)
+	if err != nil {
+		return fmt.Errorf("pellet.%s: %w", name, err)
+	}
+	if err := setNestedPellet(pp.data, spec.jsonKey, coerced); err != nil {
 		return fmt.Errorf("pellet.%s: %w", name, err)
 	}
 	return nil
+}
+
+// coercePelletScalar coerces goVal (an int64/float64/bool/string from fromStarlark)
+// to the Go type implied by the column's generated sqlType, so the pending-pellet
+// clone write matches the committed path's setRowField coercion (most pellet scalars
+// are DOUBLE, so an integral Starlark int must be staged as a float). Mirrors the
+// kind policy in deriveType/asFloat64/asInt64; an unknown sqlType passes the value
+// through unchanged (same lenient stance deriveType takes for new generated types).
+func coercePelletScalar(sqlType string, goVal any) (any, error) {
+	switch deriveType(sqlType) {
+	case kindNumber:
+		f, ok := asFloat64(goVal)
+		if !ok {
+			return nil, fmt.Errorf("cannot assign %T to numeric field", goVal)
+		}
+		return f, nil
+	case kindInt:
+		n, ok := asInt64(goVal)
+		if !ok {
+			return nil, fmt.Errorf("cannot assign %T to integer field", goVal)
+		}
+		return n, nil
+	case kindUint:
+		n, ok := asInt64(goVal)
+		if !ok || n < 0 {
+			return nil, fmt.Errorf("cannot assign %T to unsigned field", goVal)
+		}
+		return n, nil
+	default:
+		// kindBool/kindString/kindUnknown: validateSet has already type-checked, and
+		// bool/string need no numeric coercion, so pass through unchanged.
+		return goVal, nil
+	}
 }
 
 // appendBuiltin implements pendingPellet.append(zone="..."): resolve the pellet group

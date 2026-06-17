@@ -321,6 +321,39 @@ func TestPelletCloneEditReadBack(t *testing.T) {
 	}
 }
 
+// TestPelletCloneIntegralScalarStagesFloat: setting an integral value on a DOUBLE
+// pellet field through the pending (clone) path must coerce to a float in the cloned
+// JSON, identical to the committed Pellet.SetField path (setRowField -> float64).
+// Guards F1: the pending write used to stage the raw integer goVal, diverging from
+// the committed path's on-disk JSON type fidelity.
+func TestPelletCloneIntegralScalarStagesFloat(t *testing.T) {
+	ls := loadFixture(t)
+	if len(ls.tables.Pellets) == 0 {
+		t.Skip("fixture has no pellets")
+	}
+	pp := clonePellet(t, ls, 0)
+	// amount is a DOUBLE column; assigning a Starlark int must land as a float64 in
+	// the clone's JSON, mirroring the committed path.
+	if err := pp.SetField("amount", starlark.MakeInt(5)); err != nil {
+		t.Fatalf("SetField(amount=int): %v", err)
+	}
+	spec, ok := pelletRegistry()["amount"]
+	if !ok {
+		t.Fatal("pelletRegistry has no amount spec")
+	}
+	v, ok := getNestedPellet(pp.data, spec.jsonKey)
+	if !ok {
+		t.Fatalf("amount path %q missing in clone", spec.jsonKey)
+	}
+	f, ok := v.(float64)
+	if !ok {
+		t.Fatalf("clone amount staged as %T (%v), want float64 (matches committed setRowField path)", v, v)
+	}
+	if f != 5.0 {
+		t.Errorf("clone amount = %v, want 5.0", f)
+	}
+}
+
 // TestPelletCloneAppendNotMirrored: a clone-append is structural — staged but not
 // mirrored, so it is invisible to in-run reads/queries until commit.
 func TestPelletCloneAppendNotMirrored(t *testing.T) {
