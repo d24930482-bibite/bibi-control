@@ -640,6 +640,54 @@ func (s *Store) MirrorOnlyRevisions(ctx context.Context) ([]Revision, error) {
 	return revisions, nil
 }
 
+// OrphanedBlobs returns ONE representative revision per distinct sha256 for which
+// NO row is blob_present=1 — i.e. every revision of that content is mirror_only,
+// so the bytes are not needed by any full revision and are reclaimable. G3's
+// GCUnreferencedBlobs consumes this list to delete the orphan blobstore bytes.
+//
+// This is the TRUE orphan condition, distinct from UnreferencedBlobs (which
+// gates on refcount=0). G2's EvictRevisionBlob flips tier/blob_present only and
+// leaves refcount=1, so the evicted orphan never appears in UnreferencedBlobs;
+// OrphanedBlobs catches it by gating on "no row of this sha is blob_present=1".
+// The MIN(id) correlated subquery collapses each sha to one representative row so
+// the caller gets exactly one BlobRef (sha + size) per orphan sha to stat/delete.
+func (s *Store) OrphanedBlobs(ctx context.Context) ([]Revision, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("revisionstore: Store is nil")
+	}
+	ctx, err := usableContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, sha256, size, parent_id, source_path, blob_ref, inline_blob, script_run_id, created_at,
+			world_id, tier, blob_present, refcount, mirror_schema_version
+		FROM save_revisions r
+		WHERE r.blob_present = 0
+		  AND r.sha256 NOT IN (SELECT sha256 FROM save_revisions WHERE blob_present = 1)
+		  AND r.id = (SELECT MIN(id) FROM save_revisions WHERE sha256 = r.sha256)
+		ORDER BY r.sha256
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("revisionstore: query orphaned blobs: %w", err)
+	}
+	defer rows.Close()
+
+	var revisions []Revision
+	for rows.Next() {
+		revision, err := scanRevisionRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		revisions = append(revisions, revision)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("revisionstore: iterate orphaned blobs: %w", err)
+	}
+	return revisions, nil
+}
+
 // FullRevisions returns every tier='full' / blob_present=1 revision, ordered by
 // insertion id. Reconcile (G2) scans these to detect rows whose blob bytes went
 // missing, demoting the non-head ones to 'mirror_only' (and failing loudly on a
