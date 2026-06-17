@@ -139,7 +139,7 @@ func (s *Session) Apply() error {
 	updates := make(map[string]*entryUpdate)
 	var removed []string
 	var added []tb.Entry
-	for i, op := range s.ops {
+	for i, op := range orderElementDeletes(s.ops) {
 		switch op.Kind {
 		case OperationDeleteEntry, OperationAppendEntry:
 			if err := s.applyEntryOperation(updates, &removed, &added, op); err != nil {
@@ -385,6 +385,19 @@ func (s *Session) applyDeleteEntry(updates map[string]*entryUpdate, removed *[]s
 		}
 	}
 
+	// If this removes the last living member of its species, drop the species id
+	// from speciesData.json's activeSpeciesList. Bibites and eggs both carry
+	// genes.speciesID, so this applies to either kind.
+	if entry.Kind == tb.EntryBibite || entry.Kind == tb.EntryEgg {
+		if sid, ok := entitySpeciesID(entry.JSON); ok {
+			if !s.speciesHasOtherMembers(op.Target.EntryName, *removed, sid) {
+				if err := s.removeActiveSpecies(updates, sid); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
 	*removed = append(*removed, op.Target.EntryName)
 	return nil
 }
@@ -526,10 +539,168 @@ func childIndexOf(root any, id int64) int {
 	return -1
 }
 
+// entitySpeciesID reads genes.speciesID from a bibite or egg entry's JSON. The
+// path matches the parser's sqlref:"genes.speciesID" on BibiteRow and EggRow.
+func entitySpeciesID(root any) (int64, bool) {
+	value, ok, err := getJSONPath(root, "genes.speciesID")
+	if err != nil || !ok {
+		return 0, false
+	}
+	return jsonNumberToInt64(value)
+}
+
+// speciesHasOtherMembers reports whether any bibite or egg entry other than
+// skipName (and not already staged for removal) still belongs to species sid.
+// Like entriesReferencingChild, it reads entry.JSON directly, so a same-batch
+// genes.speciesID reassignment is not considered.
+func (s *Session) speciesHasOtherMembers(skipName string, removed []string, sid int64) bool {
+	removedSet := make(map[string]struct{}, len(removed))
+	for _, name := range removed {
+		removedSet[name] = struct{}{}
+	}
+	for i := range s.archive.Entries {
+		entry := &s.archive.Entries[i]
+		if entry.Kind != tb.EntryBibite && entry.Kind != tb.EntryEgg {
+			continue
+		}
+		if entry.Name == skipName || entry.JSON == nil {
+			continue
+		}
+		if _, dropped := removedSet[entry.Name]; dropped {
+			continue
+		}
+		if other, ok := entitySpeciesID(entry.JSON); ok && other == sid {
+			return true
+		}
+	}
+	return false
+}
+
+// removeActiveSpecies drops sid from speciesData.json's activeSpeciesList. It is
+// a no-op when the save has no species entry, no activeSpeciesList, or the id is
+// already absent — staleness here is not parser-validated, so a missing path
+// degrades quietly, consistent with the other delete-cascade helpers.
+func (s *Session) removeActiveSpecies(updates map[string]*entryUpdate, sid int64) error {
+	entry := s.archive.Entry(SpeciesEntryName)
+	if entry == nil {
+		return nil
+	}
+	// A present-but-undecoded species entry (parser kept it after a
+	// json_decode_failed diagnostic) has no activeSpeciesList to reconcile.
+	// Degrade quietly rather than aborting the whole delete via entryUpdate.
+	if _, staged := updates[SpeciesEntryName]; !staged && entry.JSON == nil {
+		return nil
+	}
+	update, err := s.entryUpdate(updates, SpeciesTarget())
+	if err != nil {
+		return err
+	}
+	idx := activeSpeciesIndexOf(update.value, sid)
+	if idx < 0 {
+		return nil
+	}
+	return deleteJSONArrayElement(update.value, fmt.Sprintf("activeSpeciesList[%d]", idx))
+}
+
+func activeSpeciesIndexOf(root any, sid int64) int {
+	value, ok, err := getJSONPath(root, "activeSpeciesList")
+	if err != nil || !ok {
+		return -1
+	}
+	ids, ok := value.([]any)
+	if !ok {
+		return -1
+	}
+	for i, id := range ids {
+		if n, ok := jsonNumberToInt64(id); ok && n == sid {
+			return i
+		}
+	}
+	return -1
+}
+
 func cloneOperation(op Operation) Operation {
 	op.Target.Guards = append([]Guard(nil), op.Target.Guards...)
 	if op.EntryPayload.JSON != nil {
 		op.EntryPayload.JSON = cloneJSON(op.EntryPayload.JSON)
 	}
 	return op
+}
+
+// orderElementDeletes returns a re-ordered view of ops in which array-element
+// deletes (OperationDelete) that target the SAME parent array are applied in
+// DESCENDING trailing-index order. This makes sibling element deletes
+// commit-correct regardless of stage order: removing a higher index never shifts
+// a lower pending index, so each delete still addresses the element its
+// load-time positional index named (and its value guard still validates against
+// the right element, since lower indices have not moved yet).
+//
+// The re-order is a slot-preserving permutation: it touches only the positions a
+// same-array delete group already occupies, reassigning those exact slots with the
+// group's deletes sorted by descending trailing index. Every other operation
+// (sets, appends, entry ops, deletes against other arrays) keeps its original
+// position, so order-sensitive cascades (scene-count reconciliation, parent-link
+// pruning) are unaffected. Operations whose path cannot be parsed are left in
+// place — Apply re-validates and surfaces the error.
+func orderElementDeletes(ops []Operation) []Operation {
+	// Group the indices of element deletes by (entry name + parent array path).
+	type elementDelete struct {
+		pos   int // position in ops
+		index int // trailing array index
+	}
+	groups := make(map[string][]elementDelete)
+	multi := false
+	for i, op := range ops {
+		if op.Kind != OperationDelete {
+			continue
+		}
+		array, index, ok := deleteArrayKey(op)
+		if !ok {
+			continue
+		}
+		key := op.Target.EntryName + "\x00" + array
+		groups[key] = append(groups[key], elementDelete{pos: i, index: index})
+		if len(groups[key]) > 1 {
+			multi = true
+		}
+	}
+	if !multi {
+		return ops
+	}
+
+	out := append([]Operation(nil), ops...)
+	for _, group := range groups {
+		if len(group) < 2 {
+			continue
+		}
+		// The slots these deletes occupy (kept in original order) receive the same
+		// deletes sorted by descending trailing index.
+		slots := make([]int, len(group))
+		for i, d := range group {
+			slots[i] = d.pos
+		}
+		sort.Slice(slots, func(a, b int) bool { return slots[a] < slots[b] })
+		ordered := append([]elementDelete(nil), group...)
+		sort.Slice(ordered, func(a, b int) bool { return ordered[a].index > ordered[b].index })
+		for i, slot := range slots {
+			out[slot] = ops[ordered[i].pos]
+		}
+	}
+	return out
+}
+
+// deleteArrayKey returns the parent array path (the op path with its trailing
+// "[n]" removed) and the trailing array index for an element-delete operation.
+// ok is false when the path does not end in an array index (e.g. a malformed or
+// non-array delete), in which case the caller leaves the op in place.
+func deleteArrayKey(op Operation) (array string, index int, ok bool) {
+	parts, err := parsePath(op.Path)
+	if err != nil || len(parts) == 0 {
+		return "", 0, false
+	}
+	last := parts[len(parts)-1]
+	if !last.isIndex {
+		return "", 0, false
+	}
+	return renderPath(parts[:len(parts)-1]), last.index, true
 }

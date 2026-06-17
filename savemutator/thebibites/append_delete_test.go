@@ -61,6 +61,69 @@ func TestStageAppendAndDeleteSynapse(t *testing.T) {
 	}
 }
 
+func TestSQLAppendAndDeleteBrainNode(t *testing.T) {
+	archive := parseSyntheticArchive(t)
+	session := NewSession(archive)
+	ref := SQLValueRef{Table: "bibite_brain_nodes", EntryName: "bibites/bibite_0.bb8", BodyID: 42, HasBodyID: true}
+
+	node := map[string]any{"Index": 5, "Type": 0, "TypeName": "Input", "Value": 0.0}
+	if err := session.StageSQLAppend(ref, node); err != nil {
+		t.Fatalf("StageSQLAppend(node) error = %v", err)
+	}
+	fresh, err := session.Commit(filepath.Join(t.TempDir(), "node_appended.zip"))
+	if err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+	if got := jsonArrayLen(t, fresh.Entry("bibites/bibite_0.bb8").JSON, "brain.Nodes"); got != 1 {
+		t.Fatalf("node count after append = %d, want 1", got)
+	}
+
+	session = NewSession(fresh)
+	del := SQLValueRef{Table: "bibite_brain_nodes", EntryName: "bibites/bibite_0.bb8", BodyID: 42, HasBodyID: true, NodeRowIndex: 0, HasNodeRowIndex: true}
+	if err := session.StageSQLDelete(del); err != nil {
+		t.Fatalf("StageSQLDelete(node) error = %v", err)
+	}
+	fresh, err = session.Commit(filepath.Join(t.TempDir(), "node_deleted.zip"))
+	if err != nil {
+		t.Fatalf("Commit(delete) error = %v", err)
+	}
+	if got := jsonArrayLen(t, fresh.Entry("bibites/bibite_0.bb8").JSON, "brain.Nodes"); got != 0 {
+		t.Fatalf("node count after delete = %d, want 0", got)
+	}
+}
+
+func TestSQLAppendAndDeleteStomachContent(t *testing.T) {
+	archive := parseSyntheticArchive(t)
+	session := NewSession(archive)
+	ref := SQLValueRef{Table: "bibite_stomach_contents", EntryName: "bibites/bibite_0.bb8", BodyID: 42, HasBodyID: true}
+
+	content := map[string]any{"material": "Meat", "amount": 1.5, "averageChunkAmount": 0.5}
+	if err := session.StageSQLAppend(ref, content); err != nil {
+		t.Fatalf("StageSQLAppend(content) error = %v", err)
+	}
+	fresh, err := session.Commit(filepath.Join(t.TempDir(), "content_appended.zip"))
+	if err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+	// The synthetic bibite starts with one stomach content element.
+	if got := jsonArrayLen(t, fresh.Entry("bibites/bibite_0.bb8").JSON, "body.stomach.content"); got != 2 {
+		t.Fatalf("content count after append = %d, want 2", got)
+	}
+
+	session = NewSession(fresh)
+	del := SQLValueRef{Table: "bibite_stomach_contents", EntryName: "bibites/bibite_0.bb8", BodyID: 42, HasBodyID: true, ContentIndex: 1, HasContentIndex: true}
+	if err := session.StageSQLDelete(del); err != nil {
+		t.Fatalf("StageSQLDelete(content) error = %v", err)
+	}
+	fresh, err = session.Commit(filepath.Join(t.TempDir(), "content_deleted.zip"))
+	if err != nil {
+		t.Fatalf("Commit(delete) error = %v", err)
+	}
+	if got := jsonArrayLen(t, fresh.Entry("bibites/bibite_0.bb8").JSON, "body.stomach.content"); got != 1 {
+		t.Fatalf("content count after delete = %d, want 1", got)
+	}
+}
+
 func TestStageAppendAndDeleteZone(t *testing.T) {
 	archive := parseSyntheticArchive(t)
 	session := NewSession(archive)
@@ -284,6 +347,22 @@ func TestSQLDeleteResolvesTypedZones(t *testing.T) {
 			path: "brain.Synapses[2]",
 		},
 		{
+			name: "node",
+			ref: SQLValueRef{
+				Table: "bibite_brain_nodes", EntryName: "bibites/bibite_0.bb8",
+				BodyID: 42, HasBodyID: true, NodeRowIndex: 1, HasNodeRowIndex: true,
+			},
+			path: "brain.Nodes[1]",
+		},
+		{
+			name: "stomach_content",
+			ref: SQLValueRef{
+				Table: "bibite_stomach_contents", EntryName: "bibites/bibite_0.bb8",
+				BodyID: 42, HasBodyID: true, ContentIndex: 0, HasContentIndex: true,
+			},
+			path: "body.stomach.content[0]",
+		},
+		{
 			name: "pellet",
 			ref: SQLValueRef{
 				Table: "pellets", EntryName: "pellets.bb8scene",
@@ -342,6 +421,26 @@ func TestSQLAppendArrayAndEntryRules(t *testing.T) {
 		t.Fatalf("synapse append op = %q/%q, want append/brain.Synapses", op.Kind, op.Path)
 	}
 
+	node, err := SQLAppend(SQLValueRef{
+		Table: "bibite_brain_nodes", EntryName: "bibites/bibite_0.bb8", BodyID: 42, HasBodyID: true,
+	}, map[string]any{"Type": 0})
+	if err != nil {
+		t.Fatalf("SQLAppend(node) error = %v", err)
+	}
+	if node.Kind != OperationAppend || node.Path != "brain.Nodes" {
+		t.Fatalf("node append op = %q/%q, want append/brain.Nodes", node.Kind, node.Path)
+	}
+
+	content, err := SQLAppend(SQLValueRef{
+		Table: "bibite_stomach_contents", EntryName: "bibites/bibite_0.bb8", BodyID: 42, HasBodyID: true,
+	}, map[string]any{"material": "Plant", "amount": 1})
+	if err != nil {
+		t.Fatalf("SQLAppend(content) error = %v", err)
+	}
+	if content.Kind != OperationAppend || content.Path != "body.stomach.content" {
+		t.Fatalf("content append op = %q/%q, want append/body.stomach.content", content.Kind, content.Path)
+	}
+
 	if _, err := SQLAppend(SQLValueRef{
 		Table: "bibites", EntryName: "bibites/bibite_0.bb8", BodyID: 42, HasBodyID: true,
 	}, nil); err == nil {
@@ -358,10 +457,13 @@ func TestSQLAppendArrayAndEntryRules(t *testing.T) {
 // exactly the typed-zone tables and nil everywhere else.
 func TestSQLArrayCapabilityMatchesResolverKinds(t *testing.T) {
 	arrayTables := map[string]bool{
-		"bibite_brain_synapses": true,
-		"egg_brain_synapses":    true,
-		"pellets":               true,
-		"settings_zones":        true,
+		"bibite_brain_synapses":   true,
+		"egg_brain_synapses":      true,
+		"bibite_brain_nodes":      true,
+		"egg_brain_nodes":         true,
+		"bibite_stomach_contents": true,
+		"pellets":                 true,
+		"settings_zones":          true,
 	}
 	entryTables := map[string]bool{
 		"bibites":                   true,
@@ -388,6 +490,168 @@ func TestSQLArrayCapabilityMatchesResolverKinds(t *testing.T) {
 		if wantArray && wantEntry {
 			t.Errorf("table %q is both array and entry mutable", spec.table)
 		}
+	}
+}
+
+func activeSpeciesIDs(t *testing.T, archive *tb.Archive) []int64 {
+	t.Helper()
+	value, ok, err := getJSONPath(archive.Entry("speciesData.json").JSON, "activeSpeciesList")
+	if err != nil || !ok {
+		t.Fatalf("getJSONPath(activeSpeciesList) = %v/%t/%v", value, ok, err)
+	}
+	ids, ok := value.([]any)
+	if !ok {
+		t.Fatalf("activeSpeciesList = %T, want array", value)
+	}
+	out := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		n, ok := jsonNumberToInt64(id)
+		if !ok {
+			t.Fatalf("activeSpeciesList element %v not an integer", id)
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+func wantActiveSpecies(t *testing.T, got []int64, want ...int64) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("activeSpeciesList = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("activeSpeciesList = %v, want %v", got, want)
+		}
+	}
+}
+
+// parseSpeciesArchive builds a save with a speciesData.json (activeSpeciesList
+// [1,2,3]) and members so each branch of species reconciliation is exercised:
+// species 1 has one bibite (bibite_0), species 2 has two bibites (bibite_1,
+// bibite_2), and species 3 has one egg (egg_0).
+func parseSpeciesArchive(t *testing.T) *tb.Archive {
+	t.Helper()
+
+	withBOM := func(body string) []byte {
+		raw := append([]byte(nil), utf8BOM...)
+		return append(raw, []byte(body)...)
+	}
+
+	sourcePath := filepath.Join(t.TempDir(), "species.zip")
+	archive := &tb.Archive{
+		Entries: []tb.Entry{
+			{Index: 0, Name: "scene.bb8scene", Kind: tb.EntryScene, Method: zip.Deflate, Raw: withBOM(`{"nBibites":3}`)},
+			{Index: 1, Name: "speciesData.json", Kind: tb.EntrySpecies, Method: zip.Deflate, Raw: withBOM(`{"activeSpeciesList":[1,2,3],"recordedSpecies":[]}`)},
+			{Index: 2, Name: "bibites/bibite_0.bb8", Kind: tb.EntryBibite, Method: zip.Deflate, Raw: withBOM(`{"body":{"id":42},"genes":{"speciesID":1},"brain":{"Nodes":[],"Synapses":[]}}`)},
+			{Index: 3, Name: "bibites/bibite_1.bb8", Kind: tb.EntryBibite, Method: zip.Deflate, Raw: withBOM(`{"body":{"id":43},"genes":{"speciesID":2},"brain":{"Nodes":[],"Synapses":[]}}`)},
+			{Index: 4, Name: "bibites/bibite_2.bb8", Kind: tb.EntryBibite, Method: zip.Deflate, Raw: withBOM(`{"body":{"id":44},"genes":{"speciesID":2},"brain":{"Nodes":[],"Synapses":[]}}`)},
+			{Index: 5, Name: "eggs/egg_0.bb8", Kind: tb.EntryEgg, Method: zip.Deflate, Raw: withBOM(`{"egg":{"id":0,"energy":10},"genes":{"speciesID":3,"gen":1,"isReady":true}}`)},
+		},
+	}
+	if err := tb.WriteArchive(sourcePath, archive); err != nil {
+		t.Fatalf("WriteArchive(species) error = %v", err)
+	}
+	parsed, err := tb.ParseFile(sourcePath, nil)
+	if err != nil {
+		t.Fatalf("ParseFile(species) error = %v", err)
+	}
+	return parsed
+}
+
+func TestStageDeleteReconcilesActiveSpecies(t *testing.T) {
+	t.Run("last member drops the species id", func(t *testing.T) {
+		session := NewSession(parseSpeciesArchive(t))
+		if err := session.StageDeleteBibite(BibiteRef{EntryName: "bibites/bibite_0.bb8", BodyID: 42}); err != nil {
+			t.Fatalf("StageDeleteBibite() error = %v", err)
+		}
+		fresh, err := session.Commit(filepath.Join(t.TempDir(), "species_last.zip"))
+		if err != nil {
+			t.Fatalf("Commit() error = %v", err)
+		}
+		wantActiveSpecies(t, activeSpeciesIDs(t, fresh), 2, 3)
+	})
+
+	t.Run("non-last member keeps the species id", func(t *testing.T) {
+		session := NewSession(parseSpeciesArchive(t))
+		if err := session.StageDeleteBibite(BibiteRef{EntryName: "bibites/bibite_1.bb8", BodyID: 43}); err != nil {
+			t.Fatalf("StageDeleteBibite() error = %v", err)
+		}
+		fresh, err := session.Commit(filepath.Join(t.TempDir(), "species_keep.zip"))
+		if err != nil {
+			t.Fatalf("Commit() error = %v", err)
+		}
+		wantActiveSpecies(t, activeSpeciesIDs(t, fresh), 1, 2, 3)
+	})
+
+	t.Run("egg as last member drops the species id", func(t *testing.T) {
+		session := NewSession(parseSpeciesArchive(t))
+		if err := session.StageSQLDelete(SQLValueRef{
+			Table: "eggs", EntryName: "eggs/egg_0.bb8", EggID: 0, HasEggID: true,
+		}); err != nil {
+			t.Fatalf("StageSQLDelete(egg) error = %v", err)
+		}
+		fresh, err := session.Commit(filepath.Join(t.TempDir(), "species_egg.zip"))
+		if err != nil {
+			t.Fatalf("Commit() error = %v", err)
+		}
+		if fresh.Entry("eggs/egg_0.bb8") != nil {
+			t.Fatalf("egg entry still present after delete")
+		}
+		wantActiveSpecies(t, activeSpeciesIDs(t, fresh), 1, 2)
+	})
+
+	t.Run("both members of a species in one batch drops the id", func(t *testing.T) {
+		session := NewSession(parseSpeciesArchive(t))
+		if err := session.StageDeleteBibite(BibiteRef{EntryName: "bibites/bibite_1.bb8", BodyID: 43}); err != nil {
+			t.Fatalf("StageDeleteBibite(1) error = %v", err)
+		}
+		if err := session.StageDeleteBibite(BibiteRef{EntryName: "bibites/bibite_2.bb8", BodyID: 44}); err != nil {
+			t.Fatalf("StageDeleteBibite(2) error = %v", err)
+		}
+		fresh, err := session.Commit(filepath.Join(t.TempDir(), "species_batch.zip"))
+		if err != nil {
+			t.Fatalf("Commit() error = %v", err)
+		}
+		wantActiveSpecies(t, activeSpeciesIDs(t, fresh), 1, 3)
+	})
+}
+
+// TestStageDeleteWithUndecodedSpeciesData covers F6: a species entry that is
+// present but has nil decoded JSON (the parser keeps it after a
+// json_decode_failed diagnostic). Deleting the last member of a species must
+// degrade quietly instead of aborting the whole delete in entryUpdate. We null
+// the decoded JSON directly to model that state deterministically, independent
+// of how the parser handles malformed bytes.
+func TestStageDeleteWithUndecodedSpeciesData(t *testing.T) {
+	archive := parseSpeciesArchive(t)
+	species := archive.Entry("speciesData.json")
+	if species == nil {
+		t.Fatalf("species entry missing from synthetic archive")
+	}
+	species.JSON = nil
+
+	session := NewSession(archive)
+	// bibite_0 is the last (only) member of species 1.
+	if err := session.StageDeleteBibite(BibiteRef{EntryName: "bibites/bibite_0.bb8", BodyID: 42}); err != nil {
+		t.Fatalf("StageDeleteBibite() error = %v", err)
+	}
+	if err := session.Apply(); err != nil {
+		t.Fatalf("Apply() error = %v, want quiet degrade on undecoded speciesData.json", err)
+	}
+	if session.Archive().Entry("bibites/bibite_0.bb8") != nil {
+		t.Fatalf("bibite entry still present after delete")
+	}
+	// Other entries remain intact; the undecoded species entry is left as-is.
+	if session.Archive().Entry("bibites/bibite_1.bb8") == nil {
+		t.Fatalf("unrelated bibite_1 missing after delete")
+	}
+	leftover := session.Archive().Entry("speciesData.json")
+	if leftover == nil {
+		t.Fatalf("species entry dropped by delete")
+	}
+	if leftover.JSON != nil {
+		t.Fatalf("species entry JSON = %v, want nil (left untouched)", leftover.JSON)
 	}
 }
 

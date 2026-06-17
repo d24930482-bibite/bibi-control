@@ -61,7 +61,7 @@ func logImportRowCounts(t *testing.T, ctx context.Context, db *sql.DB, saveID st
 	var total int64
 	for _, table := range allTables {
 		var n int64
-		q := fmt.Sprintf("SELECT count(*) FROM %s WHERE save_id = ?", quoteIdent(table))
+		q := fmt.Sprintf("SELECT count(*) FROM %s WHERE save_id = ?", QuoteIdent(table))
 		if err := db.QueryRowContext(ctx, q, saveID).Scan(&n); err != nil {
 			t.Fatalf("count %s: %v", table, err)
 		}
@@ -196,7 +196,7 @@ func repoRoot(t *testing.T) string {
 func countRows(t *testing.T, ctx context.Context, db *sql.DB, table, saveID string) int64 {
 	t.Helper()
 
-	query := "SELECT count(*) FROM " + quoteIdent(table) + " WHERE save_id = ?"
+	query := "SELECT count(*) FROM " + QuoteIdent(table) + " WHERE save_id = ?"
 	var count int64
 	if err := db.QueryRowContext(ctx, query, saveID).Scan(&count); err != nil {
 		t.Fatalf("count %s: %v", table, err)

@@ -112,6 +112,52 @@ func entitySynapseDeleteTarget(ref SQLValueRef, kind tb.EntryKind) (Target, stri
 	return target, fmt.Sprintf("%s[%d]", container, ref.SynapseRowIndex), nil
 }
 
+// entityNodeAppendTarget resolves the brain.Nodes array container for an append;
+// entityNodeDeleteTarget extends it with the row index for an element delete. It
+// mirrors the synapse pair; the brain-edit caveat (no graph integrity) lives in
+// the binding layer, not here.
+func entityNodeAppendTarget(ref SQLValueRef, kind tb.EntryKind) (Target, string, error) {
+	target, err := entityTargetFromSQLRef(ref, kind)
+	if err != nil {
+		return Target{}, "", err
+	}
+	return target, "brain.Nodes", nil
+}
+
+func entityNodeDeleteTarget(ref SQLValueRef, kind tb.EntryKind) (Target, string, error) {
+	if err := requireSQLRefFlag(ref, ref.HasNodeRowIndex, "node_row_index"); err != nil {
+		return Target{}, "", err
+	}
+	target, container, err := entityNodeAppendTarget(ref, kind)
+	if err != nil {
+		return Target{}, "", err
+	}
+	return target, fmt.Sprintf("%s[%d]", container, ref.NodeRowIndex), nil
+}
+
+// bibiteStomachAppendTarget resolves the body.stomach.content array container for
+// an append; bibiteStomachDeleteTarget extends it with the content index for an
+// element delete. The SET path resolves through resolveBibiteStomachColumn above;
+// these add the append/delete capability the catalog wires for stomach contents.
+func bibiteStomachAppendTarget(ref SQLValueRef) (Target, string, error) {
+	target, err := bibiteTargetFromSQLRef(ref)
+	if err != nil {
+		return Target{}, "", err
+	}
+	return target, "body.stomach.content", nil
+}
+
+func bibiteStomachDeleteTarget(ref SQLValueRef) (Target, string, error) {
+	if err := requireSQLRefFlag(ref, ref.HasContentIndex, "content_index"); err != nil {
+		return Target{}, "", err
+	}
+	target, container, err := bibiteStomachAppendTarget(ref)
+	if err != nil {
+		return Target{}, "", err
+	}
+	return target, fmt.Sprintf("%s[%d]", container, ref.ContentIndex), nil
+}
+
 func resolveEntityBrainIndexedColumn(ref SQLValueRef, kind tb.EntryKind, columns map[string]string, index int, hasIndex bool, indexField, pathPrefix string) (Target, string, error) {
 	key, err := sqlRefColumnValue(ref, columns)
 	if err != nil {
