@@ -1,0 +1,301 @@
+package workspace
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+
+	tb "github.com/asemones/bibicontrol/saveparser/thebibites"
+)
+
+// fixtureA and fixtureB are two distinct committed saves under
+// testdata/saves/the-bibites. fixtureA is the largest (used by
+// duckdb/import_test.go) and reliably populates the bibites projection.
+const (
+	fixtureA = "autosave_20260301021357.zip"
+	fixtureB = "s.zip"
+)
+
+// repoRootDir walks up from this test file to the directory containing go.mod so
+// the committed testdata fixtures can be located independent of cwd. The duckdb
+// package's repoRoot helper is in package duckdb and not importable here.
+func repoRootDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatalf("go.mod not found walking up from test dir")
+		}
+		dir = parent
+	}
+}
+
+func fixturePath(t *testing.T, name string) string {
+	t.Helper()
+	return filepath.Join(repoRootDir(t), "testdata", "saves", "the-bibites", name)
+}
+
+// newWorkspace creates a fresh workspace under a temp root and registers its
+// Close on cleanup.
+func newWorkspace(t *testing.T, ctx context.Context) *Workspace {
+	t.Helper()
+	ws, err := Create(ctx, t.TempDir(), "alice", "demo")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Close() })
+	return ws
+}
+
+func countBySaveID(t *testing.T, ctx context.Context, ws *Workspace, table, saveID string) int64 {
+	t.Helper()
+	query := "SELECT count(*) FROM " + table + " WHERE save_id = ?"
+	var count int64
+	if err := ws.duck().QueryRowContext(ctx, query, saveID).Scan(&count); err != nil {
+		t.Fatalf("count %s for save_id %q: %v", table, saveID, err)
+	}
+	return count
+}
+
+func TestAddWorldCreatesWorldRevisionAndHead(t *testing.T) {
+	ctx := context.Background()
+	ws := newWorkspace(t, ctx)
+
+	src := fixturePath(t, fixtureA)
+	world, err := ws.AddWorld(ctx, src, "world-a")
+	if err != nil {
+		t.Fatalf("AddWorld: %v", err)
+	}
+
+	if world.ID == "" {
+		t.Fatalf("world ID is empty")
+	}
+	if world.Name != "world-a" {
+		t.Fatalf("world Name = %q, want %q", world.Name, "world-a")
+	}
+	if world.WorkspaceID != ws.ID() {
+		t.Fatalf("world WorkspaceID = %q, want %q", world.WorkspaceID, ws.ID())
+	}
+	if world.HeadRevisionID == nil {
+		t.Fatalf("world HeadRevisionID is nil (head not advanced)")
+	}
+
+	// Parse the fixture independently to learn the expected content hash and
+	// whether the scene carries a sim time.
+	archive, err := tb.ParseFile(src, nil)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+	if archive.Scene != nil && archive.Scene.HasTime {
+		if world.SimTime == nil {
+			t.Fatalf("world SimTime is nil but fixture scene has time %v", archive.Scene.SimulatedTime)
+		}
+		if *world.SimTime != archive.Scene.SimulatedTime {
+			t.Fatalf("world SimTime = %v, want %v", *world.SimTime, archive.Scene.SimulatedTime)
+		}
+	}
+
+	revisions, err := ws.store().RevisionsForWorld(ctx, world.ID)
+	if err != nil {
+		t.Fatalf("RevisionsForWorld: %v", err)
+	}
+	if len(revisions) != 1 {
+		t.Fatalf("RevisionsForWorld returned %d revisions, want 1", len(revisions))
+	}
+	rev := revisions[0]
+	if rev.ParentID != nil {
+		t.Fatalf("first revision ParentID = %v, want nil", *rev.ParentID)
+	}
+	if rev.WorldID != world.ID {
+		t.Fatalf("revision WorldID = %q, want %q", rev.WorldID, world.ID)
+	}
+	if rev.Tier != "full" {
+		t.Fatalf("revision Tier = %q, want %q", rev.Tier, "full")
+	}
+	if !rev.BlobPresent {
+		t.Fatalf("revision BlobPresent = false, want true")
+	}
+	// G1 establishes the blob self-ref atomically inside the recording tx, so a
+	// freshly recorded revision is at refcount = 1 on its own — no extra
+	// IncBlobRef. Anything else means C1 double-counted (or under-counted).
+	if rev.Refcount != 1 {
+		t.Fatalf("revision Refcount = %d, want 1", rev.Refcount)
+	}
+	if rev.BlobRef.SHA256 != archive.SHA256 {
+		t.Fatalf("revision BlobRef.SHA256 = %q, want %q", rev.BlobRef.SHA256, archive.SHA256)
+	}
+
+	// The world's head points at the recorded revision.
+	got, err := ws.store().GetWorld(ctx, world.ID)
+	if err != nil {
+		t.Fatalf("GetWorld: %v", err)
+	}
+	if got.HeadRevisionID == nil {
+		t.Fatalf("GetWorld HeadRevisionID is nil")
+	}
+	if *got.HeadRevisionID != rev.ID {
+		t.Fatalf("GetWorld HeadRevisionID = %d, want %d", *got.HeadRevisionID, rev.ID)
+	}
+}
+
+func TestAddWorldSeedsDualKeyMirror(t *testing.T) {
+	ctx := context.Background()
+	ws := newWorkspace(t, ctx)
+
+	src := fixturePath(t, fixtureA)
+	world, err := ws.AddWorld(ctx, src, "world-a")
+	if err != nil {
+		t.Fatalf("AddWorld: %v", err)
+	}
+
+	revisions, err := ws.store().RevisionsForWorld(ctx, world.ID)
+	if err != nil {
+		t.Fatalf("RevisionsForWorld: %v", err)
+	}
+	if len(revisions) != 1 {
+		t.Fatalf("want 1 revision, got %d", len(revisions))
+	}
+	sha := revisions[0].BlobRef.SHA256
+
+	// Working partition keyed by world id, history partition keyed by revision
+	// sha256 — distinct keys, never overwriting each other. The bibites table is
+	// non-empty for this fixture; both keys must carry the same row count.
+	workingBibites := countBySaveID(t, ctx, ws, "bibites", world.ID)
+	if workingBibites == 0 {
+		t.Fatalf("working partition bibites count is 0 for world id %q", world.ID)
+	}
+	histBibites := countBySaveID(t, ctx, ws, "bibites", sha)
+	if histBibites != workingBibites {
+		t.Fatalf("history bibites count %d != working bibites count %d", histBibites, workingBibites)
+	}
+
+	// save_archives carries one row per save_id — assert both partitions exist.
+	if got := countBySaveID(t, ctx, ws, "save_archives", world.ID); got != 1 {
+		t.Fatalf("save_archives count for world id = %d, want 1", got)
+	}
+	if got := countBySaveID(t, ctx, ws, "save_archives", sha); got != 1 {
+		t.Fatalf("save_archives count for revision sha = %d, want 1", got)
+	}
+
+	// The two keys are different values (the headline dual-key risk).
+	if world.ID == sha {
+		t.Fatalf("world id and revision sha256 are the same value %q", sha)
+	}
+}
+
+func TestAddTwoWorldsAreIsolated(t *testing.T) {
+	ctx := context.Background()
+	ws := newWorkspace(t, ctx)
+
+	worldA, err := ws.AddWorld(ctx, fixturePath(t, fixtureA), "world-a")
+	if err != nil {
+		t.Fatalf("AddWorld A: %v", err)
+	}
+	worldB, err := ws.AddWorld(ctx, fixturePath(t, fixtureB), "world-b")
+	if err != nil {
+		t.Fatalf("AddWorld B: %v", err)
+	}
+
+	if worldA.ID == worldB.ID {
+		t.Fatalf("both worlds got id %q", worldA.ID)
+	}
+	if worldA.HeadRevisionID == nil || worldB.HeadRevisionID == nil {
+		t.Fatalf("a world head is nil: A=%v B=%v", worldA.HeadRevisionID, worldB.HeadRevisionID)
+	}
+	if *worldA.HeadRevisionID == *worldB.HeadRevisionID {
+		t.Fatalf("both worlds share head revision id %d", *worldA.HeadRevisionID)
+	}
+
+	// Each world's working partition is independently keyed in the one DuckDB
+	// file: exactly one save_archives row per world id.
+	if got := countBySaveID(t, ctx, ws, "save_archives", worldA.ID); got != 1 {
+		t.Fatalf("save_archives count for world A = %d, want 1", got)
+	}
+	if got := countBySaveID(t, ctx, ws, "save_archives", worldB.ID); got != 1 {
+		t.Fatalf("save_archives count for world B = %d, want 1", got)
+	}
+
+	worlds, err := ws.store().ListWorlds(ctx, ws.ID())
+	if err != nil {
+		t.Fatalf("ListWorlds: %v", err)
+	}
+	if len(worlds) != 2 {
+		t.Fatalf("ListWorlds returned %d worlds, want 2", len(worlds))
+	}
+	ids := map[string]bool{}
+	for _, wld := range worlds {
+		ids[wld.ID] = true
+	}
+	if !ids[worldA.ID] || !ids[worldB.ID] {
+		t.Fatalf("ListWorlds missing a world id: %v", ids)
+	}
+}
+
+func TestAddWorldBytesMatchesAddWorld(t *testing.T) {
+	ctx := context.Background()
+	ws := newWorkspace(t, ctx)
+
+	src := fixturePath(t, fixtureA)
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+
+	world, err := ws.AddWorldBytes(ctx, data, "from-bytes")
+	if err != nil {
+		t.Fatalf("AddWorldBytes: %v", err)
+	}
+
+	archive, err := tb.ParseFile(src, nil)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+
+	revisions, err := ws.store().RevisionsForWorld(ctx, world.ID)
+	if err != nil {
+		t.Fatalf("RevisionsForWorld: %v", err)
+	}
+	if len(revisions) != 1 {
+		t.Fatalf("want 1 revision, got %d", len(revisions))
+	}
+	if got := revisions[0].BlobRef.SHA256; got != archive.SHA256 {
+		t.Fatalf("AddWorldBytes revision sha256 = %q, want %q (temp-file round-trip lost identity)", got, archive.SHA256)
+	}
+	if revisions[0].Refcount != 1 {
+		t.Fatalf("AddWorldBytes revision Refcount = %d, want 1", revisions[0].Refcount)
+	}
+}
+
+func TestAddWorldBlobStored(t *testing.T) {
+	ctx := context.Background()
+	ws := newWorkspace(t, ctx)
+
+	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureA), "world-a")
+	if err != nil {
+		t.Fatalf("AddWorld: %v", err)
+	}
+
+	revisions, err := ws.store().RevisionsForWorld(ctx, world.ID)
+	if err != nil {
+		t.Fatalf("RevisionsForWorld: %v", err)
+	}
+	if len(revisions) != 1 {
+		t.Fatalf("want 1 revision, got %d", len(revisions))
+	}
+
+	has, err := ws.blobs().Has(ctx, revisions[0].BlobRef)
+	if err != nil {
+		t.Fatalf("blobs.Has: %v", err)
+	}
+	if !has {
+		t.Fatalf("blob for revision sha256 %q not stored", revisions[0].BlobRef.SHA256)
+	}
+}
