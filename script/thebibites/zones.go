@@ -204,14 +204,12 @@ func (z *Zone) SetField(name string, val starlark.Value) error {
 		ZoneID:       row.ZoneID,
 		HasZoneID:    row.HasZoneID,
 	}
-	if err := z.ls.session.StageSQLSet(ref.WithExpected(old), staged); err != nil {
-		return fmt.Errorf("zone.%s: %w", name, err)
-	}
-	z.ls.stagedOps++
-	z.ls.recordMirrorRow("settings_zones", spec.sourceColumn, spec.sqlType, []mirrorLocator{
+	if err := z.ls.stageScalarSet(ref, old, staged, "settings_zones", spec.sourceColumn, spec.sqlType, []mirrorLocator{
 		{column: "entry_name", value: row.EntryName},
 		{column: "zone_index", value: row.ZoneIndex},
-	}, staged)
+	}, nil); err != nil {
+		return fmt.Errorf("zone.%s: %w", name, err)
+	}
 	return nil
 }
 

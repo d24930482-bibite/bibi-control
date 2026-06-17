@@ -222,15 +222,13 @@ func (p *Pellet) SetField(name string, val starlark.Value) error {
 	}
 	ref := p.pelletRef(row)
 	ref.Column = spec.sourceColumn
-	if err := p.ls.session.StageSQLSet(ref.WithExpected(old), staged); err != nil {
-		return fmt.Errorf("pellet.%s: %w", name, err)
-	}
-	p.ls.stagedOps++
-	p.ls.recordMirrorRow("pellets", spec.sourceColumn, spec.sqlType, []mirrorLocator{
+	if err := p.ls.stageScalarSet(ref, old, staged, "pellets", spec.sourceColumn, spec.sqlType, []mirrorLocator{
 		{column: "entry_name", value: row.EntryName},
 		{column: "group_index", value: row.GroupIndex},
 		{column: "group_pellet_index", value: row.GroupPelletIndex},
-	}, staged)
+	}, nil); err != nil {
+		return fmt.Errorf("pellet.%s: %w", name, err)
+	}
 	return nil
 }
 

@@ -198,14 +198,12 @@ func (ls *LoadedSave) setSettingValue(table string, row *tb.SettingValueRow, v s
 		ValueType:      string(row.Type),
 		WrapperRawJSON: row.WrapperRawJSON,
 	}
-	if err := ls.session.StageSQLSet(ref.WithExpected(old), staged); err != nil {
-		return fmt.Errorf("setting %q: %w", row.SettingName, err)
-	}
-	ls.stagedOps++
-	ls.recordMirrorRow(table, column, sqlType, []mirrorLocator{
+	if err := ls.stageScalarSet(ref, old, staged, table, column, sqlType, []mirrorLocator{
 		{column: "entry_name", value: row.EntryName},
 		{column: "path", value: row.Path},
-	}, staged)
+	}, nil); err != nil {
+		return fmt.Errorf("setting %q: %w", row.SettingName, err)
+	}
 	return nil
 }
 

@@ -127,14 +127,13 @@ func (e *Entity) SetField(name string, val starlark.Value) error {
 		return err
 	}
 	ref.Table, ref.Column = spec.table, spec.sourceColumn
-	if err := e.ls.session.StageSQLSet(ref.WithExpected(old), staged); err != nil {
-		// Roll back the in-memory write-through: the stage that would authorize it
-		// was rejected, so memory must not hold a value no staged op backs.
-		_, _ = setRowField(row, spec.fieldIndex, old)
+	// Roll back the in-memory write-through on stage failure: the stage that would
+	// authorize it was rejected, so memory must not hold a value no staged op backs.
+	rollback := func() { _, _ = setRowField(row, spec.fieldIndex, old) }
+	if err := e.ls.stageScalarSet(ref, old, staged, spec.table, spec.sourceColumn, spec.sqlType,
+		[]mirrorLocator{{column: "entry_name", value: e.entryName}}, rollback); err != nil {
 		return fmt.Errorf("%s.%s: %w", e.kind, name, err)
 	}
-	e.ls.stagedOps++
-	e.ls.recordMirror(spec.table, spec.sourceColumn, spec.sqlType, e.entryName, staged)
 	return nil
 }
 

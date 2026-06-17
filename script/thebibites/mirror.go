@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	mutator "github.com/asemones/bibicontrol/savemutator/thebibites"
 )
 
 // mirror.go is the in-run consistency core: a deferred buffer of scalar mutations
@@ -91,18 +93,36 @@ func (b *mirrorBuffer) empty() bool { return len(b.cols) == 0 }
 
 func (b *mirrorBuffer) reset() { b.cols = nil }
 
-// recordMirror buffers a pending scalar mutation keyed by entry_name alone — the
-// convenience wrapper for entity-scalar and bulk sets, whose entry_name is unique
-// per entity within a save. Marks DuckDB dirty so the next query/aggregate flushes.
-func (ls *LoadedSave) recordMirror(table, column, sqlType, entryName string, value any) {
-	ls.recordMirrorRow(table, column, sqlType, []mirrorLocator{{column: "entry_name", value: entryName}}, value)
-}
-
 // recordMirrorRow buffers a pending scalar mutation keyed by an arbitrary set of
 // discriminator columns (genes, settings) and marks DuckDB dirty.
 func (ls *LoadedSave) recordMirrorRow(table, column, sqlType string, locators []mirrorLocator, value any) {
 	ls.mirror.record(table, column, sqlType, locators, value)
 	ls.mirrorDirty = true
+}
+
+// stageScalarSet owns the invariant tail every committed scalar-set call site
+// shares: stamp the stale-value guard, stage the guarded set on the session, and —
+// only on success — count it (stagedOps) and record its DuckDB mirror intent. The
+// per-site variation is supplied by the caller: the fully-built ref (with its
+// locators + Column set), the captured old value (guard) and coerced staged value,
+// and the mirror's (table, column, sqlType, locators). Because validateSet runs and
+// the in-memory write-through happens before this call, a rejected StageSQLSet must
+// leave no phantom value: callers that wrote through first pass a rollback closure,
+// which runs (and only runs) on stage failure to restore the prior in-memory value.
+// Callers whose write-through is itself rolled back elsewhere (or who do not write
+// through before staging) pass a nil rollback. The mirror is recorded with the
+// staged value, keyed by sourceColumn (not the friendly alias) so an in-run SQL read
+// addresses the real generated column.
+func (ls *LoadedSave) stageScalarSet(ref mutator.SQLValueRef, old, staged any, table, column, sqlType string, locators []mirrorLocator, rollback func()) error {
+	if err := ls.session.StageSQLSet(ref.WithExpected(old), staged); err != nil {
+		if rollback != nil {
+			rollback()
+		}
+		return err
+	}
+	ls.stagedOps++
+	ls.recordMirrorRow(table, column, sqlType, locators, staged)
+	return nil
 }
 
 // flushMirrorColumn applies one (table, column)'s buffered writes as a single

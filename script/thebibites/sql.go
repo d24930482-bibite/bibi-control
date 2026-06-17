@@ -406,16 +406,16 @@ func (ls *LoadedSave) bulkSet(kind, where, column string, value starlark.Value) 
 			staged = coerced
 			wroteRow, restorePri, restore = row, prior, true
 		}
-		if err := ls.session.StageSQLSet(r.Ref.WithExpected(r.CurrentValue), staged); err != nil {
-			// Roll back this row's write-through: a rejected stage must not leave a
-			// phantom in-memory value (same class as the scalar SetField path).
-			if restore {
-				_, _ = setRowField(wroteRow, spec.fieldIndex, restorePri)
-			}
+		// Roll back this row's write-through on stage failure: a rejected stage must
+		// not leave a phantom in-memory value (same class as the scalar SetField path).
+		var rollback func()
+		if restore {
+			rollback = func() { _, _ = setRowField(wroteRow, spec.fieldIndex, restorePri) }
+		}
+		if err := ls.stageScalarSet(r.Ref, r.CurrentValue, staged, spec.table, spec.sourceColumn, spec.sqlType,
+			[]mirrorLocator{{column: "entry_name", value: r.Ref.EntryName}}, rollback); err != nil {
 			return 0, fmt.Errorf("%s.%s: %w", kind, column, err)
 		}
-		ls.stagedOps++
-		ls.recordMirror(spec.table, spec.sourceColumn, spec.sqlType, r.Ref.EntryName, staged)
 	}
 	return len(refs), nil
 }
