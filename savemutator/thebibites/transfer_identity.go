@@ -3,24 +3,25 @@ package thebibites
 // transfer_identity.go isolates the high-risk identity/species reconciliation for
 // the whole-entry graft (transfer.AppendEntry). The headline corruption risk is
 // silently grafting an entry whose body.id collides with a destination bibite, or
-// whose genes.speciesID cannot be linked into the destination without a remap.
-// The F1 policy here is conservative and loud: REJECT every case that is not
-// trivially safe, naming the offending id/field in the error.
+// whose genes.speciesID conflates the grafted entity into the destination's
+// coincidental same-id species.
 //
-// Species handling is FAIL-LOUD. speciesID is a per-world LINEAR id space, so a
-// destination independently reuses the same small ids for biologically different
-// species. Any grafted entity that carries a genes.speciesID is therefore refused:
-//   - the id is already present in the destination -> we cannot prove it is the
-//     same species, so linking would conflate distinct species (the conflation
-//     risk); refuse.
-//   - the id is absent from the destination -> safely linking it would require
-//     fabricating/importing a species record; refuse.
-// F1 NEVER adds to activeSpeciesList, never fabricates a recordedSpecies record,
-// and never adopts the destination's coincidental same-id species. These refusals
-// are conservative ON PURPOSE: cross-world species REMAP (allocate a fresh dest
-// species id, import the source species record, rewrite refs) is ticket F3, which
-// lifts the restriction. Do not "fix" these refusals back into an add. An entity
-// that carries no genes.speciesID has nothing to link and grafts cleanly.
+// body.id collisions and dangling parent/child links stay FAIL-LOUD: F3 does not
+// remap entity ids or cross-world child references, so reconcileGraftIdentity still
+// refuses those cases, naming the offending id, BEFORE anything is staged.
+//
+// Species handling is now a cross-world REMAP (this is what F3 adds, replacing F1's
+// loud species refusal). speciesID is a per-world LINEAR id space, so a destination
+// independently reuses the same small ids for biologically different species. We
+// therefore never reuse the source id and never adopt the destination's
+// coincidental same-id species. Instead AppendEntry (transfer.go) allocates a FRESH
+// dest species id that beats every id already in use (activeSpeciesList,
+// recordedSpecies records, and every live dest entity's genes.speciesID), imports
+// the source species RECORD into the dest table under that fresh id, and rewrites
+// genes.speciesID on the grafted bibite/egg. The allocator and the conflation
+// invariant live here (freshDstSpeciesID / dstSpeciesIDUsage); the staging lives in
+// transfer.go. An entity that carries no genes.speciesID has nothing to remap and
+// grafts cleanly.
 
 import (
 	"fmt"
@@ -30,19 +31,18 @@ import (
 	tb "github.com/asemones/bibicontrol/saveparser/thebibites"
 )
 
-// reconcileGraftIdentity validates the identity of a grafted bibite/egg JSON
-// value against the destination archive. It is a pure CHECK with no staging, so
-// it must be called BEFORE any StageAppendBibite: a rejected graft then leaves
-// the destination with 0 staged ops by construction (no Apply-atomicity unwind).
+// reconcileGraftIdentity validates the NON-species identity of a grafted
+// bibite/egg JSON value against the destination archive. It is a pure CHECK with
+// no staging, so it must be called BEFORE any StageAppendBibite: a rejected graft
+// then leaves the destination with 0 staged ops by construction (no
+// Apply-atomicity unwind).
 //
-// The guards it enforces:
-//   - body.id collision (bibites): rejected loudly (F1 does not remap ids).
+// The guards it enforces (species is handled separately by the remap path in
+// transfer.AppendEntry, NOT here):
+//   - body.id collision (bibites): rejected loudly (F3 does not remap entity ids).
 //   - parent/child links (bibites): a grafted body.eggLayer.children entry that
 //     references an id not present in the destination is a dangling cross-world
-//     link; rejected loudly (F1 does not strip or remap children).
-//   - species (bibites and eggs): any genes.speciesID is refused loudly because
-//     linking it without remap is unsafe (see the file header). The only
-//     non-refusing species path is an entity that carries no genes.speciesID.
+//     link; rejected loudly (F3 does not strip or remap children).
 func (t *transfer) reconcileGraftIdentity(kind tb.EntryKind, value any) error {
 	if kind == tb.EntryBibite {
 		if id, ok := bibiteBodyID(value); ok {
@@ -54,55 +54,67 @@ func (t *transfer) reconcileGraftIdentity(kind tb.EntryKind, value any) error {
 			return fmt.Errorf("transfer: append entry: grafted body.eggLayer.children references id(s) %v absent from destination; cross-world child links are not supported", dangling)
 		}
 	}
-
-	// Species check applies to both bibites and eggs (both carry genes.speciesID).
-	if kind == tb.EntryBibite || kind == tb.EntryEgg {
-		if err := t.refuseSpeciesGraft(value); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
-// refuseSpeciesGraft refuses any graft whose entity carries a genes.speciesID,
-// with a distinct named reason for the two sub-cases (already-present conflation
-// vs absent-needs-import). It returns nil only when the entity carries no species
-// id (nothing to link). It NEVER stages anything: this is the F1 fail-loud rule,
-// lifted by F3's remap. See the file header for why a per-world linear id cannot
-// be safely linked here.
-func (t *transfer) refuseSpeciesGraft(value any) error {
-	sid, ok := entitySpeciesID(value)
-	if !ok {
-		// No species id to link; the graft proceeds.
-		return nil
-	}
-
+// freshDstSpeciesID allocates a species id for the destination that collides with
+// NOTHING in use. This is the load-bearing conflation guard: speciesID is a
+// per-world linear id, so reusing the source id (or trusting only one counter)
+// would conflate the graft into the dest's coincidental same-id species. The fresh
+// id beats the max over EVERY id space at once:
+//   - speciesData.json#activeSpeciesList,
+//   - speciesData.json#recordedSpecies[*].speciesID (record-only ids the active
+//     list can omit),
+//   - every live dest bibite/egg's genes.speciesID, and
+//   - nextSpeciesID, the engine's monotonic counter.
+// Using max(...) rather than nextSpeciesID alone is what defends against a stale
+// counter (a save whose nextSpeciesID is behind an in-use id). The destination
+// MUST have a decoded species table or we fail loudly: there is nowhere to land
+// the imported record otherwise.
+func (t *transfer) freshDstSpeciesID() (int64, error) {
 	entry := t.dst.Archive().Entry(SpeciesEntryName)
 	if entry == nil || entry.JSON == nil {
-		// The destination has no decoded species table, so we cannot prove the id
-		// links to anything. We refuse rather than silently graft a
-		// species-bearing entity into a save with no usable species table; a remap
-		// would have to import the record (F3).
-		return fmt.Errorf("transfer: append entry: grafted genes.speciesID %d cannot be linked: the destination has no decoded species table to link or import into - cross-world species remap is F3", sid)
+		return 0, fmt.Errorf("transfer: append entry: cannot remap species: the destination has no decoded species table (speciesData.json) to import a record into")
 	}
 
-	if activeSpeciesIndexOf(entry.JSON, sid) >= 0 || t.dstEntityHasSpecies(sid) {
-		// Present in the destination. speciesID is a per-world linear id, so we
-		// cannot prove the grafted entity shares the destination's same-id
-		// species; adopting it would conflate biologically distinct species.
-		return fmt.Errorf("transfer: append entry: grafted genes.speciesID %d already exists in the destination; cannot prove it is the same species (speciesID is a per-world linear id), so linking would conflate distinct species - cross-world species remap is F3", sid)
-	}
+	maxUsed, hasUsed := t.dstSpeciesIDUsage()
 
-	// Absent from the destination: safely linking it would require fabricating /
-	// importing a species record into speciesData.json (F3).
-	return fmt.Errorf("transfer: append entry: grafted genes.speciesID %d is absent from the destination; safely linking it requires importing the source species record (cross-world species remap is F3)", sid)
+	fresh := int64(0)
+	if hasUsed {
+		fresh = maxUsed + 1
+	}
+	if next, ok := jsonInt64Path(entry.JSON, "nextSpeciesID"); ok && next > fresh {
+		fresh = next
+	}
+	return fresh, nil
 }
 
-// dstEntityHasSpecies reports whether any destination bibite or egg entry carries
-// genes.speciesID == sid. This treats an id used by a live destination entity as
-// "present" even if it is not in activeSpeciesList, so the conflation guard fires
-// on any coincidental same-linear-id member.
-func (t *transfer) dstEntityHasSpecies(sid int64) bool {
+// dstSpeciesIDUsage returns the max species id observed across the dest species
+// table (activeSpeciesList and recordedSpecies) and every live dest bibite/egg
+// entity. ok is false only when no species id is observed anywhere. The allocator
+// and any conflation reasoning share this one traversal so they cannot drift.
+func (t *transfer) dstSpeciesIDUsage() (max int64, ok bool) {
+	consider := func(id int64) {
+		if !ok || id > max {
+			max, ok = id, true
+		}
+	}
+
+	if entry := t.dst.Archive().Entry(SpeciesEntryName); entry != nil && entry.JSON != nil {
+		for _, id := range jsonInt64Array(entry.JSON, "activeSpeciesList") {
+			consider(id)
+		}
+		if records, present, err := getJSONPath(entry.JSON, "recordedSpecies"); err == nil && present {
+			if list, isArray := records.([]any); isArray {
+				for _, rec := range list {
+					if id, found := jsonInt64Path(rec, "speciesID"); found {
+						consider(id)
+					}
+				}
+			}
+		}
+	}
+
 	entries := t.dst.Archive().Entries
 	for i := range entries {
 		entry := &entries[i]
@@ -112,11 +124,68 @@ func (t *transfer) dstEntityHasSpecies(sid int64) bool {
 		if entry.JSON == nil {
 			continue
 		}
-		if other, ok := entitySpeciesID(entry.JSON); ok && other == sid {
-			return true
+		if id, found := entitySpeciesID(entry.JSON); found {
+			consider(id)
 		}
 	}
-	return false
+	return max, ok
+}
+
+// sourceSpeciesRecord locates the source species RECORD for sid in the source
+// archive's speciesData.json#recordedSpecies and returns a DEEP COPY of it (never
+// an alias into source bytes). ok is false when the source has no decoded species
+// table or no record with that id. Importing the genome/metadata is the point of
+// the remap, so AppendEntry treats a missing record as a loud failure rather than
+// fabricating a backing-less active id.
+func sourceSpeciesRecord(srcArchive *tb.Archive, sid int64) (any, bool) {
+	entry := srcArchive.Entry(SpeciesEntryName)
+	if entry == nil || entry.JSON == nil {
+		return nil, false
+	}
+	records, ok, err := getJSONPath(entry.JSON, "recordedSpecies")
+	if err != nil || !ok {
+		return nil, false
+	}
+	list, ok := records.([]any)
+	if !ok {
+		return nil, false
+	}
+	for _, rec := range list {
+		if id, found := jsonInt64Path(rec, "speciesID"); found && id == sid {
+			return cloneJSON(rec), true
+		}
+	}
+	return nil, false
+}
+
+// jsonInt64Path reads an integer at path from root, returning ok=false when the
+// path is absent or not an integer.
+func jsonInt64Path(root any, path string) (int64, bool) {
+	value, ok, err := getJSONPath(root, path)
+	if err != nil || !ok {
+		return 0, false
+	}
+	return jsonNumberToInt64(value)
+}
+
+// jsonInt64Array reads the integer elements of the JSON array at path, skipping
+// any non-integer element. A missing path yields an empty slice.
+func jsonInt64Array(root any, path string) []int64 {
+	value, ok, err := getJSONPath(root, path)
+	if err != nil || !ok {
+		return nil
+	}
+	list, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]int64, 0, len(list))
+	for _, elem := range list {
+		if id, ok := jsonNumberToInt64(elem); ok {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // dstBibiteWithBodyID returns the name of a destination bibite entry whose

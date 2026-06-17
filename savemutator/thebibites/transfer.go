@@ -17,9 +17,11 @@ package thebibites
 //     contents / pellets / settings zones). Routes through StageSQLAppend, which
 //     reuses the existing append resolvers and SceneCount reconciliation.
 //   - AppendEntry      → whole bibite/egg graft. This reconciles identity
-//     (body.id collision, dangling child refs) and REFUSES any species-bearing
-//     graft that would require a cross-world species remap (transfer_identity.go).
-//     Unhandled cases fail loudly; species remap is F3.
+//     (body.id collision, dangling child refs stay loud) and REMAPS any
+//     species-bearing graft across the per-world-linear speciesID space:
+//     allocate a fresh non-colliding dest species id, import the source species
+//     record, and rewrite genes.speciesID on the grafted entity (and its egg).
+//     See transfer_identity.go for the allocator and the conflation invariant.
 
 import (
 	"fmt"
@@ -187,12 +189,18 @@ func (t *transfer) AppendArray(dst SQLValueRef, element CollectedElement) error 
 }
 
 // AppendEntry grafts a collected whole bibite/egg entry into the destination
-// save. It reconciles identity (body.id collision, dangling child refs) and
-// REFUSES any species-bearing graft that would require a cross-world species
-// remap (F3) against the destination, and only then allocates a fresh,
-// non-colliding entry name and stages the append. The identity/species check is
-// a pure guard run BEFORE staging, so a rejected graft leaves the destination
-// with 0 staged ops by construction. Unhandled cases fail loudly.
+// save. It reconciles non-species identity (body.id collision, dangling child
+// refs stay loud) and, when the entity carries a genes.speciesID, REMAPS it
+// across the per-world-linear species space: allocate a fresh non-colliding dest
+// species id, import the source species record into speciesData.json under that
+// id, and rewrite the grafted entity's genes.speciesID. It then allocates a
+// fresh entry name and stages the append.
+//
+// Atomicity: every check that can fail (identity guard, fresh-id allocation,
+// source-record lookup) runs BEFORE any StageAppend, so a rejected graft leaves
+// the destination with 0 staged ops by construction. All mutation is staged
+// through the dst Session (the species-table appends AND the entry append), so it
+// rides Apply()'s all-or-nothing atomicity; nothing is committed here (F2).
 func (t *transfer) AppendEntry(element CollectedElement) error {
 	if element.JSON == nil {
 		return fmt.Errorf("transfer: append entry: element has no JSON")
@@ -211,10 +219,31 @@ func (t *transfer) AppendEntry(element CollectedElement) error {
 	// destination payload.
 	cloned := cloneJSON(element.JSON)
 
-	// Identity/species reconciliation is the silent-corruption surface: validate
-	// it BEFORE staging so a rejected graft never half-mutates the destination.
+	// Non-species identity reconciliation is a silent-corruption surface: validate
+	// it FIRST, before staging, so a rejected graft never half-mutates the dest.
 	if err := t.reconcileGraftIdentity(kind, cloned); err != nil {
 		return err
+	}
+
+	// Species remap (covers both bibites and eggs via genes.speciesID). A
+	// species-less entity has nothing to remap and grafts cleanly. Everything
+	// below that can fail does so BEFORE any StageAppend, preserving the
+	// 0-staged-ops-on-rejection invariant.
+	if sid, ok := entitySpeciesID(cloned); ok {
+		fresh, err := t.freshDstSpeciesID()
+		if err != nil {
+			return err
+		}
+		record, found := sourceSpeciesRecord(t.src.Archive(), sid)
+		if !found {
+			return fmt.Errorf("transfer: append entry: cannot remap species: the grafted entity carries genes.speciesID %d but the source has no recordedSpecies record for it to import", sid)
+		}
+		if err := setJSONPath(cloned, "genes.speciesID", fresh, SetOptions{}); err != nil {
+			return fmt.Errorf("transfer: append entry: rewrite grafted genes.speciesID: %w", err)
+		}
+		if err := t.stageSpeciesImport(record, fresh); err != nil {
+			return err
+		}
 	}
 
 	name, err := nextEntryName(t.dst.Archive(), kind)
@@ -224,4 +253,52 @@ func (t *transfer) AppendEntry(element CollectedElement) error {
 
 	payload := EntryPayload{Name: name, Kind: kind, JSON: cloned}
 	return t.dst.StageAppendBibite(payload)
+}
+
+// stageSpeciesImport stages the import of a source species record under the fresh
+// dest id: it rewrites the record's speciesID to freshID and resets its parentID
+// to freshID. parentID points into the SOURCE linear id space and has no dest
+// counterpart; treating the import as its own lineage root (parentID == self)
+// keeps it from being a dangling cross-world reference. We deliberately do NOT
+// carry the source parentID through and do NOT remap an ancestry chain (cross-ref
+// reconciliation beyond identity/species is out of scope).
+//
+// It stages an Append of the record onto recordedSpecies and of freshID onto
+// activeSpeciesList (both on speciesData.json; entryUpdate coalesces them onto one
+// working value during Apply, and the append resolvers re-read the live array, so
+// batch order is safe), then bumps nextSpeciesID to freshID+1 when that field
+// exists (no CreateMissing: a save without the counter is left as-is).
+func (t *transfer) stageSpeciesImport(record any, freshID int64) error {
+	if err := setJSONPath(record, "speciesID", freshID, SetOptions{}); err != nil {
+		return fmt.Errorf("transfer: append entry: stamp imported speciesID: %w", err)
+	}
+	// parentID is cross-world; reset to self (lineage root). Only when present, so
+	// a record without the field is left as-is rather than fabricating one.
+	if _, ok := getJSONPathPresent(record, "parentID"); ok {
+		if err := setJSONPath(record, "parentID", freshID, SetOptions{}); err != nil {
+			return fmt.Errorf("transfer: append entry: reset imported parentID to lineage root: %w", err)
+		}
+	}
+	if err := t.dst.StageAppend(SpeciesTarget(), "recordedSpecies", record); err != nil {
+		return err
+	}
+	if err := t.dst.StageAppend(SpeciesTarget(), "activeSpeciesList", freshID); err != nil {
+		return err
+	}
+	if _, ok := jsonInt64Path(t.dst.Archive().Entry(SpeciesEntryName).JSON, "nextSpeciesID"); ok {
+		if err := t.dst.StageSet(SpeciesTarget(), "nextSpeciesID", freshID+1); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// getJSONPathPresent reports whether path exists in root (ignoring read errors,
+// which mean the path could not be navigated and is therefore treated as absent).
+func getJSONPathPresent(root any, path string) (any, bool) {
+	value, ok, err := getJSONPath(root, path)
+	if err != nil || !ok {
+		return nil, false
+	}
+	return value, true
 }

@@ -2,6 +2,7 @@ package thebibites
 
 import (
 	"archive/zip"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -28,7 +29,7 @@ func parseTransferSource(t *testing.T) *tb.Archive {
 		Entries: []tb.Entry{
 			{Index: 0, Name: "scene.bb8scene", Kind: tb.EntryScene, Method: zip.Deflate, Raw: withBOM(`{"nBibites":1,"nPellets":1}`)},
 			{Index: 1, Name: "settings.bb8settings", Kind: tb.EntrySettings, Method: zip.Deflate, Raw: withBOM(`{"pelletEnergy":{"Value":99},"worldLabel":{"Value":"source-world"},"zones":[],"zoneGroups":[],"bibites":[],"settingsChangers":[]}`)},
-			{Index: 2, Name: "speciesData.json", Kind: tb.EntrySpecies, Method: zip.Deflate, Raw: withBOM(`{"activeSpeciesList":[7,8],"recordedSpecies":[]}`)},
+			{Index: 2, Name: "speciesData.json", Kind: tb.EntrySpecies, Method: zip.Deflate, Raw: withBOM(`{"nextSpeciesID":9,"activeSpeciesList":[7,8],"recordedSpecies":[{"speciesID":7,"parentID":5,"name":"src-seven","template":{"genes":{"SizeRatio":7.7}}},{"speciesID":8,"parentID":6,"name":"src-eight","template":{"genes":{"SizeRatio":8.8}}}]}`)},
 			{Index: 3, Name: "pellets.bb8scene", Kind: tb.EntryPellets, Method: zip.Deflate, Raw: withBOM(`{"pellets":[{"zone":"Zone A","pellets":[{"transform":{"position":[3,4],"rotation":0,"scale":1},"rb2d":{"px":3,"py":4,"vx":0,"vy":0,"r":0},"pellet":{"material":"Plant","amount":5},"matterDecay":{"timeAlive":1,"rotAmount":2}}]}]}`)},
 			{Index: 4, Name: "bibites/bibite_0.bb8", Kind: tb.EntryBibite, Method: zip.Deflate, Raw: withBOM(`{"body":{"id":500,"energy":7.5,"stomach":{"content":[{"material":"Meat","amount":3,"averageChunkAmount":1}]}},"genes":{"speciesID":7,"gen":1},"brain":{"Nodes":[{"Index":0,"Type":0,"TypeName":"Input","Value":0.0}],"Synapses":[{"Inov":11,"NodeIn":0,"NodeOut":0,"Weight":0.25,"En":true}]}}`)},
 			{Index: 5, Name: "eggs/egg_0.bb8", Kind: tb.EntryEgg, Method: zip.Deflate, Raw: withBOM(`{"egg":{"id":900,"energy":12},"genes":{"speciesID":8,"gen":2,"isReady":true}}`)},
@@ -227,9 +228,9 @@ func TestTransferAppendArrayTableMismatch(t *testing.T) {
 
 // deleteSpeciesID removes genes.speciesID from a parsed entry's JSON so the entry
 // is species-less. The whole-entry graft mechanics tests use a species-less
-// source: under the F1 fail-loud rule any genes.speciesID would refuse the graft
-// (that refusal is exercised separately), so removing it isolates the mechanics
-// (fresh name, scene count, body.id) from the species check.
+// source so the species remap is skipped entirely, isolating the mechanics (fresh
+// name, scene count, body.id) from the species path (which is exercised by the F3
+// remap tests).
 func deleteSpeciesID(t *testing.T, root any) {
 	t.Helper()
 	obj, ok := root.(map[string]any)
@@ -248,9 +249,8 @@ func deleteSpeciesID(t *testing.T, root any) {
 
 // Case 3: whole-entry append (mechanics only). Collect a SPECIES-LESS source
 // bibite, graft it, Commit; assert a fresh non-colliding name exists, nBibites
-// incremented, and the grafted body.id is present. A species-less entity is the
-// only non-refusing species path under the F1 fail-loud rule, so this doubles as
-// the "species-less entity grafts cleanly" boundary case.
+// incremented, and the grafted body.id is present. A species-less entity skips
+// the remap entirely, so this isolates the graft mechanics from the species path.
 func TestTransferAppendEntryRoundTrip(t *testing.T) {
 	src := NewSession(parseTransferSource(t))
 	// Drop genes.speciesID so the mechanics graft is not refused by the species rule.
@@ -414,113 +414,426 @@ func assertDestUnstaged(t *testing.T, dst *Session) {
 	wantActiveSpecies(t, activeSpeciesIDs(t, dst.Archive()), 1, 2, 3)
 }
 
-// Case 6: species handling is FAIL-LOUD. Every species-bearing graft is refused —
-// both an absent id (would need a record import) and a present/colliding id (would
-// conflate distinct per-world-linear species). These refusals are CONSERVATIVE ON
-// PURPOSE; ticket F3 lifts them via a cross-world species remap (allocate a fresh
-// dest species id + import the source record + rewrite refs). Do NOT "fix" any of
-// these refusals back into an add-to-activeSpeciesList: that is the silent
-// conflation bug the original F1 shipped.
-func TestTransferAppendEntryRefusesSpecies(t *testing.T) {
-	t.Run("absent species id refuses loudly and leaves dest unstaged", func(t *testing.T) {
-		tr, _, dst := newTransferPair(t)
-		// source bibite_0 carries species 7, absent from the destination [1,2,3].
-		element, err := tr.CollectEntry("bibites/bibite_0.bb8")
-		if err != nil {
-			t.Fatalf("CollectEntry() error = %v", err)
+// speciesSizeRatio reads template.genes.SizeRatio from the recordedSpecies record
+// whose speciesID == sid, the recognizable per-species marker the fixtures use.
+// ok is false when no record carries sid.
+func speciesSizeRatio(t *testing.T, archive *tb.Archive, sid int64) (float64, bool) {
+	t.Helper()
+	records, ok, err := getJSONPath(archive.Entry("speciesData.json").JSON, "recordedSpecies")
+	if err != nil || !ok {
+		t.Fatalf("getJSONPath(recordedSpecies) = %v/%t/%v", records, ok, err)
+	}
+	list, ok := records.([]any)
+	if !ok {
+		t.Fatalf("recordedSpecies = %T, want array", records)
+	}
+	for _, rec := range list {
+		id, found := jsonInt64Path(rec, "speciesID")
+		if !found || id != sid {
+			continue
 		}
-		err = tr.AppendEntry(element)
-		if err == nil {
-			t.Fatalf("AppendEntry(absent species) error = nil, want loud refusal")
+		ratio, ok, err := getJSONPath(rec, "template.genes.SizeRatio")
+		if err != nil || !ok {
+			t.Fatalf("getJSONPath(record %d template.genes.SizeRatio) = %v/%t/%v", sid, ratio, ok, err)
 		}
-		if !strings.Contains(err.Error(), "7") || !strings.Contains(err.Error(), "absent") {
-			t.Fatalf("AppendEntry error = %q, want it to name species 7 and the absent/import reason", err)
+		n, ok := jsonNumberToFloat64(ratio)
+		if !ok {
+			t.Fatalf("record %d SizeRatio = %v, not a number", sid, ratio)
 		}
-		assertDestUnstaged(t, dst)
-	})
+		return n, true
+	}
+	return 0, false
+}
 
-	t.Run("present colliding linear id refuses, NOT conflates (headline case)", func(t *testing.T) {
-		src := NewSession(parseTransferSource(t))
-		// Retag source bibite_0 (body 500) to species 2. In the destination, species
-		// 2 is the unrelated pair bibite_1/bibite_2 (bodies 43/44). speciesID is a
-		// per-world linear id, so this id collision does NOT mean the grafted body
-		// 500 is the same species — F1 must REFUSE rather than adopt dest species 2.
-		b := src.Archive().Entry("bibites/bibite_0.bb8")
-		if err := setJSONPath(b.JSON, "genes.speciesID", int64(2), SetOptions{}); err != nil {
-			t.Fatalf("setJSONPath(speciesID) error = %v", err)
+func jsonNumberToFloat64(value any) (float64, bool) {
+	switch v := value.(type) {
+	case json.Number:
+		if f, err := v.Float64(); err == nil {
+			return f, true
 		}
-		dst := NewSession(parseSpeciesArchive(t))
-		tr, err := NewTransfer(src, dst)
-		if err != nil {
-			t.Fatalf("NewTransfer() error = %v", err)
-		}
-		element, err := tr.CollectEntry("bibites/bibite_0.bb8")
-		if err != nil {
-			t.Fatalf("CollectEntry() error = %v", err)
-		}
-		err = tr.AppendEntry(element)
-		if err == nil {
-			t.Fatalf("AppendEntry(colliding species id) error = nil, want loud refusal")
-		}
-		if !strings.Contains(err.Error(), "2") || !strings.Contains(err.Error(), "conflate") {
-			t.Fatalf("AppendEntry error = %q, want it to name species 2 and the conflation reason", err)
-		}
-		// The grafted bibite must NOT have been appended.
-		if dst.Archive().Entry("bibites/bibite_3.bb8") != nil {
-			t.Fatalf("refused graft still appended bibites/bibite_3.bb8")
-		}
-		assertDestUnstaged(t, dst)
-	})
+	case float64:
+		return v, true
+	}
+	return 0, false
+}
 
-	t.Run("egg with absent species refuses loudly and leaves dest unstaged", func(t *testing.T) {
-		tr, _, dst := newTransferPair(t)
-		// source egg_0 carries species 8, absent from the destination [1,2,3].
-		element, err := tr.CollectEntry("eggs/egg_0.bb8")
-		if err != nil {
-			t.Fatalf("CollectEntry(egg) error = %v", err)
+// recordParentID reads parentID off the recordedSpecies record with speciesID sid.
+func recordParentID(t *testing.T, archive *tb.Archive, sid int64) int64 {
+	t.Helper()
+	records, ok, err := getJSONPath(archive.Entry("speciesData.json").JSON, "recordedSpecies")
+	if err != nil || !ok {
+		t.Fatalf("getJSONPath(recordedSpecies) = %v/%t/%v", records, ok, err)
+	}
+	list, _ := records.([]any)
+	for _, rec := range list {
+		if id, found := jsonInt64Path(rec, "speciesID"); found && id == sid {
+			parent, ok := jsonInt64Path(rec, "parentID")
+			if !ok {
+				t.Fatalf("record %d has no parentID", sid)
+			}
+			return parent
 		}
-		if element.Table != "eggs" {
-			t.Fatalf("collected egg table = %q, want eggs", element.Table)
-		}
-		err = tr.AppendEntry(element)
-		if err == nil {
-			t.Fatalf("AppendEntry(egg absent species) error = nil, want loud refusal")
-		}
-		if !strings.Contains(err.Error(), "8") {
-			t.Fatalf("AppendEntry(egg) error = %q, want it to name species 8", err)
-		}
-		// No fresh egg entry should have been appended.
-		if dst.Archive().Entry("eggs/egg_1.bb8") != nil {
-			t.Fatalf("refused egg graft still appended eggs/egg_1.bb8")
-		}
-		assertDestUnstaged(t, dst)
-	})
+	}
+	t.Fatalf("no record for species %d", sid)
+	return 0
+}
 
-	t.Run("species-less bibite grafts cleanly (only non-refusing path)", func(t *testing.T) {
-		src := NewSession(parseTransferSource(t))
-		deleteSpeciesID(t, src.Archive().Entry("bibites/bibite_0.bb8").JSON)
-		dst := NewSession(parseSpeciesArchive(t))
-		tr, err := NewTransfer(src, dst)
-		if err != nil {
-			t.Fatalf("NewTransfer() error = %v", err)
+// entitySpeciesIDOf reads genes.speciesID off a committed entry, failing the test
+// if the entry or the id is missing.
+func entitySpeciesIDOf(t *testing.T, archive *tb.Archive, entryName string) int64 {
+	t.Helper()
+	entry := archive.Entry(entryName)
+	if entry == nil {
+		t.Fatalf("entry %q missing; entries = %v", entryName, entryNames(archive))
+	}
+	id, ok := entitySpeciesID(entry.JSON)
+	if !ok {
+		t.Fatalf("entry %q has no genes.speciesID", entryName)
+	}
+	return id
+}
+
+// Case 6 (F3 headline): a colliding per-world-linear species id REMAPS rather than
+// conflating. This is the exact scenario F1 refused: source body 500 retagged to
+// species 2, where dest species 2 is the unrelated pair bibite_1/bibite_2.
+// speciesID is per-world LINEAR, so an id collision does NOT mean the grafted body
+// is the same species. F3 must SUCCEED with a fresh non-colliding dest id, import
+// the SOURCE species record (NOT adopt dest species 2), leave the dest's own
+// species 2 byte-for-byte intact, and not reassign the dest members.
+func TestTransferAppendEntryRemapsCollidingSpecies(t *testing.T) {
+	src := NewSession(parseTransferSource(t))
+	// Retag source bibite_0 (body 500) to species 2 and give the source a matching
+	// record so the colliding-linear-id case has a record to import.
+	b := src.Archive().Entry("bibites/bibite_0.bb8")
+	if err := setJSONPath(b.JSON, "genes.speciesID", int64(2), SetOptions{}); err != nil {
+		t.Fatalf("setJSONPath(speciesID) error = %v", err)
+	}
+	srcSpecies := src.Archive().Entry("speciesData.json")
+	if err := appendJSONArray(srcSpecies.JSON, "recordedSpecies", map[string]any{
+		"speciesID": int64(2), "parentID": int64(1), "name": "src-two", "template": map[string]any{"genes": map[string]any{"SizeRatio": 22.0}},
+	}); err != nil {
+		t.Fatalf("append source record error = %v", err)
+	}
+
+	dst := NewSession(parseSpeciesArchive(t))
+	tr, err := NewTransfer(src, dst)
+	if err != nil {
+		t.Fatalf("NewTransfer() error = %v", err)
+	}
+	element, err := tr.CollectEntry("bibites/bibite_0.bb8")
+	if err != nil {
+		t.Fatalf("CollectEntry() error = %v", err)
+	}
+	if err := tr.AppendEntry(element); err != nil {
+		t.Fatalf("AppendEntry(colliding species) error = %v, want successful remap", err)
+	}
+	fresh, err := dst.Commit(filepath.Join(t.TempDir(), "remap_colliding.zip"))
+	if err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+
+	graftedID := entitySpeciesIDOf(t, fresh, "bibites/bibite_3.bb8")
+	if graftedID == 2 {
+		t.Fatalf("grafted genes.speciesID = 2 (conflated into dest species 2), want a fresh id")
+	}
+	for _, used := range []int64{1, 2, 3} {
+		if graftedID == used {
+			t.Fatalf("grafted genes.speciesID = %d, collides with pre-graft dest id", graftedID)
 		}
-		element, err := tr.CollectEntry("bibites/bibite_0.bb8")
-		if err != nil {
-			t.Fatalf("CollectEntry() error = %v", err)
+	}
+	// activeSpeciesList gained exactly the fresh id.
+	wantActiveSpecies(t, activeSpeciesIDs(t, fresh), 1, 2, 3, graftedID)
+
+	// The imported record exists under the fresh id with the SOURCE species-2
+	// marker (22.0), proving the source record was imported, not dest species 2.
+	ratio, ok := speciesSizeRatio(t, fresh, graftedID)
+	if !ok {
+		t.Fatalf("no recordedSpecies record for fresh id %d", graftedID)
+	}
+	if ratio != 22.0 {
+		t.Fatalf("imported record SizeRatio = %v, want 22 (source species 2 marker)", ratio)
+	}
+	// The imported record's parentID is reset to self (lineage root), not the
+	// source parentID (1) which has no dest counterpart.
+	if parent := recordParentID(t, fresh, graftedID); parent != graftedID {
+		t.Fatalf("imported record parentID = %d, want %d (self lineage root)", parent, graftedID)
+	}
+
+	// The dest's ORIGINAL species 2 record is untouched (marker 2.2).
+	destRatio, ok := speciesSizeRatio(t, fresh, 2)
+	if !ok {
+		t.Fatalf("dest species 2 record vanished after remap")
+	}
+	if destRatio != 2.2 {
+		t.Fatalf("dest species 2 record SizeRatio = %v, want 2.2 (unchanged)", destRatio)
+	}
+	// The dest members of species 2 still carry species 2 (no conflation).
+	if got := entitySpeciesIDOf(t, fresh, "bibites/bibite_1.bb8"); got != 2 {
+		t.Fatalf("dest bibite_1 genes.speciesID = %d, want 2 (unchanged)", got)
+	}
+	if got := entitySpeciesIDOf(t, fresh, "bibites/bibite_2.bb8"); got != 2 {
+		t.Fatalf("dest bibite_2 genes.speciesID = %d, want 2 (unchanged)", got)
+	}
+}
+
+// Case 7 (F3): an ABSENT species id remaps. Source bibite_0 carries species 7,
+// absent from dest [1,2,3]. The graft succeeds with a fresh id, the source-7
+// record is imported, and dest records 1/2/3 are untouched.
+func TestTransferAppendEntryRemapsAbsentSpecies(t *testing.T) {
+	tr, _, dst := newTransferPair(t)
+	// source bibite_0 carries species 7, absent from the destination [1,2,3].
+	element, err := tr.CollectEntry("bibites/bibite_0.bb8")
+	if err != nil {
+		t.Fatalf("CollectEntry() error = %v", err)
+	}
+	if err := tr.AppendEntry(element); err != nil {
+		t.Fatalf("AppendEntry(absent species) error = %v, want successful remap", err)
+	}
+	fresh, err := dst.Commit(filepath.Join(t.TempDir(), "remap_absent.zip"))
+	if err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+
+	graftedID := entitySpeciesIDOf(t, fresh, "bibites/bibite_3.bb8")
+	for _, used := range []int64{1, 2, 3} {
+		if graftedID == used {
+			t.Fatalf("grafted genes.speciesID = %d, collides with pre-graft dest id", graftedID)
 		}
-		if err := tr.AppendEntry(element); err != nil {
-			t.Fatalf("AppendEntry(species-less) error = %v, want clean graft", err)
+	}
+	wantActiveSpecies(t, activeSpeciesIDs(t, fresh), 1, 2, 3, graftedID)
+
+	ratio, ok := speciesSizeRatio(t, fresh, graftedID)
+	if !ok {
+		t.Fatalf("no recordedSpecies record for fresh id %d", graftedID)
+	}
+	if ratio != 7.7 {
+		t.Fatalf("imported record SizeRatio = %v, want 7.7 (source species 7 marker)", ratio)
+	}
+	// dest records 1/2/3 untouched.
+	for sid, want := range map[int64]float64{1: 1.1, 2: 2.2, 3: 3.3} {
+		got, ok := speciesSizeRatio(t, fresh, sid)
+		if !ok || got != want {
+			t.Fatalf("dest species %d record SizeRatio = %v/%t, want %v", sid, got, ok, want)
 		}
-		fresh, err := dst.Commit(filepath.Join(t.TempDir(), "speciesless_graft.zip"))
-		if err != nil {
-			t.Fatalf("Commit() error = %v", err)
+	}
+}
+
+// Case 8 (F3): the egg path rewrites genes.speciesID on the egg, not only on
+// bibites. Graft source egg_0 (species 8); assert the appended egg's species id is
+// the fresh id and the source-8 record was imported.
+func TestTransferAppendEntryRemapsEggSpecies(t *testing.T) {
+	tr, _, dst := newTransferPair(t)
+	element, err := tr.CollectEntry("eggs/egg_0.bb8")
+	if err != nil {
+		t.Fatalf("CollectEntry(egg) error = %v", err)
+	}
+	if element.Table != "eggs" {
+		t.Fatalf("collected egg table = %q, want eggs", element.Table)
+	}
+	if err := tr.AppendEntry(element); err != nil {
+		t.Fatalf("AppendEntry(egg) error = %v, want successful remap", err)
+	}
+	fresh, err := dst.Commit(filepath.Join(t.TempDir(), "remap_egg.zip"))
+	if err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+
+	// parseSpeciesArchive has egg_0, so the fresh egg name is egg_1.
+	graftedID := entitySpeciesIDOf(t, fresh, "eggs/egg_1.bb8")
+	if graftedID == 8 {
+		t.Fatalf("grafted egg genes.speciesID = 8 (source id reused), want a fresh dest id")
+	}
+	for _, used := range []int64{1, 2, 3} {
+		if graftedID == used {
+			t.Fatalf("grafted egg genes.speciesID = %d, collides with pre-graft dest id", graftedID)
 		}
-		if fresh.Entry("bibites/bibite_3.bb8") == nil {
-			t.Fatalf("species-less graft missing bibites/bibite_3.bb8; entries = %v", entryNames(fresh))
-		}
-		// The species table is untouched by a species-less graft.
-		wantActiveSpecies(t, activeSpeciesIDs(t, fresh), 1, 2, 3)
-	})
+	}
+	wantActiveSpecies(t, activeSpeciesIDs(t, fresh), 1, 2, 3, graftedID)
+	ratio, ok := speciesSizeRatio(t, fresh, graftedID)
+	if !ok || ratio != 8.8 {
+		t.Fatalf("imported record SizeRatio = %v/%t, want 8.8 (source species 8 marker)", ratio, ok)
+	}
+}
+
+// Case 9 (F3 invariant): the allocator beats a STALE nextSpeciesID. Build a dest
+// whose nextSpeciesID (1) is lower than an in-use id (activeSpeciesList has 3 and
+// a record-only id 50); the fresh id must beat the real max (50), never collide.
+// This locks in the max(...) guard the original conflation bug depended on.
+func TestTransferAppendEntryAllocatorBeatsStaleNextSpeciesID(t *testing.T) {
+	src := NewSession(parseTransferSource(t))
+	dst := NewSession(parseSpeciesArchive(t))
+	// Stale counter behind the in-use ids, plus a record-only id (50) that is NOT
+	// in activeSpeciesList — the allocator must still beat it.
+	species := dst.Archive().Entry("speciesData.json")
+	if err := setJSONPath(species.JSON, "nextSpeciesID", int64(1), SetOptions{}); err != nil {
+		t.Fatalf("setJSONPath(nextSpeciesID) error = %v", err)
+	}
+	if err := appendJSONArray(species.JSON, "recordedSpecies", map[string]any{
+		"speciesID": int64(50), "parentID": int64(0), "name": "record-only", "template": map[string]any{"genes": map[string]any{"SizeRatio": 50.0}},
+	}); err != nil {
+		t.Fatalf("append record-only species error = %v", err)
+	}
+
+	tr, err := NewTransfer(src, dst)
+	if err != nil {
+		t.Fatalf("NewTransfer() error = %v", err)
+	}
+	element, err := tr.CollectEntry("bibites/bibite_0.bb8") // species 7
+	if err != nil {
+		t.Fatalf("CollectEntry() error = %v", err)
+	}
+	if err := tr.AppendEntry(element); err != nil {
+		t.Fatalf("AppendEntry() error = %v, want successful remap", err)
+	}
+	fresh, err := dst.Commit(filepath.Join(t.TempDir(), "remap_stale.zip"))
+	if err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+	graftedID := entitySpeciesIDOf(t, fresh, "bibites/bibite_3.bb8")
+	if graftedID <= 50 {
+		t.Fatalf("grafted genes.speciesID = %d, want > 50 (the real max in-use id); stale nextSpeciesID was not beaten", graftedID)
+	}
+}
+
+// Case 9b (F3 conflation invariant, load-bearing): the allocator MUST consult
+// every live dest entity's genes.speciesID. This pins the one id source that can
+// hold an id present in NEITHER activeSpeciesList NOR recordedSpecies — the exact
+// silent-conflation shape of the original F1 bug. A live dest bibite is retagged
+// to species 60 while the species TABLE tops out at 50 (a record-only id) and
+// activeSpeciesList stays [1,2,3] (60 appears in no species-table field). The
+// fresh id must beat 60, which is only possible if dstSpeciesIDUsage scans live
+// entities; this test fails if that traversal is removed.
+func TestTransferAppendEntryAllocatorBeatsLiveEntitySpeciesID(t *testing.T) {
+	src := NewSession(parseTransferSource(t))
+	dst := NewSession(parseSpeciesArchive(t))
+	species := dst.Archive().Entry("speciesData.json")
+	// Species table tops out at 50, and 50 lives only in recordedSpecies (not in
+	// activeSpeciesList). nextSpeciesID is stale so it cannot mask the gap.
+	if err := setJSONPath(species.JSON, "nextSpeciesID", int64(1), SetOptions{}); err != nil {
+		t.Fatalf("setJSONPath(nextSpeciesID) error = %v", err)
+	}
+	if err := appendJSONArray(species.JSON, "recordedSpecies", map[string]any{
+		"speciesID": int64(50), "parentID": int64(0), "name": "record-only", "template": map[string]any{"genes": map[string]any{"SizeRatio": 50.0}},
+	}); err != nil {
+		t.Fatalf("append record-only species error = %v", err)
+	}
+	// A LIVE dest bibite carries species 60 — present in NO species-table field
+	// (not activeSpeciesList, not recordedSpecies). Only the live-entity scan can
+	// surface it as the global max.
+	if err := setJSONPath(dst.Archive().Entry("bibites/bibite_0.bb8").JSON, "genes.speciesID", int64(60), SetOptions{}); err != nil {
+		t.Fatalf("setJSONPath(live entity speciesID) error = %v", err)
+	}
+
+	tr, err := NewTransfer(src, dst)
+	if err != nil {
+		t.Fatalf("NewTransfer() error = %v", err)
+	}
+	element, err := tr.CollectEntry("bibites/bibite_0.bb8") // source species 7
+	if err != nil {
+		t.Fatalf("CollectEntry() error = %v", err)
+	}
+	if err := tr.AppendEntry(element); err != nil {
+		t.Fatalf("AppendEntry() error = %v, want successful remap", err)
+	}
+	fresh, err := dst.Commit(filepath.Join(t.TempDir(), "remap_live_entity.zip"))
+	if err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+	graftedID := entitySpeciesIDOf(t, fresh, "bibites/bibite_3.bb8")
+	if graftedID <= 60 {
+		t.Fatalf("grafted genes.speciesID = %d, want > 60 (the live-entity max id); the live-entity traversal in dstSpeciesIDUsage was not consulted — silent-conflation seam", graftedID)
+	}
+}
+
+// Case 10 (F3): a species-bearing graft whose source has NO matching record fails
+// loudly naming the id and leaves the dest with 0 staged ops.
+func TestTransferAppendEntrySourceRecordAbsentLoud(t *testing.T) {
+	src := NewSession(parseTransferSource(t))
+	// Empty the source records so species 7 has no backing record to import.
+	srcSpecies := src.Archive().Entry("speciesData.json")
+	if err := setJSONPath(srcSpecies.JSON, "recordedSpecies", []any{}, SetOptions{}); err != nil {
+		t.Fatalf("setJSONPath(recordedSpecies) error = %v", err)
+	}
+	dst := NewSession(parseSpeciesArchive(t))
+	tr, err := NewTransfer(src, dst)
+	if err != nil {
+		t.Fatalf("NewTransfer() error = %v", err)
+	}
+	element, err := tr.CollectEntry("bibites/bibite_0.bb8") // species 7
+	if err != nil {
+		t.Fatalf("CollectEntry() error = %v", err)
+	}
+	err = tr.AppendEntry(element)
+	if err == nil {
+		t.Fatalf("AppendEntry(no source record) error = nil, want loud failure")
+	}
+	if !strings.Contains(err.Error(), "7") {
+		t.Fatalf("AppendEntry error = %q, want it to name species 7", err)
+	}
+	if dst.Archive().Entry("bibites/bibite_3.bb8") != nil {
+		t.Fatalf("failed graft still appended bibites/bibite_3.bb8")
+	}
+	assertDestUnstaged(t, dst)
+}
+
+// Case 11 (F3): a dest with NO species table fails loudly for a species-bearing
+// graft (the imported record has nowhere to land). Mirrors the F1 named refusal.
+func TestTransferAppendEntryNoDestSpeciesTableLoud(t *testing.T) {
+	src := NewSession(parseTransferSource(t))
+	dst := NewSession(parseSpeciesArchive(t))
+	// Drop the dest species table to model a save with nowhere to import into.
+	species := dst.Archive().Entry("speciesData.json")
+	species.JSON = nil
+
+	tr, err := NewTransfer(src, dst)
+	if err != nil {
+		t.Fatalf("NewTransfer() error = %v", err)
+	}
+	element, err := tr.CollectEntry("bibites/bibite_0.bb8") // species 7
+	if err != nil {
+		t.Fatalf("CollectEntry() error = %v", err)
+	}
+	err = tr.AppendEntry(element)
+	if err == nil {
+		t.Fatalf("AppendEntry(no dest species table) error = nil, want loud failure")
+	}
+	if !strings.Contains(err.Error(), "species table") {
+		t.Fatalf("AppendEntry error = %q, want it to name the missing species table", err)
+	}
+	if got := len(dst.StagedOperations()); got != 0 {
+		t.Fatalf("destination has %d staged ops after refused graft, want 0", got)
+	}
+	if dst.Archive().Entry("bibites/bibite_3.bb8") != nil {
+		t.Fatalf("refused graft still appended bibites/bibite_3.bb8")
+	}
+}
+
+// Case 12 (F3): a species-less graft skips the remap entirely and grafts cleanly,
+// leaving the species table untouched.
+func TestTransferAppendEntrySpeciesLessGraftsCleanly(t *testing.T) {
+	src := NewSession(parseTransferSource(t))
+	deleteSpeciesID(t, src.Archive().Entry("bibites/bibite_0.bb8").JSON)
+	dst := NewSession(parseSpeciesArchive(t))
+	tr, err := NewTransfer(src, dst)
+	if err != nil {
+		t.Fatalf("NewTransfer() error = %v", err)
+	}
+	element, err := tr.CollectEntry("bibites/bibite_0.bb8")
+	if err != nil {
+		t.Fatalf("CollectEntry() error = %v", err)
+	}
+	if err := tr.AppendEntry(element); err != nil {
+		t.Fatalf("AppendEntry(species-less) error = %v, want clean graft", err)
+	}
+	fresh, err := dst.Commit(filepath.Join(t.TempDir(), "speciesless_graft.zip"))
+	if err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+	if fresh.Entry("bibites/bibite_3.bb8") == nil {
+		t.Fatalf("species-less graft missing bibites/bibite_3.bb8; entries = %v", entryNames(fresh))
+	}
+	// The species table is untouched by a species-less graft.
+	wantActiveSpecies(t, activeSpeciesIDs(t, fresh), 1, 2, 3)
 }
 
 // Case: dangling parent/child link is rejected loudly.
