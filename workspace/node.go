@@ -83,35 +83,12 @@ func (w *Workspace) StartNode(ctx context.Context, spec StartNodeSpec) (*noderun
 		return nil, revisionstore.Node{}, fmt.Errorf("workspace: StartNode: node %q is already active", nodeID)
 	}
 
-	for activeID, _ := range w.nodes {
-		// We need to look up the world binding for each active runtime via the
-		// persisted store. But since we hold w.mu we cannot block on a
-		// potentially slow DB call; use PersistedNodes (which acquires no
-		// separate lock) while still holding w.mu. The store is safe for
-		// concurrent reads.
-		_ = activeID
-	}
-
-	// Scan active node ids against their persisted world bindings to enforce
-	// the one-node-per-world invariant. We do this under the lock so no
-	// concurrent StartNode can race us.
-	if len(w.nodes) > 0 {
-		persisted, err := w.store().ListNodes(ctx, w.id)
-		if err != nil {
-			w.mu.Unlock()
-			return nil, revisionstore.Node{}, fmt.Errorf("workspace: StartNode: list nodes for world check: %w", err)
-		}
-		// Build a map from logical node_id to world_id for persisted running rows.
-		persistedWorld := make(map[string]string, len(persisted))
-		for _, n := range persisted {
-			persistedWorld[n.NodeID] = n.WorldID
-		}
-		for activeID := range w.nodes {
-			if wid, ok := persistedWorld[activeID]; ok && wid == spec.WorldID {
-				w.mu.Unlock()
-				return nil, revisionstore.Node{}, fmt.Errorf("workspace: StartNode: world %q is already bound to active node %q", spec.WorldID, activeID)
-			}
-		}
+	if conflict, err := w.activeNodeForWorldLocked(ctx, spec.WorldID); err != nil {
+		w.mu.Unlock()
+		return nil, revisionstore.Node{}, fmt.Errorf("workspace: StartNode: list nodes for world check: %w", err)
+	} else if conflict != "" {
+		w.mu.Unlock()
+		return nil, revisionstore.Node{}, fmt.Errorf("workspace: StartNode: world %q is already bound to active node %q", spec.WorldID, conflict)
 	}
 
 	w.mu.Unlock()
@@ -135,8 +112,12 @@ func (w *Workspace) StartNode(ctx context.Context, spec StartNodeSpec) (*noderun
 		return nil, revisionstore.Node{}, fmt.Errorf("workspace: StartNode: start process: %w", err)
 	}
 
-	// Re-acquire the lock and re-check uniqueness before persisting. Another
-	// concurrent StartNode may have snuck in while we were blocked in Start.
+	// Re-acquire the lock and re-check BOTH uniqueness invariants before
+	// persisting. The lock was dropped unconditionally around Start, so a
+	// concurrent StartNode may have claimed the same logical id OR bound
+	// another live node to spec.WorldID in the meantime. Re-checking only the
+	// dup-id here would let two concurrent starts for the same world both
+	// survive — re-run the per-world scan as well.
 	w.mu.Lock()
 
 	if _, exists := w.nodes[nodeID]; exists {
@@ -145,6 +126,19 @@ func (w *Workspace) StartNode(ctx context.Context, spec StartNodeSpec) (*noderun
 		_ = rt.Kill()
 		_ = rt.Close()
 		return nil, revisionstore.Node{}, fmt.Errorf("workspace: StartNode: node %q became active concurrently", nodeID)
+	}
+
+	if conflict, err := w.activeNodeForWorldLocked(ctx, spec.WorldID); err != nil {
+		w.mu.Unlock()
+		_ = rt.Kill()
+		_ = rt.Close()
+		return nil, revisionstore.Node{}, fmt.Errorf("workspace: StartNode: list nodes for world re-check: %w", err)
+	} else if conflict != "" {
+		w.mu.Unlock()
+		// Another node won the race for this world; kill the orphan we started.
+		_ = rt.Kill()
+		_ = rt.Close()
+		return nil, revisionstore.Node{}, fmt.Errorf("workspace: StartNode: world %q became bound to active node %q concurrently", spec.WorldID, conflict)
 	}
 
 	// Persist the node row. This binds the node to the world via CreateNode's
@@ -270,6 +264,38 @@ func (w *Workspace) KillNode(ctx context.Context, nodeID string) error {
 	w.mu.Unlock()
 
 	return w.setNodeStatusByLogicalID(ctx, nodeID, "stopped")
+}
+
+// activeNodeForWorldLocked enforces the one-node-per-world invariant against
+// the LIVE active set. It returns the logical id of an active node already
+// bound to worldID, or "" when the world is free. The caller must hold w.mu.
+//
+// Liveness is anchored on w.nodes: a world is "bound" only if some key present
+// in the in-memory active set maps (per its persisted row) to worldID. A stale
+// persisted "running" row for a node that is no longer in w.nodes does not
+// block a new bind. The persisted rows are consulted only to discover the
+// world each active node is bound to (the active-set value is the runtime, not
+// the binding).
+func (w *Workspace) activeNodeForWorldLocked(ctx context.Context, worldID string) (string, error) {
+	if len(w.nodes) == 0 {
+		return "", nil
+	}
+	persisted, err := w.store().ListNodes(ctx, w.id)
+	if err != nil {
+		return "", err
+	}
+	// Map logical node_id -> world_id across ALL persisted rows (no status
+	// filter; liveness is decided by w.nodes membership below).
+	persistedWorld := make(map[string]string, len(persisted))
+	for _, n := range persisted {
+		persistedWorld[n.NodeID] = n.WorldID
+	}
+	for activeID := range w.nodes {
+		if wid, ok := persistedWorld[activeID]; ok && wid == worldID {
+			return activeID, nil
+		}
+	}
+	return "", nil
 }
 
 // setNodeStatusByLogicalID resolves the nodes PK from the logical node_id

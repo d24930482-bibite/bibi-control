@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"os"
+	"sync"
 	"testing"
 
 	"github.com/asemones/bibicontrol/ipc"
@@ -199,6 +200,70 @@ func TestStartNode_OneNodePerWorld(t *testing.T) {
 	// Clean up.
 	if err := ws.KillNode(ctx, "node-a"); err != nil {
 		t.Errorf("KillNode cleanup: %v", err)
+	}
+}
+
+// TestStartNode_ConcurrentSameWorld starts many nodes (distinct logical ids)
+// for the same world in parallel and asserts the one-node-per-world invariant
+// holds: exactly one survives in the active set. This exercises the re-check
+// after the lock is dropped around noderuntime.Start.
+func TestStartNode_ConcurrentSameWorld(t *testing.T) {
+	ctx := context.Background()
+	ws, world := createTestWorkspaceAndWorld(t, ctx)
+	defer ws.Close()
+
+	proc := sleepSpec(t)
+
+	const n = 8
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var winners []string
+	var failures int
+
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			_, node, err := ws.StartNode(ctx, StartNodeSpec{
+				WorldID:        world.ID,
+				NodeID:         "concurrent-" + string(rune('a'+i)),
+				Process:        proc,
+				ConnectOnStart: false,
+			})
+			mu.Lock()
+			defer mu.Unlock()
+			if err == nil {
+				winners = append(winners, node.NodeID)
+			} else {
+				failures++
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	// Exactly one StartNode must have succeeded; the rest must have been
+	// rejected by the per-world invariant.
+	if len(winners) != 1 {
+		t.Fatalf("concurrent StartNode: %d winners, want exactly 1 (failures=%d)", len(winners), failures)
+	}
+	if failures != n-1 {
+		t.Errorf("concurrent StartNode: %d failures, want %d", failures, n-1)
+	}
+
+	// The active set must hold exactly the single winner.
+	if got := ws.Nodes(); len(got) != 1 {
+		t.Fatalf("active set length = %d after concurrent starts, want 1", len(got))
+	}
+	if _, ok := ws.Node(winners[0]); !ok {
+		t.Errorf("winner %q not present in active set", winners[0])
+	}
+
+	// Every started process that lost the race must have been killed (no
+	// orphan). We cannot easily enumerate killed PIDs here, but the persisted
+	// rows of losers must NOT carry status "running" with a live runtime — the
+	// active set already proves only one survived. Clean up the winner.
+	if err := ws.KillNode(ctx, winners[0]); err != nil {
+		t.Errorf("KillNode winner cleanup: %v", err)
 	}
 }
 
