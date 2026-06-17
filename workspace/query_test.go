@@ -234,9 +234,37 @@ func TestHistoryQueryCarriesSimTime(t *testing.T) {
 	}
 
 	const tol = 1e-6
-	diff := gotSimTime - *world.SimTime
-	if diff < -tol || diff > tol {
-		t.Errorf("mirror_saves.sim_time = %v, want %v (from scenes; diff %v exceeds tol %v)",
+
+	// Cross-check directly against scenes.simulated_time keyed by the revision
+	// sha256 (the history partition value). This is the actual source the catalog
+	// must read — distinct from the worlds.sim_time SQLite head value. Asserting
+	// equality with the scenes value (not just world.SimTime) pins reinterpretation
+	// (c): per-revision sim_time comes from scenes, not the SQLite head column.
+	revs, err := ws.store().RevisionsForWorld(ctx, world.ID)
+	if err != nil {
+		t.Fatalf("RevisionsForWorld: %v", err)
+	}
+	if len(revs) != 1 {
+		t.Fatalf("expected 1 revision, got %d", len(revs))
+	}
+	sha := revs[0].SHA256
+
+	var sceneSimTime float64
+	if err := ws.duck().QueryRowContext(ctx,
+		"SELECT simulated_time FROM scenes WHERE save_id = ? AND has_simulated_time LIMIT 1", sha,
+	).Scan(&sceneSimTime); err != nil {
+		t.Fatalf("direct scenes.simulated_time lookup for sha %q: %v", sha, err)
+	}
+
+	if diff := gotSimTime - sceneSimTime; diff < -tol || diff > tol {
+		t.Errorf("mirror_saves.sim_time = %v, want scenes.simulated_time %v (catalog must source from scenes, not worlds.sim_time; diff %v)",
+			gotSimTime, sceneSimTime, diff)
+	}
+
+	// And it must match the head value too (identical for a single-revision
+	// fixture); a mismatch would mean the scene value diverged from the head.
+	if diff := gotSimTime - *world.SimTime; diff < -tol || diff > tol {
+		t.Errorf("mirror_saves.sim_time = %v, want head %v (diff %v exceeds tol %v)",
 			gotSimTime, *world.SimTime, diff, tol)
 	}
 }
@@ -271,6 +299,15 @@ func TestReadOnlyRejectsMutations(t *testing.T) {
 		"SELECT 1; DELETE FROM save_archives",
 		"  -- comment\n  DELETE FROM save_archives",
 		"/* block */ INSERT INTO save_archives (save_id) VALUES ('y')",
+		// CTE-wrapped mutations: DuckDB executes the mutation that follows (or is
+		// nested inside) a CTE list. A leading WITH must NOT wave these through —
+		// this is the bypass the reviewer found (WITH ... DELETE deletes a
+		// retained history-partition row through the public Query API).
+		"WITH x AS (SELECT 1) DELETE FROM save_archives",
+		"WITH x AS (SELECT 1) INSERT INTO save_archives (save_id) VALUES ('z')",
+		"WITH x AS (SELECT 1) UPDATE save_archives SET save_id = save_id",
+		// Mutation nested inside the CTE body (the depth-agnostic scan catches it).
+		"WITH x AS (DELETE FROM save_archives RETURNING save_id) SELECT * FROM x",
 	}
 
 	for _, stmt := range mutationCases {

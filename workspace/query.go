@@ -217,55 +217,79 @@ func (w *Workspace) HistoryQuery(ctx context.Context, worldID, query string) ([]
 	return scanRowsToMaps(rows)
 }
 
+// forbiddenVerbs are the SQL keywords that, if they appear as a bare token
+// anywhere in the statement (outside quoted literals/identifiers and comments),
+// indicate a mutating or otherwise non-read-only operation. The scan is
+// depth-AGNOSTIC: a verb inside a CTE body still counts. This is deliberately
+// broader than a depth-0-only check because DuckDB executes CTE-wrapped
+// mutations — both the tail form `WITH x AS (SELECT 1) DELETE FROM t` and the
+// CTE-body form `WITH x AS (DELETE FROM t RETURNING *) SELECT ...` mutate the
+// database. A SELECT can never legitimately need any of these bare keywords, so
+// rejecting them whenever they appear (not just leading) closes the bypass
+// without false-positives on real read-only queries. (Bare-token matching means
+// a column or string literal containing these words — e.g. a value 'DELETE' or a
+// quoted identifier "delete" — is not flagged, because those are skipped by the
+// literal/identifier handling in the scanner.)
+var forbiddenVerbs = map[string]bool{
+	"INSERT": true, "UPDATE": true, "DELETE": true, "CREATE": true,
+	"DROP": true, "ALTER": true, "ATTACH": true, "DETACH": true,
+	"COPY": true, "PRAGMA": true, "INSTALL": true, "LOAD": true,
+	"SET": true, "CALL": true, "EXPORT": true, "IMPORT": true,
+	"BEGIN": true, "COMMIT": true, "ROLLBACK": true, "VACUUM": true,
+	"CHECKPOINT": true, "TRUNCATE": true, "REPLACE": true, "MERGE": true,
+	"UPSERT": true,
+}
+
 // ensureReadOnly validates that query is a read-only SELECT (or WITH…SELECT).
-// It rejects any non-SELECT leading keyword and any chained statement (a second
-// statement after a ';'). This is the primary gate protecting the shared
-// read-write DuckDB handle; see design note at top of file.
+// This is the primary gate protecting the shared read-write DuckDB handle; see
+// design note at top of file.
 //
-// Accept: SELECT …, WITH … SELECT …, trailing semicolon.
-// Reject: INSERT, UPDATE, DELETE, DROP, CREATE, ALTER, ATTACH, DETACH, COPY,
-// PRAGMA, INSTALL, LOAD, SET, CALL, EXPORT, IMPORT, BEGIN, COMMIT, ROLLBACK,
-// VACUUM, CHECKPOINT, TRUNCATE, REPLACE, and any chained statement.
+// Three checks, all literal/identifier/comment-aware:
+//  1. The first significant token must be SELECT or WITH (DuckDB accepts a
+//     leading WITH RECURSIVE too, which still begins with the WITH token).
+//  2. No chained statement: a ';' may only be followed by whitespace/comments.
+//  3. No forbidden verb appears as a bare token ANYWHERE in the statement. This
+//     is what closes the CTE-wrapped-mutation bypass — a leading WITH no longer
+//     waves through `WITH x AS (SELECT 1) DELETE FROM t`, because DELETE is a
+//     bare top-level token. A real WITH…SELECT carries none of these verbs.
 func ensureReadOnly(query string) error {
-	tok, rest := nextToken(query)
+	tok, _ := nextToken(query)
 	upper := strings.ToUpper(tok)
 
 	switch upper {
-	case "SELECT":
-		// Plain SELECT: reject if a second statement follows.
-		return rejectChained(rest)
-	case "WITH":
-		// WITH … (SELECT | recursive CTE): scan forward to the closing paren of
-		// all CTEs then expect SELECT. We accept any WITH because the CTE body
-		// cannot be a mutation when the outer statement is SELECT — we trust the
-		// DB to enforce that. Reject chained statements after the full query.
-		return rejectChained(rest)
+	case "SELECT", "WITH":
+		// Leading keyword is acceptable; fall through to the deeper scans.
 	case "":
 		// Empty or all-whitespace/comments.
 		return fmt.Errorf("%w: empty query", ErrReadOnlyQuery)
 	default:
 		return fmt.Errorf("%w: statement begins with %q", ErrReadOnlyQuery, tok)
 	}
+
+	// Reject any forbidden bare verb (incl. CTE-wrapped mutations) and any
+	// chained statement. scanForbidden walks the whole string once,
+	// comment/literal-aware.
+	return scanForbidden(query)
 }
 
-// rejectChained returns ErrReadOnlyQuery if s (the remainder after the leading
-// keyword) contains a second statement — i.e. a ';' followed by any further
-// non-comment, non-whitespace token.
-func rejectChained(s string) error {
-	// Scan through s looking for an unquoted ';'. If found, check whether
-	// anything meaningful follows.
+// scanForbidden walks the entire statement once, skipping single-quoted strings,
+// double-quoted identifiers, line comments (--) and block comments (/* */). It
+// returns ErrReadOnlyQuery if (a) any bare alpha token equals a forbidden verb,
+// or (b) a ';' is followed by any further significant (non-comment, non-ws)
+// content (a chained statement). Bare-token matching ensures a forbidden word
+// inside a literal or quoted identifier is not flagged.
+func scanForbidden(s string) error {
 	i := 0
 	for i < len(s) {
 		c := s[i]
-		switch c {
-		case '\'':
-			// Single-quoted string: skip to closing quote.
+		switch {
+		case c == '\'':
+			// Single-quoted string literal: skip to closing quote ('' escapes).
 			i++
 			for i < len(s) {
 				if s[i] == '\'' {
 					i++
 					if i < len(s) && s[i] == '\'' {
-						// Escaped quote ''
 						i++
 						continue
 					}
@@ -273,14 +297,13 @@ func rejectChained(s string) error {
 				}
 				i++
 			}
-		case '"':
-			// Double-quoted identifier: skip to closing quote.
+		case c == '"':
+			// Double-quoted identifier: skip to closing quote ("" escapes).
 			i++
 			for i < len(s) {
 				if s[i] == '"' {
 					i++
 					if i < len(s) && s[i] == '"' {
-						// Escaped quote ""
 						i++
 						continue
 					}
@@ -288,36 +311,38 @@ func rejectChained(s string) error {
 				}
 				i++
 			}
-		case '-':
-			// Line comment: skip rest of line.
-			if i+1 < len(s) && s[i+1] == '-' {
-				for i < len(s) && s[i] != '\n' {
-					i++
-				}
-				continue
+		case c == '-' && i+1 < len(s) && s[i+1] == '-':
+			// Line comment: skip to end of line.
+			for i < len(s) && s[i] != '\n' {
+				i++
 			}
-			i++
-		case '/':
+		case c == '/' && i+1 < len(s) && s[i+1] == '*':
 			// Block comment: skip to */.
-			if i+1 < len(s) && s[i+1] == '*' {
-				i += 2
-				for i+1 < len(s) && !(s[i] == '*' && s[i+1] == '/') {
-					i++
-				}
-				if i+1 < len(s) {
-					i += 2 // skip */
-				}
-				continue
+			i += 2
+			for i+1 < len(s) && !(s[i] == '*' && s[i+1] == '/') {
+				i++
 			}
-			i++
-		case ';':
-			// Semicolon found: check if a meaningful token follows.
-			rest := s[i+1:]
-			tok, _ := nextToken(rest)
+			if i+1 < len(s) {
+				i += 2
+			}
+		case c == ';':
+			// Chained statement: reject if any significant token follows.
+			tok, _ := nextToken(s[i+1:])
 			if tok != "" {
 				return fmt.Errorf("%w: chained statement after ';'", ErrReadOnlyQuery)
 			}
-			return nil
+			i++
+		case isAlpha(c):
+			// Collect a bare identifier/keyword token and check it.
+			j := i
+			for j < len(s) && isAlphaNum(s[j]) {
+				j++
+			}
+			word := s[i:j]
+			if forbiddenVerbs[strings.ToUpper(word)] {
+				return fmt.Errorf("%w: statement contains forbidden keyword %q", ErrReadOnlyQuery, word)
+			}
+			i = j
 		default:
 			i++
 		}
