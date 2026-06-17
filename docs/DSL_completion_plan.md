@@ -166,8 +166,9 @@ deferral reflected scope-cutting for the original PR, not a technical barrier.
 > **Shipped:** zone & pellet read/iterate; zone scalar set (name/material/distribution) +
 > `delete()` (zone_id-guarded); zone-scoped values `save.zones[i].values["k"]` (reuse the P1
 > `Setting`/`SettingScope` path — closes the P1 zone-values deferral); zone **create** via
-> `save.zones.clone(i)` → edit name/material/distribution → `.append()` (deep-copies the
-> template's `RawJSON`, assigns a fresh zone id); pellet scalar set + `delete()` (group
+> `save.zones.clone(i)` → edit name/material/distribution **and inherited `.values["k"]`** →
+> `.append()` (deep-copies the template's `RawJSON`, assigns a fresh zone id; pending-value edits
+> probe the cloned map for wrapper-vs-bare — see Deviation #2); pellet scalar set + `delete()` (group
 > locators, zone + material stale guards, scene `nPellets` reconciled by the mutator); pellet
 > **create** via `save.pellets.clone(i)` → edit scalars → `.append(zone="X")` (P2B, below).
 > Scalar sets are mirror-everything; structural ops (delete, clone-append) are staged but not
@@ -180,11 +181,18 @@ deferral reflected scope-cutting for the original PR, not a technical barrier.
 >    would emit literal dotted keys and corrupt the pellet. P2B ships it via **clone** (not the
 >    originally-planned field-append): a small isolated nested-path builder + a deep copy of the
 >    template's retained JSON. See the **P2B** section.
-> 2. **Pending-zone `.values` edits are deferred** (a clone inherits the template's values).
->    Editing a value on the raw cloned map would require replicating the mutator's
->    wrapper-vs-bare handling; edit zone values via `save.zones[i].values` after committing.
->    This also kept P2 fully binding-only (the `path.go` export the stub anticipated for 2a
->    was unnecessary).
+> 2. **Pending-zone `.values` edits — resolved 2026-06-16 (binding-only).** `z.values["k"] = v`
+>    now edits an inherited zone-scoped value on a clone **before** `.append()`, so a new zone is
+>    created with custom values in one run. The wrapper-vs-bare decision is **not** plumbed via
+>    `WrapperRawJSON`: `pendingZoneValues.SetKey` (zones.go) **probes the cloned map's shape**
+>    (does `data[key]` carry a `"Value"` key, mirroring `settingValueUsesWrapper`) and writes into
+>    `data[key]["Value"]` (preserving siblings) or `data[key]` accordingly. No mutator/parser/
+>    generator changes — `StageSQLAppend` applies the cloned map verbatim. Constraints:
+>    inherited-key-only (no scaffolding of a missing key), type-change rejected
+>    (`validateValue(scalarTypeRule(typ), …)`), int→float fidelity preserved
+>    (`coercePelletScalar`), edit-after-append guarded, not mirrored (invisible mid-run — like
+>    every other PendingZone edit). This kept P2 fully binding-only (the `path.go` export the stub
+>    anticipated for 2a was unnecessary).
 > 3. **Clone-append is explicit `.append()` only** (no end-of-run auto-finalize) — no hidden
 >    session lifecycle. Zone-group membership and other zone-id references are not reconciled
 >    (a known v2 limitation, like brain-graph integrity).

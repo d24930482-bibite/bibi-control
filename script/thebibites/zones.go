@@ -29,12 +29,17 @@ import (
 // clone(i) deep-copies the template zone's full JSON (SettingsZoneRow.RawJSON), so
 // the new zone inherits every field — including its zone-scoped values — verbatim.
 // name/material/distribution are editable on the pending zone (plain top-level
-// keys); editing the inherited values on a *pending* clone is intentionally not
-// supported (it would require replicating the mutator's wrapper-vs-bare value
-// handling on the raw map) — edit them via save.zones[i].values after committing.
-// On append a fresh zone id is assigned to avoid colliding with the template;
-// zone-group membership and other id references are not reconciled (a known v2
-// limitation, like brain-graph integrity).
+// keys), and inherited zone-scoped values are editable via z.values["k"] = v
+// before append() (see pendingZoneValues). Because the clone is a complete
+// structure, .values can only edit a key the template already carries (no
+// scaffolding); the value's type may not change (a number stays a number); and the
+// wrapper-vs-bare shape of the existing value is preserved by probing the cloned
+// map, so no mutator/parser changes are needed — append applies the map verbatim.
+// Pending edits are structural and unmirrored: like every other PendingZone edit
+// they only mutate the in-memory copy and are invisible to in-run reads/queries
+// until commit. On append a fresh zone id is assigned to avoid colliding with the
+// template; zone-group membership and other id references are not reconciled (a
+// known v2 limitation, like brain-graph integrity).
 
 // Zones is the save.zones collection: an indexable, iterable sequence over the
 // save's settings zones, plus clone() (create) and count().
@@ -247,7 +252,8 @@ func zoneValuesOwnerID(row *tb.SettingsZoneRow) string {
 }
 
 // PendingZone is a detached, editable deep copy of a template zone's JSON, created
-// by save.zones.clone(i). Editing name/material/distribution mutates the copy;
+// by save.zones.clone(i). Editing name/material/distribution mutates the copy, as
+// does z.values["k"] = v for an inherited zone-scoped value (see pendingZoneValues);
 // .append() stages a structural append of the whole object (with a fresh id). The
 // pending zone is not part of save.zones and is invisible to in-run reads/queries
 // until commit.
@@ -274,6 +280,9 @@ func (pz *PendingZone) Attr(name string) (starlark.Value, error) {
 	if name == "append" {
 		return starlark.NewBuiltin("append", pz.appendBuiltin), nil
 	}
+	if name == "values" {
+		return &pendingZoneValues{pz: pz}, nil
+	}
 	spec, ok := zoneRegistry()[name]
 	if !ok {
 		return nil, nil
@@ -291,11 +300,11 @@ func (pz *PendingZone) Attr(name string) (starlark.Value, error) {
 
 func (pz *PendingZone) AttrNames() []string {
 	specs := zoneRegistry()
-	names := make([]string, 0, len(specs)+1)
+	names := make([]string, 0, len(specs)+2)
 	for name := range specs {
 		names = append(names, name)
 	}
-	names = append(names, "append")
+	names = append(names, "append", "values")
 	sort.Strings(names)
 	return names
 }
@@ -345,4 +354,139 @@ func (pz *PendingZone) appendBuiltin(thread *starlark.Thread, b *starlark.Builti
 	pz.ls.stagedOps++
 	pz.appended = true
 	return starlark.None, nil
+}
+
+// pendingZoneValues is the z.values mapping on a PendingZone: it edits an inherited
+// zone-scoped value in the cloned JSON map BEFORE append, so the new zone is created
+// with a custom value in one run. It is binding-only — append applies the cloned map
+// verbatim — so the wrapper-vs-bare shape of the existing value is decided by probing
+// the clone (does data[key] carry a "Value" key?), not by plumbing the mutator's
+// wrapper rule. Writes only mutate the in-memory copy (nothing is staged or mirrored
+// until append), mirroring PendingZone.SetField.
+type pendingZoneValues struct {
+	pz *PendingZone
+}
+
+var (
+	_ starlark.Value     = (*pendingZoneValues)(nil)
+	_ starlark.Mapping   = (*pendingZoneValues)(nil)
+	_ starlark.HasSetKey = (*pendingZoneValues)(nil)
+)
+
+func (pv *pendingZoneValues) String() string        { return "pending_zone.values" }
+func (pv *pendingZoneValues) Type() string          { return "pending_zone_values" }
+func (pv *pendingZoneValues) Freeze()               {}
+func (pv *pendingZoneValues) Truth() starlark.Bool  { return starlark.True }
+func (pv *pendingZoneValues) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable type: pending_zone_values") }
+
+// pendingZoneValueScalarType infers a settings ScalarType from the underlying Go
+// scalar a clone carries for a zone value. A clone is produced by plain json.Unmarshal
+// (zones.clone), so JSON numbers arrive as float64 — there is no json.Number here, so
+// this small type-switch is the local counterpart of the parser's scalarParts. Null or
+// any non-scalar (object/array, e.g. an unexpected nested shape) yields ScalarNull,
+// which scalarValueColumn rejects as unsettable.
+func pendingZoneValueScalarType(v any) tb.ScalarType {
+	switch v.(type) {
+	case bool:
+		return tb.ScalarBool
+	case string:
+		return tb.ScalarString
+	case float64, int64, int, json.Number:
+		return tb.ScalarNumber
+	default:
+		return tb.ScalarNull
+	}
+}
+
+// pendingZoneValueWrapper probes the clone's shape at a top-level key: a value is
+// "wrapped" when data[key] is an object carrying a "Value" key (mirroring the mutator's
+// settingValueUsesWrapper rule, but on the already-parsed map). It returns the inner
+// scalar to type-check against and whether the value is wrapped. An object without a
+// "Value" key is treated as bare (the underlying value is itself, and type inference
+// will reject it as non-scalar — a loud, localized failure).
+func pendingZoneValueWrapper(v any) (inner any, wrapped bool) {
+	if obj, ok := v.(map[string]any); ok {
+		if inner, ok := obj["Value"]; ok {
+			return inner, true
+		}
+	}
+	return v, false
+}
+
+// Get implements z.values["k"] read-back: it reads the (possibly edited) value out of
+// the clone, unwrapping a "Value" wrapper, and converts it for Starlark. A key the
+// clone does not carry reports found=false (Starlark raises a KeyError).
+func (pv *pendingZoneValues) Get(k starlark.Value) (starlark.Value, bool, error) {
+	name, ok := starlark.AsString(k)
+	if !ok {
+		return nil, false, fmt.Errorf("zone value name must be a string, got %s", k.Type())
+	}
+	raw, ok := pv.pz.data[name]
+	if !ok {
+		return nil, false, nil
+	}
+	inner, _ := pendingZoneValueWrapper(raw)
+	sv, err := fromSQLValue(inner)
+	if err != nil {
+		return nil, false, fmt.Errorf("zone value %q: %w", name, err)
+	}
+	return sv, true, nil
+}
+
+// SetKey implements z.values["k"] = v: edit an inherited zone-scoped value in the clone
+// before append. It only mutates the in-memory map — nothing is staged until append.
+// It refuses to scaffold a missing key, refuses a type change, and preserves the
+// existing wrapper-vs-bare shape (and any wrapper siblings).
+func (pv *pendingZoneValues) SetKey(k, v starlark.Value) error {
+	if pv.pz.appended {
+		return fmt.Errorf("zone already appended; clone again for another")
+	}
+	name, ok := starlark.AsString(k)
+	if !ok {
+		return fmt.Errorf("zone value name must be a string, got %s", k.Type())
+	}
+	// Inherited-key-only: the clone is a complete structure, so a value can only be
+	// edited where the template already carries one. A missing key fails loudly rather
+	// than scaffolding a new value with a guessed shape/type.
+	raw, ok := pv.pz.data[name]
+	if !ok {
+		return fmt.Errorf("zone has no value %q; pending-zone values can only edit inherited keys", name)
+	}
+	inner, wrapped := pendingZoneValueWrapper(raw)
+	typ := pendingZoneValueScalarType(inner)
+	// scalarValueColumn also rejects an unsettable null/unknown value (a null cell or
+	// an unexpected non-scalar shape) loudly.
+	_, sqlType, err := scalarValueColumn(typ)
+	if err != nil {
+		return fmt.Errorf("zone value %q: %w", name, err)
+	}
+	goVal, err := fromStarlark(v)
+	if err != nil {
+		return fmt.Errorf("zone value %q: %w", name, err)
+	}
+	// Reject a type change (string key set to a number, etc.) before coercion, exactly
+	// as a committed settings-value write does.
+	if err := validateValue(scalarTypeRule(typ), goVal); err != nil {
+		return fmt.Errorf("zone value %q: %w", name, err)
+	}
+	// Coerce so an integral Starlark int lands as a float for a numeric (DOUBLE) value,
+	// matching the committed path's setRowField — the F1 int->float fidelity lesson.
+	coerced, err := coercePelletScalar(sqlType, goVal)
+	if err != nil {
+		return fmt.Errorf("zone value %q: %w", name, err)
+	}
+	// Write at the same path/shape the clone already uses: into data[key]["Value"] when
+	// the value is wrapped (preserving the wrapper object and its sibling keys), else
+	// data[key] directly. The bare write is a plain top-level assignment (not routed
+	// through the dotted-path helper) so a value key containing '.'/'[' cannot be
+	// misparsed; the wrapped write reuses setNestedPellet to navigate into the existing
+	// "Value" leaf.
+	if !wrapped {
+		pv.pz.data[name] = coerced
+		return nil
+	}
+	if err := setNestedPellet(pv.pz.data, name+".Value", coerced); err != nil {
+		return fmt.Errorf("zone value %q: %w", name, err)
+	}
+	return nil
 }
