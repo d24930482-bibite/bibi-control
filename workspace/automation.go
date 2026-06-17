@@ -11,9 +11,9 @@
 // — Starlark is non-looping; the host re-invokes on a timer or event
 // (workspace_plan.md:430-432).
 //
-// Deferred names: world.open(), workspace.transfer(), workspace.gc() are NOT
-// bound here (E2/F2/G3). Callers that reference those names receive a normal
-// Starlark "has no .X attribute" error from the nil return in Attr.
+// Deferred names: workspace.transfer(), workspace.gc() are NOT bound here
+// (F2/G3). Callers that reference those names receive a normal Starlark "has no
+// .X attribute" error from the nil return in Attr.
 package workspace
 
 import (
@@ -25,6 +25,7 @@ import (
 	"github.com/asemones/bibicontrol/ipc"
 	"github.com/asemones/bibicontrol/revisionstore"
 	"github.com/asemones/bibicontrol/script"
+	"github.com/asemones/bibicontrol/script/thebibites"
 	"go.starlark.net/starlark"
 )
 
@@ -238,7 +239,7 @@ func (v *worldValue) Truth() starlark.Bool  { return starlark.True }
 func (v *worldValue) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable type: world") }
 
 func (v *worldValue) AttrNames() []string {
-	return []string{"evict_history", "head", "history_query", "id", "load", "name", "sim_time", "unload"}
+	return []string{"evict_history", "head", "history_query", "id", "load", "name", "open", "query", "sim_time", "unload"}
 }
 
 func (v *worldValue) Attr(name string) (starlark.Value, error) {
@@ -265,10 +266,54 @@ func (v *worldValue) Attr(name string) (starlark.Value, error) {
 		return starlark.NewBuiltin("load", v.loadBuiltin), nil
 	case "unload":
 		return starlark.NewBuiltin("unload", v.unloadBuiltin), nil
+	case "open":
+		return starlark.NewBuiltin("open", v.openBuiltin), nil
+	case "query":
+		return starlark.NewBuiltin("query", v.queryBuiltin), nil
 	default:
-		// world.open() is E2 — return (nil, nil) so Starlark reports "has no .open attribute".
 		return nil, nil
 	}
+}
+
+// world.open() → saveValue. It returns a Save object wrapping the world's
+// already-loaded working copy (OpenWorld lazy-loads it if absent). The object
+// exposes the proven sandboxed read/mutation surface (s.bibites/s.eggs/s.settings/
+// s.zones/s.pellets/s.sql + .where().set()/.delete()) via delegation to the
+// thebibites.Save value, plus an E2-owned head-advancing s.commit().
+func (v *worldValue) openBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	if err := starlark.UnpackArgs(b.Name(), args, kwargs); err != nil {
+		return nil, err
+	}
+	ls, err := v.ws.OpenWorld(v.ctx, v.world.ID)
+	if err != nil {
+		return nil, fmt.Errorf("world.open: %w", err)
+	}
+	return &saveValue{ctx: v.ctx, ws: v.ws, worldID: v.world.ID, save: thebibites.NewSaveValue(ls)}, nil
+}
+
+// world.query(sql) → list of dicts. A read-only SELECT over the OPEN world's
+// working partition (save_id == worldID). The read-only gate (ensureReadOnly) is
+// applied at this binding — reusing the C4 gate with zero duplication — BEFORE
+// the scoped working-copy query runs. A staged-but-uncommitted set is visible to
+// this read (working-copy read-after-write via flushMirror in ls.query); the
+// scoping CTE (working_saves) lives in LoadedSave.Query.
+func (v *worldValue) queryBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var sql string
+	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "sql", &sql); err != nil {
+		return nil, err
+	}
+	if err := ensureReadOnly(sql); err != nil {
+		return nil, fmt.Errorf("world.query: %w", err)
+	}
+	ls, err := v.ws.OpenWorld(v.ctx, v.world.ID)
+	if err != nil {
+		return nil, fmt.Errorf("world.query: %w", err)
+	}
+	rows, err := ls.Query(v.ctx, sql)
+	if err != nil {
+		return nil, fmt.Errorf("world.query: %w", err)
+	}
+	return mapsToStarlark(rows)
 }
 
 // world.history_query(sql) → list of dicts
@@ -351,6 +396,75 @@ func (v *worldValue) unloadBuiltin(_ *starlark.Thread, b *starlark.Builtin, args
 		return nil, fmt.Errorf("world.unload: %w", err)
 	}
 	return starlark.None, nil
+}
+
+// ---------------------------------------------------------------------------
+// saveValue — an open working copy of a world (world.open())
+// ---------------------------------------------------------------------------
+
+// saveValue is the Starlark object returned by world.open(). It wraps the
+// world's cached working copy (a thebibites.Save over the *LoadedSave) and
+// delegates every read/mutation attribute (bibites/eggs/settings/zones/pellets/
+// sql/where/…) to that proven DSL value, re-implementing nothing. Only commit is
+// E2-owned: s.commit() advances the world head over the already-staged session
+// (CommitWorldLoaded), as opposed to the sandboxed DSL's file-write commit.
+//
+// It carries worldID (NOT a detached *LoadedSave copy) so s.commit() re-resolves
+// the cached handle under w.mu — the staged session lives on w.worlds[worldID],
+// and CommitWorldLoaded commits THAT same pointer.
+type saveValue struct {
+	ctx     context.Context
+	ws      *Workspace
+	worldID string
+	save    *thebibites.Save
+}
+
+var (
+	_ starlark.Value    = (*saveValue)(nil)
+	_ starlark.HasAttrs = (*saveValue)(nil)
+)
+
+func (v *saveValue) String() string        { return fmt.Sprintf("save(%q)", v.worldID) }
+func (v *saveValue) Type() string          { return "save" }
+func (v *saveValue) Freeze()               {}
+func (v *saveValue) Truth() starlark.Bool  { return starlark.True }
+func (v *saveValue) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable type: save") }
+
+func (v *saveValue) AttrNames() []string {
+	// Delegate the surface to the proven Save value; commit is already present in
+	// Save.AttrNames, and E2's commit shadows it, so the name appears once.
+	return v.save.AttrNames()
+}
+
+func (v *saveValue) Attr(name string) (starlark.Value, error) {
+	// commit is E2-owned (head-advancing); it shadows the DSL's file-write commit.
+	if name == "commit" {
+		return starlark.NewBuiltin("commit", v.commitBuiltin), nil
+	}
+	// Every other attribute delegates to the proven Save value (the entire
+	// read/mutation surface — bibites/eggs/settings/zones/pellets/sql/where/…).
+	return v.save.Attr(name)
+}
+
+// s.commit() → dict {committed, revision_id, sha256}. It commits the mutations
+// already staged on the open working copy and advances the world head to a new
+// revision (CommitWorldLoaded — NOT a program re-run). A no-op (nothing staged /
+// dry-run / autocommit off) returns committed=False with revision_id=0 and an
+// empty sha256, and the head does not move.
+func (v *saveValue) commitBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	if err := starlark.UnpackArgs(b.Name(), args, kwargs); err != nil {
+		return nil, err
+	}
+	rev, err := v.ws.CommitWorldLoaded(v.ctx, v.worldID, thebibites.RunOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("save.commit: %w", err)
+	}
+	d := starlark.NewDict(3)
+	committed := rev.ID != 0
+	_ = d.SetKey(starlark.String("committed"), starlark.Bool(committed))
+	_ = d.SetKey(starlark.String("revision_id"), starlark.MakeInt64(rev.ID))
+	_ = d.SetKey(starlark.String("sha256"), starlark.String(rev.SHA256))
+	return d, nil
 }
 
 // ---------------------------------------------------------------------------

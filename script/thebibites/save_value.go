@@ -19,6 +19,16 @@ var (
 	_ starlark.HasAttrs = (*Save)(nil)
 )
 
+// NewSaveValue wraps an already-loaded working copy in a Save value, exposing the
+// proven sandboxed read/mutation surface (s.bibites/s.eggs/s.settings/s.zones/
+// s.pellets/s.sql + .where().set()/.delete()) over ls. The workspace automation
+// layer (world.open()) uses this so its saveValue can delegate every attribute
+// except commit to the proven DSL value instead of re-implementing it; the ls
+// field is unexported, so a constructor is required.
+func NewSaveValue(ls *LoadedSave) *Save {
+	return &Save{ls: ls}
+}
+
 func (s *Save) String() string        { return "save" }
 func (s *Save) Type() string          { return "save" }
 func (s *Save) Freeze()               {}

@@ -1,6 +1,7 @@
 package thebibites
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"reflect"
@@ -56,6 +57,77 @@ func (ls *LoadedSave) query(q string, args ...any) (*sql.Rows, error) {
 		return nil, fmt.Errorf("query: %w", err)
 	}
 	return rows, nil
+}
+
+// Query runs a working-copy SELECT scoped to this loaded save's working
+// partition (save_id == ls.saveID == worldID) and materializes the result as
+// []map[string]any for a Go caller (the workspace automation layer owns the
+// Starlark conversion via mapsToStarlark — this returns plain Go scalars, NOT
+// Starlark values). It is the world.query() executor.
+//
+// Scoping (load-bearing): ls.query runs raw SQL over the SHARED workspace DuckDB
+// handle whose tables hold EVERY world's working/history partitions keyed by
+// save_id. A naive `SELECT … FROM bibites` would read all save_ids across worlds.
+// So the user query is wrapped with a prepended working_saves CTE exposing only
+// this save's working-partition key:
+//
+//	WITH working_saves AS (SELECT '<saveID>' AS save_id) <query>
+//
+// callers JOIN working_saves USING (save_id) to constrain to the open world (the
+// same scoping contract HistoryQuery uses for the history partition). flushMirror
+// runs at the head of ls.query, so a staged-but-uncommitted set is visible to a
+// working-copy read-after-write — proving working-copy semantics, not a stale
+// committed projection. The read-only gate lives at the workspace binding
+// (worldValue.queryBuiltin reuses ensureReadOnly before calling Query); do NOT
+// duplicate it here.
+func (ls *LoadedSave) Query(ctx context.Context, query string) ([]map[string]any, error) {
+	// Prepend the working_saves CTE so callers can JOIN working_saves USING
+	// (save_id) to scope reads to this world's working partition. ls.saveID is a
+	// content/world identifier (no quote injection surface in practice), but
+	// embed it as a single-quoted literal with doubled quotes for safety.
+	wrapped := "WITH working_saves AS (SELECT '" + strings.ReplaceAll(ls.saveID, "'", "''") + "' AS save_id) " + query
+
+	rows, err := ls.query(wrapped)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRowsToMaps(rows)
+}
+
+// scanRowsToMaps materializes a result set as one map[string]any per row (column
+// name -> raw driver scalar), preserving column order semantics. It is the Go-API
+// analogue of scanRowsToDicts (which returns Starlark values); the automation
+// layer converts these maps to Starlark via its own sqlScalarToStarlark path.
+func scanRowsToMaps(rows *sql.Rows) ([]map[string]any, error) {
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	values := make([]any, len(cols))
+	targets := make([]any, len(cols))
+	for i := range values {
+		targets[i] = &values[i]
+	}
+
+	var out []map[string]any
+	for rows.Next() {
+		for i := range values {
+			values[i] = nil
+		}
+		if err := rows.Scan(targets...); err != nil {
+			return nil, fmt.Errorf("scan row: %w", err)
+		}
+		m := make(map[string]any, len(cols))
+		for i, name := range cols {
+			m[name] = values[i]
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // sqlBuiltin implements save.sql(query) -> list[dict]. The raw escape hatch: the
