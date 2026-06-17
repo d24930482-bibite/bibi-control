@@ -695,6 +695,56 @@ func TestTransferAppendEntryAllocatorBeatsStaleNextSpeciesID(t *testing.T) {
 	}
 }
 
+// Case 9b (F3 conflation invariant, load-bearing): the allocator MUST consult
+// every live dest entity's genes.speciesID. This pins the one id source that can
+// hold an id present in NEITHER activeSpeciesList NOR recordedSpecies — the exact
+// silent-conflation shape of the original F1 bug. A live dest bibite is retagged
+// to species 60 while the species TABLE tops out at 50 (a record-only id) and
+// activeSpeciesList stays [1,2,3] (60 appears in no species-table field). The
+// fresh id must beat 60, which is only possible if dstSpeciesIDUsage scans live
+// entities; this test fails if that traversal is removed.
+func TestTransferAppendEntryAllocatorBeatsLiveEntitySpeciesID(t *testing.T) {
+	src := NewSession(parseTransferSource(t))
+	dst := NewSession(parseSpeciesArchive(t))
+	species := dst.Archive().Entry("speciesData.json")
+	// Species table tops out at 50, and 50 lives only in recordedSpecies (not in
+	// activeSpeciesList). nextSpeciesID is stale so it cannot mask the gap.
+	if err := setJSONPath(species.JSON, "nextSpeciesID", int64(1), SetOptions{}); err != nil {
+		t.Fatalf("setJSONPath(nextSpeciesID) error = %v", err)
+	}
+	if err := appendJSONArray(species.JSON, "recordedSpecies", map[string]any{
+		"speciesID": int64(50), "parentID": int64(0), "name": "record-only", "template": map[string]any{"genes": map[string]any{"SizeRatio": 50.0}},
+	}); err != nil {
+		t.Fatalf("append record-only species error = %v", err)
+	}
+	// A LIVE dest bibite carries species 60 — present in NO species-table field
+	// (not activeSpeciesList, not recordedSpecies). Only the live-entity scan can
+	// surface it as the global max.
+	if err := setJSONPath(dst.Archive().Entry("bibites/bibite_0.bb8").JSON, "genes.speciesID", int64(60), SetOptions{}); err != nil {
+		t.Fatalf("setJSONPath(live entity speciesID) error = %v", err)
+	}
+
+	tr, err := NewTransfer(src, dst)
+	if err != nil {
+		t.Fatalf("NewTransfer() error = %v", err)
+	}
+	element, err := tr.CollectEntry("bibites/bibite_0.bb8") // source species 7
+	if err != nil {
+		t.Fatalf("CollectEntry() error = %v", err)
+	}
+	if err := tr.AppendEntry(element); err != nil {
+		t.Fatalf("AppendEntry() error = %v, want successful remap", err)
+	}
+	fresh, err := dst.Commit(filepath.Join(t.TempDir(), "remap_live_entity.zip"))
+	if err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+	graftedID := entitySpeciesIDOf(t, fresh, "bibites/bibite_3.bb8")
+	if graftedID <= 60 {
+		t.Fatalf("grafted genes.speciesID = %d, want > 60 (the live-entity max id); the live-entity traversal in dstSpeciesIDUsage was not consulted — silent-conflation seam", graftedID)
+	}
+}
+
 // Case 10 (F3): a species-bearing graft whose source has NO matching record fails
 // loudly naming the id and leaves the dest with 0 staged ops.
 func TestTransferAppendEntrySourceRecordAbsentLoud(t *testing.T) {
