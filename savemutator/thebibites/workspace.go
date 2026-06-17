@@ -6,8 +6,9 @@ package thebibites
 // StageAppendBibite / StageDeleteBibite for whole entries, and the SQL-ref
 // resolvers SQLAppend / SQLDelete. The cross-save coordinator that drives them —
 // opening a source and destination Session, extracting the source element, and
-// re-linking identity/species — is the *transfer type in transfer.go and
-// transfer_identity.go (constructor NewTransfer). This stays a pure-archive
+// reconciling identity (body.id, child refs) while REFUSING species-bearing
+// grafts that would need a cross-world species remap (F3) — is the *transfer type
+// in transfer.go and transfer_identity.go (constructor NewTransfer). This stays a pure-archive
 // mechanism: it never opens a database, touches a revision store, or commits a
 // world head. The workspace layer (a higher package) decides when to Commit and
 // how to advance a head; the interface below is the mockable seam it depends on.

@@ -3,6 +3,7 @@ package thebibites
 import (
 	"archive/zip"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	tb "github.com/asemones/bibicontrol/saveparser/thebibites"
@@ -224,11 +225,41 @@ func TestTransferAppendArrayTableMismatch(t *testing.T) {
 	}
 }
 
-// Case 3: whole-entry append. Collect a source bibite, graft it, Commit; assert a
-// fresh non-colliding name exists, nBibites incremented, and the grafted body.id
-// is present.
+// deleteSpeciesID removes genes.speciesID from a parsed entry's JSON so the entry
+// is species-less. The whole-entry graft mechanics tests use a species-less
+// source: under the F1 fail-loud rule any genes.speciesID would refuse the graft
+// (that refusal is exercised separately), so removing it isolates the mechanics
+// (fresh name, scene count, body.id) from the species check.
+func deleteSpeciesID(t *testing.T, root any) {
+	t.Helper()
+	obj, ok := root.(map[string]any)
+	if !ok {
+		t.Fatalf("deleteSpeciesID: root is %T, want map", root)
+	}
+	genes, ok := obj["genes"].(map[string]any)
+	if !ok {
+		t.Fatalf("deleteSpeciesID: genes is %T, want map", obj["genes"])
+	}
+	delete(genes, "speciesID")
+	if _, present := entitySpeciesID(root); present {
+		t.Fatalf("deleteSpeciesID: speciesID still present after delete")
+	}
+}
+
+// Case 3: whole-entry append (mechanics only). Collect a SPECIES-LESS source
+// bibite, graft it, Commit; assert a fresh non-colliding name exists, nBibites
+// incremented, and the grafted body.id is present. A species-less entity is the
+// only non-refusing species path under the F1 fail-loud rule, so this doubles as
+// the "species-less entity grafts cleanly" boundary case.
 func TestTransferAppendEntryRoundTrip(t *testing.T) {
-	tr, _, dst := newTransferPair(t)
+	src := NewSession(parseTransferSource(t))
+	// Drop genes.speciesID so the mechanics graft is not refused by the species rule.
+	deleteSpeciesID(t, src.Archive().Entry("bibites/bibite_0.bb8").JSON)
+	dst := NewSession(parseSpeciesArchive(t))
+	tr, err := NewTransfer(src, dst)
+	if err != nil {
+		t.Fatalf("NewTransfer() error = %v", err)
+	}
 
 	element, err := tr.CollectEntry("bibites/bibite_0.bb8")
 	if err != nil {
@@ -369,30 +400,51 @@ func TestTransferAppendEntryWrongKindName(t *testing.T) {
 	}
 }
 
-// Case 6: species handling. The grafted entity's species id (not in the dest
-// activeSpeciesList) is added; a species already active is untouched.
-func TestTransferAppendEntryRegistersSpecies(t *testing.T) {
-	t.Run("missing species id is added to activeSpeciesList", func(t *testing.T) {
+// assertDestUnstaged asserts the destination took no staged op, stayed clean, and
+// kept its activeSpeciesList unchanged at [1,2,3] (the parseSpeciesArchive value).
+func assertDestUnstaged(t *testing.T, dst *Session) {
+	t.Helper()
+	if got := len(dst.StagedOperations()); got != 0 {
+		t.Fatalf("destination has %d staged ops after refused graft, want 0", got)
+	}
+	if dst.State() != StateClean {
+		t.Fatalf("destination state = %q after refused graft, want clean", dst.State())
+	}
+	// The dest activeSpeciesList must be untouched by a refused graft.
+	wantActiveSpecies(t, activeSpeciesIDs(t, dst.Archive()), 1, 2, 3)
+}
+
+// Case 6: species handling is FAIL-LOUD. Every species-bearing graft is refused —
+// both an absent id (would need a record import) and a present/colliding id (would
+// conflate distinct per-world-linear species). These refusals are CONSERVATIVE ON
+// PURPOSE; ticket F3 lifts them via a cross-world species remap (allocate a fresh
+// dest species id + import the source record + rewrite refs). Do NOT "fix" any of
+// these refusals back into an add-to-activeSpeciesList: that is the silent
+// conflation bug the original F1 shipped.
+func TestTransferAppendEntryRefusesSpecies(t *testing.T) {
+	t.Run("absent species id refuses loudly and leaves dest unstaged", func(t *testing.T) {
 		tr, _, dst := newTransferPair(t)
-		// source bibite_0 carries species 7, which the destination (active [1,2,3])
-		// does not have.
+		// source bibite_0 carries species 7, absent from the destination [1,2,3].
 		element, err := tr.CollectEntry("bibites/bibite_0.bb8")
 		if err != nil {
 			t.Fatalf("CollectEntry() error = %v", err)
 		}
-		if err := tr.AppendEntry(element); err != nil {
-			t.Fatalf("AppendEntry() error = %v", err)
+		err = tr.AppendEntry(element)
+		if err == nil {
+			t.Fatalf("AppendEntry(absent species) error = nil, want loud refusal")
 		}
-		fresh, err := dst.Commit(filepath.Join(t.TempDir(), "species_add.zip"))
-		if err != nil {
-			t.Fatalf("Commit() error = %v", err)
+		if !strings.Contains(err.Error(), "7") || !strings.Contains(err.Error(), "absent") {
+			t.Fatalf("AppendEntry error = %q, want it to name species 7 and the absent/import reason", err)
 		}
-		wantActiveSpecies(t, activeSpeciesIDs(t, fresh), 1, 2, 3, 7)
+		assertDestUnstaged(t, dst)
 	})
 
-	t.Run("already-active species id is not duplicated", func(t *testing.T) {
+	t.Run("present colliding linear id refuses, NOT conflates (headline case)", func(t *testing.T) {
 		src := NewSession(parseTransferSource(t))
-		// Retag the source bibite's species to 2, which is already active in dest.
+		// Retag source bibite_0 (body 500) to species 2. In the destination, species
+		// 2 is the unrelated pair bibite_1/bibite_2 (bodies 43/44). speciesID is a
+		// per-world linear id, so this id collision does NOT mean the grafted body
+		// 500 is the same species — F1 must REFUSE rather than adopt dest species 2.
 		b := src.Archive().Entry("bibites/bibite_0.bb8")
 		if err := setJSONPath(b.JSON, "genes.speciesID", int64(2), SetOptions{}); err != nil {
 			t.Fatalf("setJSONPath(speciesID) error = %v", err)
@@ -406,19 +458,23 @@ func TestTransferAppendEntryRegistersSpecies(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CollectEntry() error = %v", err)
 		}
-		if err := tr.AppendEntry(element); err != nil {
-			t.Fatalf("AppendEntry() error = %v", err)
+		err = tr.AppendEntry(element)
+		if err == nil {
+			t.Fatalf("AppendEntry(colliding species id) error = nil, want loud refusal")
 		}
-		fresh, err := dst.Commit(filepath.Join(t.TempDir(), "species_nodup.zip"))
-		if err != nil {
-			t.Fatalf("Commit() error = %v", err)
+		if !strings.Contains(err.Error(), "2") || !strings.Contains(err.Error(), "conflate") {
+			t.Fatalf("AppendEntry error = %q, want it to name species 2 and the conflation reason", err)
 		}
-		wantActiveSpecies(t, activeSpeciesIDs(t, fresh), 1, 2, 3)
+		// The grafted bibite must NOT have been appended.
+		if dst.Archive().Entry("bibites/bibite_3.bb8") != nil {
+			t.Fatalf("refused graft still appended bibites/bibite_3.bb8")
+		}
+		assertDestUnstaged(t, dst)
 	})
 
-	t.Run("egg graft also registers its species", func(t *testing.T) {
+	t.Run("egg with absent species refuses loudly and leaves dest unstaged", func(t *testing.T) {
 		tr, _, dst := newTransferPair(t)
-		// source egg_0 carries species 8, absent from the destination.
+		// source egg_0 carries species 8, absent from the destination [1,2,3].
 		element, err := tr.CollectEntry("eggs/egg_0.bb8")
 		if err != nil {
 			t.Fatalf("CollectEntry(egg) error = %v", err)
@@ -426,18 +482,44 @@ func TestTransferAppendEntryRegistersSpecies(t *testing.T) {
 		if element.Table != "eggs" {
 			t.Fatalf("collected egg table = %q, want eggs", element.Table)
 		}
-		if err := tr.AppendEntry(element); err != nil {
-			t.Fatalf("AppendEntry(egg) error = %v", err)
+		err = tr.AppendEntry(element)
+		if err == nil {
+			t.Fatalf("AppendEntry(egg absent species) error = nil, want loud refusal")
 		}
-		fresh, err := dst.Commit(filepath.Join(t.TempDir(), "egg_graft.zip"))
+		if !strings.Contains(err.Error(), "8") {
+			t.Fatalf("AppendEntry(egg) error = %q, want it to name species 8", err)
+		}
+		// No fresh egg entry should have been appended.
+		if dst.Archive().Entry("eggs/egg_1.bb8") != nil {
+			t.Fatalf("refused egg graft still appended eggs/egg_1.bb8")
+		}
+		assertDestUnstaged(t, dst)
+	})
+
+	t.Run("species-less bibite grafts cleanly (only non-refusing path)", func(t *testing.T) {
+		src := NewSession(parseTransferSource(t))
+		deleteSpeciesID(t, src.Archive().Entry("bibites/bibite_0.bb8").JSON)
+		dst := NewSession(parseSpeciesArchive(t))
+		tr, err := NewTransfer(src, dst)
+		if err != nil {
+			t.Fatalf("NewTransfer() error = %v", err)
+		}
+		element, err := tr.CollectEntry("bibites/bibite_0.bb8")
+		if err != nil {
+			t.Fatalf("CollectEntry() error = %v", err)
+		}
+		if err := tr.AppendEntry(element); err != nil {
+			t.Fatalf("AppendEntry(species-less) error = %v, want clean graft", err)
+		}
+		fresh, err := dst.Commit(filepath.Join(t.TempDir(), "speciesless_graft.zip"))
 		if err != nil {
 			t.Fatalf("Commit() error = %v", err)
 		}
-		// eggs/egg_0 exists in dest, so the fresh egg is egg_1.
-		if fresh.Entry("eggs/egg_1.bb8") == nil {
-			t.Fatalf("grafted egg eggs/egg_1.bb8 missing; entries = %v", entryNames(fresh))
+		if fresh.Entry("bibites/bibite_3.bb8") == nil {
+			t.Fatalf("species-less graft missing bibites/bibite_3.bb8; entries = %v", entryNames(fresh))
 		}
-		wantActiveSpecies(t, activeSpeciesIDs(t, fresh), 1, 2, 3, 8)
+		// The species table is untouched by a species-less graft.
+		wantActiveSpecies(t, activeSpeciesIDs(t, fresh), 1, 2, 3)
 	})
 }
 

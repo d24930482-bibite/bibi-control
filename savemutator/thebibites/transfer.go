@@ -16,8 +16,10 @@ package thebibites
 //   - AppendArray      → array-element feed (synapses / brain nodes / stomach
 //     contents / pellets / settings zones). Routes through StageSQLAppend, which
 //     reuses the existing append resolvers and SceneCount reconciliation.
-//   - AppendEntry      → whole bibite/egg graft. This is where identity/species
-//     reconciliation lives (transfer_identity.go); unhandled cases fail loudly.
+//   - AppendEntry      → whole bibite/egg graft. This reconciles identity
+//     (body.id collision, dangling child refs) and REFUSES any species-bearing
+//     graft that would require a cross-world species remap (transfer_identity.go).
+//     Unhandled cases fail loudly; species remap is F3.
 
 import (
 	"fmt"
@@ -185,9 +187,12 @@ func (t *transfer) AppendArray(dst SQLValueRef, element CollectedElement) error 
 }
 
 // AppendEntry grafts a collected whole bibite/egg entry into the destination
-// save. It allocates a fresh, non-colliding entry name, reconciles
-// identity/species against the destination, and only then stages the append.
-// Unhandled identity cases fail loudly and leave the destination unstaged.
+// save. It reconciles identity (body.id collision, dangling child refs) and
+// REFUSES any species-bearing graft that would require a cross-world species
+// remap (F3) against the destination, and only then allocates a fresh,
+// non-colliding entry name and stages the append. The identity/species check is
+// a pure guard run BEFORE staging, so a rejected graft leaves the destination
+// with 0 staged ops by construction. Unhandled cases fail loudly.
 func (t *transfer) AppendEntry(element CollectedElement) error {
 	if element.JSON == nil {
 		return fmt.Errorf("transfer: append entry: element has no JSON")
