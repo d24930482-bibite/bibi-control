@@ -11,9 +11,11 @@
 // — Starlark is non-looping; the host re-invokes on a timer or event
 // (workspace_plan.md:430-432).
 //
-// Deferred names: workspace.transfer(), workspace.gc() are NOT bound here
-// (F2/G3). Callers that reference those names receive a normal Starlark "has no
-// .X attribute" error from the nil return in Attr.
+// Deferred names: workspace.gc() is NOT bound here (G3). Callers that reference
+// that name receive a normal Starlark "has no .X attribute" error from the nil
+// return in Attr. workspace.transfer() is bound (F2): it grafts the selected
+// source bibites/eggs (a where-collection or a single entity — the object DSL,
+// never raw SQL) into a destination world and commits an advancing-head revision.
 package workspace
 
 import (
@@ -67,7 +69,7 @@ func (v *workspaceValue) Truth() starlark.Bool  { return starlark.True }
 func (v *workspaceValue) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable type: workspace") }
 
 func (v *workspaceValue) AttrNames() []string {
-	return []string{"add_world", "node", "nodes", "query", "start_node", "world", "worlds"}
+	return []string{"add_world", "node", "nodes", "query", "start_node", "transfer", "world", "worlds"}
 }
 
 func (v *workspaceValue) Attr(name string) (starlark.Value, error) {
@@ -86,8 +88,10 @@ func (v *workspaceValue) Attr(name string) (starlark.Value, error) {
 		return starlark.NewBuiltin("start_node", v.startNodeBuiltin), nil
 	case "query":
 		return starlark.NewBuiltin("query", v.queryBuiltin), nil
+	case "transfer":
+		return starlark.NewBuiltin("transfer", v.transferBuiltin), nil
 	default:
-		// Deferred (E2/F2/G3) names return (nil, nil) — Starlark reports "has no .X attribute".
+		// Deferred (G3) names return (nil, nil) — Starlark reports "has no .X attribute".
 		return nil, nil
 	}
 }
@@ -215,6 +219,74 @@ func (v *workspaceValue) queryBuiltin(_ *starlark.Thread, b *starlark.Builtin, a
 		return nil, fmt.Errorf("workspace.query: %w", err)
 	}
 	return mapsToStarlark(rows)
+}
+
+// workspace.transfer(selector, dst=<worldID or world handle>) → dict
+// {transferred, committed, revision_id, sha256}. selector is the object DSL — a
+// bibites/eggs collection (src.bibites.where(...)) or a single bibite/egg Entity
+// — naming WHAT to graft; the user never writes SQL/JOINs. dst names the
+// destination world (a bare id string OR a world handle). The selected entries are
+// grafted into dst via the merged F1/F3 transfer engine (identity reconcile +
+// per-world species remap) and committed as one advancing-head dst revision.
+//
+// committed=False with transferred=0 when nothing was selected (a clean no-op that
+// leaves the dst head unchanged). On any graft failure the whole transfer fails
+// loudly and nothing is committed (all-or-nothing at the commit boundary).
+func (v *workspaceValue) transferBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var selector, dst starlark.Value
+	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "selector", &selector, "dst", &dst); err != nil {
+		return nil, err
+	}
+
+	// Resolve the selection from the object DSL value. The script passes the BARE
+	// thebibites types (world.open().bibites.where(...) / a single Entity), not a
+	// workspace wrapper — match the concrete types. A grouped/element collection, a
+	// non-bibite/egg kind, or any other value is rejected loudly (no SQL escape
+	// hatch — the selector is the object DSL only).
+	var srcLS *thebibites.LoadedSave
+	var names []string
+	switch sel := selector.(type) {
+	case *thebibites.EntityCollection:
+		srcLS = sel.SourceLoadedSave()
+		n, err := sel.EntryNames()
+		if err != nil {
+			return nil, fmt.Errorf("workspace.transfer: %w", err)
+		}
+		names = n
+	case *thebibites.Entity:
+		srcLS = sel.SourceLoadedSave()
+		names = []string{sel.EntryName()}
+	default:
+		return nil, fmt.Errorf("workspace.transfer: selector must be a bibites/eggs collection or a single bibite/egg, got %s", selector.Type())
+	}
+
+	// Resolve dst to a world id: a bare id string OR a world handle.
+	var dstWorldID string
+	switch d := dst.(type) {
+	case starlark.String:
+		dstWorldID = string(d)
+	case *worldValue:
+		dstWorldID = d.world.ID
+	default:
+		return nil, fmt.Errorf("workspace.transfer: dst must be a world id string or a world handle, got %s", dst.Type())
+	}
+
+	rev, err := v.ws.Transfer(v.ctx, srcLS, names, dstWorldID)
+	if err != nil {
+		return nil, fmt.Errorf("workspace.transfer: %w", err)
+	}
+
+	committed := rev.ID != 0
+	transferred := 0
+	if committed {
+		transferred = len(names)
+	}
+	res := starlark.NewDict(4)
+	_ = res.SetKey(starlark.String("transferred"), starlark.MakeInt(transferred))
+	_ = res.SetKey(starlark.String("committed"), starlark.Bool(committed))
+	_ = res.SetKey(starlark.String("revision_id"), starlark.MakeInt64(rev.ID))
+	_ = res.SetKey(starlark.String("sha256"), starlark.String(rev.SHA256))
+	return res, nil
 }
 
 // ---------------------------------------------------------------------------

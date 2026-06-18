@@ -128,6 +128,21 @@ func (t *transfer) dstSpeciesIDUsage() (max int64, ok bool) {
 			consider(id)
 		}
 	}
+
+	// Species ids already STAGED for import this session (earlier grafts in a
+	// multi-entry transfer loop) are not yet reflected in the dst archive JSON —
+	// staged appends/sets apply only at Apply time. Consider the activeSpeciesList
+	// appends staged on the dst session so each graft in the loop allocates a
+	// DISTINCT fresh id; without this, every graft re-reads the same pre-Apply state
+	// and conflates multiple distinct source species under one dest id.
+	for _, op := range t.dst.StagedOperations() {
+		if op.Kind != OperationAppend || op.Target.EntryName != SpeciesEntryName || op.Path != "activeSpeciesList" {
+			continue
+		}
+		if id, found := jsonNumberToInt64(op.Value); found {
+			consider(id)
+		}
+	}
 	return max, ok
 }
 
@@ -250,11 +265,13 @@ func (t *transfer) dstBibiteBodyIDs() map[int64]struct{} {
 }
 
 // nextEntryName allocates a fresh, non-colliding archive entry name for kind in
-// dst: bibites/bibite_<n>.bb8 or eggs/egg_<n>.bb8 where n = 1 + the max existing
-// numeric index of that kind (or 0 when none exist). The result matches the
+// dst: bibites/bibite_<n>.bb8 or eggs/egg_<n>.bb8 where n = 1 + the max numeric
+// index of that kind observed across dst.Entries AND any reserved names (entry
+// names already staged for append this session but not yet in dst.Entries — see
+// transfer.AppendEntry). n is 0 when none exist anywhere. The result matches the
 // parser's bibiteEntryRE/eggEntryRE so applyAppendEntry's kind classification
 // accepts it.
-func nextEntryName(dst *tb.Archive, kind tb.EntryKind) (string, error) {
+func nextEntryName(dst *tb.Archive, kind tb.EntryKind, reserved ...string) (string, error) {
 	var prefix, suffix string
 	switch kind {
 	case tb.EntryBibite:
@@ -266,18 +283,20 @@ func nextEntryName(dst *tb.Archive, kind tb.EntryKind) (string, error) {
 	}
 
 	max := int64(-1)
-	for i := range dst.Entries {
-		entry := &dst.Entries[i]
-		if entry.Kind != kind {
-			continue
-		}
-		idx, ok := entryIndexToken(entry.Name, prefix, suffix)
-		if !ok {
-			continue
-		}
-		if idx > max {
+	consider := func(name string) {
+		idx, ok := entryIndexToken(name, prefix, suffix)
+		if ok && idx > max {
 			max = idx
 		}
+	}
+	for i := range dst.Entries {
+		if dst.Entries[i].Kind != kind {
+			continue
+		}
+		consider(dst.Entries[i].Name)
+	}
+	for _, name := range reserved {
+		consider(name)
 	}
 	return fmt.Sprintf("%s%d%s", prefix, max+1, suffix), nil
 }

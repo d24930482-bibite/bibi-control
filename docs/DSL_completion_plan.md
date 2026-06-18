@@ -1,6 +1,6 @@
 # Plan: Completing the Bibites DSL (settings, genes, zones, pellets, aliases)
 
-> **Status:** P1 + P2 resolved 2026-06-16; pellet *append* via clone (P2B) + bulk `where().delete()` (P2C) added 2026-06-16; P3 not yet implemented.
+> **Status:** P1 + P2 resolved 2026-06-16; pellet *append* via clone (P2B) + bulk `where().delete()` (P2C) added 2026-06-16; **P3 (cross-save query→insert) IMPLEMENTED** 2026-06-17 via the workspace automation `transfer` surface (F2).
 > **Follows:** `docs/DSL_tickets_plan.md` (v1 language core). This plan closes the gaps
 > between that v1 and the intended full feature set.
 
@@ -38,7 +38,7 @@ deferral reflected scope-cutting for the original PR, not a technical barrier.
 | 5 | Query bibites + push-down | ✅ | ✅ `sql.go`/`collection.go` | none |
 | 6 | Mutate + delete pellets | ✅ `pellet_path_map` | ✅ `pellets.go` (P2; append via clone, P2B) | **Done (P2/P2B)** |
 | 7 | Aliases for all of the above | ✅ registry | ✅ fixed (`sourceColumn`, P1) | **Done (P1)** |
-| 8 | Cross-save query→insert | seam `workspace.go` | ❌ | **Documented stub (P3)** |
+| 8 | Cross-save query→insert | ✅ `transfer.go` engine | ✅ `workspace.transfer` (F2) | **Done (P3/F2)** |
 
 ## Decisions
 - **Scope:** close all gaps, phased — P1 settings R/W + gene writes + alias fix; P2 zones + pellets; P3 cross-save stub.
@@ -272,8 +272,11 @@ save B), i.e. feature #8 / P3 below.
 
 ---
 
-## P3 — Cross-save query→insert: documented stub
-- Add a clearly-erroring seam on `save` (e.g. `save.insert_from(...)` / a `workspace`/`open()` binding) that returns a clean Starlark error: `"cross-save transfer is not implemented (v2); see savemutator/thebibites/workspace.go"`. Add a one-paragraph note to `docs/DSL_tickets_plan.md` pointing at `workspace.go` as the entry point and naming **settings** as the first canonical cross-save copy target. No mutator work.
+## P3 — Cross-save query→insert: IMPLEMENTED (F2)
+- Shipped as the host-trusted automation builtin **`workspace.transfer(<selector>, dst=<worldID or world handle>)`**. The selector is the **object DSL** — a bibites/eggs collection (`src.bibites.where("energy > 100")`) or a single `Entity` — naming WHAT to graft; **the user never writes SQL/JOINs** (the dsl-not-raw-sql contract). The named destination world receives the grafted whole-entity bibite/egg entries and commits one advancing-head revision.
+- Engine reuse: the graft routes every selected entry through `savemutator/thebibites/transfer.go`'s `NewTransfer` + `CollectEntry` + `AppendEntry` (F1/F3 identity reconcile + per-world species remap — a colliding linear `genes.speciesID` lands under a FRESH dest id with the source species record imported, never conflated). The commit reuses the unchanged `CommitWorldLoaded`/`applyWorldCommit` head-advancing path (single WriteArchive + dual-key DuckDB re-seed); no new commit logic was written. Transfer is **all-or-nothing at the commit boundary**: if any graft fails the whole transfer fails loudly and nothing is committed (the dst head does not advance).
+- Entry points: `workspace/transfer.go::(*Workspace).Transfer` (open dst → stage grafts → commit), `script/thebibites/transfer_bridge.go::TransferEntries` (the seam over the two `ls.session`s), `savemutator/thebibites/transfer.go` (the engine). Minimal exported selection accessors — `EntityCollection.SourceLoadedSave`/`EntryNames` and `Entity.SourceLoadedSave`/`EntryName` — let the binding read the selection without touching `ls` internals or importing `savemutator`.
+- Scope: F2 surfaces the **whole-entity graft**. The engine's settings-copy path stays available as `SetFromCollected` on `*transfer` (not surfaced at the DSL in F2).
 
 ---
 

@@ -143,6 +143,27 @@ func (c *EntityCollection) runAgg(call aggCall) (starlark.Value, error) {
 	return c.ls.scalarAgg(c.kind, c.where, call)
 }
 
+// SourceLoadedSave exposes the underlying working copy this collection enumerates
+// over, so the workspace transfer binding can hand the cross-world engine the
+// SOURCE session without reaching into the unexported ls field or importing the
+// savemutator package. It is the minimal selection accessor required by F2's
+// object-DSL transfer surface (the user never writes SQL/JOINs).
+func (c *EntityCollection) SourceLoadedSave() *LoadedSave { return c.ls }
+
+// EntryNames returns the source entry_names this collection currently selects,
+// delegating to the already-resolved push-down (entryNames) so no new query runs
+// and the set stays scoped to this collection's world by construction. It is
+// restricted to the AppendEntry-eligible kinds (bibite/egg); any other kind is
+// rejected loudly so a non-graftable collection cannot be passed to transfer.
+func (c *EntityCollection) EntryNames() ([]string, error) {
+	switch c.kind {
+	case "bibite", "egg":
+	default:
+		return nil, fmt.Errorf("transfer selection: %s collection is not transferable (only bibites/eggs may be grafted)", c.kind)
+	}
+	return c.entryNames()
+}
+
 func (c *EntityCollection) AttrNames() []string {
 	return []string{"count", "delete", "group_by", "max", "mean", "median", "min", "quantile", "set", "set_expr", "sum", "where"}
 }

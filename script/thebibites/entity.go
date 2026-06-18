@@ -137,6 +137,19 @@ func (e *Entity) SetField(name string, val starlark.Value) error {
 	return nil
 }
 
+// SourceLoadedSave exposes the underlying working copy this entity belongs to,
+// so the workspace transfer binding can hand the cross-world engine the SOURCE
+// session for a single-entity graft without reaching into the unexported ls field
+// or importing the savemutator package. Bibites and eggs are both AppendEntry-
+// eligible, so no kind restriction is needed here (the type carries only those
+// two kinds).
+func (e *Entity) SourceLoadedSave() *LoadedSave { return e.ls }
+
+// EntryName returns this entity's source entry_name — the single selection the
+// transfer binding grafts. It is the single-Entity counterpart of
+// EntityCollection.EntryNames.
+func (e *Entity) EntryName() string { return e.entryName }
+
 // geneBuiltin implements e.gene("Name") -> typed gene value (None if absent).
 func (e *Entity) geneBuiltin(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var name string
