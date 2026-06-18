@@ -67,6 +67,17 @@ var entityTables = map[string][]string{
 	"egg": {
 		"eggs",
 	},
+	// pellet is an ANALYTICS-ONLY kind (E3): it registers the pellets identity
+	// table for the scoped aggregate push-down (world.pellets / workspace.pellets)
+	// so spanning reads cover pellets too. It is deliberately NOT a mutation kind —
+	// locatorSelect / EntryNames reject it, and the spanning scope is read-only, so
+	// no set/delete/transfer/iteration path can reach it. The in-memory save.pellets
+	// surface (pellets.go) is untouched; this is purely additive for the analytics
+	// path. Its columns are derived from pelletRegistry() (generated metadata), not
+	// a parallel list.
+	"pellet": {
+		"pellets",
+	},
 }
 
 // transformAliases is the shared friendly alias -> source column mapping for the
@@ -90,6 +101,11 @@ var transformAliases = map[string]string{
 var overrides = map[string]map[string]string{
 	"bibite": mergeAliases(transformAliases),
 	"egg":    mergeAliases(transformAliases),
+	// pellet is the E3 analytics-only kind; it shares the pellet position/scale
+	// aliases so its friendly column surface (the registry attrRegistry["pellet"])
+	// matches pelletRegistry() — same generated columns, same aliases, no parallel
+	// list.
+	"pellet": pelletOverrides,
 }
 
 // mergeAliases returns a fresh alias map containing every entry from the given

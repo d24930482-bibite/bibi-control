@@ -69,11 +69,22 @@ func (v *workspaceValue) Truth() starlark.Bool  { return starlark.True }
 func (v *workspaceValue) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable type: workspace") }
 
 func (v *workspaceValue) AttrNames() []string {
-	return []string{"add_world", "node", "nodes", "query", "start_node", "transfer", "world", "worlds"}
+	return []string{"add_world", "bibites", "eggs", "node", "nodes", "pellets", "query", "start_node", "transfer", "world", "worlds"}
 }
 
 func (v *workspaceValue) Attr(name string) (starlark.Value, error) {
 	switch name {
+	case "bibites", "eggs", "pellets":
+		// E3 spanning collections over EVERY world's history in the workspace (the
+		// object DSL — group_by('world_id')/where("world_id = …")/count, NO raw SQL/
+		// JOIN). Aggregate-only and read-only; the all-worlds scope is injected BY
+		// CONSTRUCTION via the catalog. workspace.query stays the power-user escape
+		// hatch.
+		coll, err := v.ws.spanningCollection(v.ctx, thebibites.NewWorkspaceScope(), name)
+		if err != nil {
+			return nil, fmt.Errorf("workspace.%s: %w", name, err)
+		}
+		return coll, nil
 	case "worlds":
 		return starlark.NewBuiltin("worlds", v.worldsBuiltin), nil
 	case "world":
@@ -208,7 +219,11 @@ func (v *workspaceValue) startNodeBuiltin(_ *starlark.Thread, b *starlark.Builti
 	return &nodeValue{ctx: v.ctx, ws: v.ws, node: node}, nil
 }
 
-// workspace.query(sql) → list of dicts
+// workspace.query(sql) → list of dicts. The POWER-USER ESCAPE HATCH for raw
+// read-only SQL across every world's history (the documented fallback). Prefer the
+// object DSL — workspace.bibites / workspace.eggs / workspace.pellets with
+// .group_by('world_id') / .where("world_id = …") — for cross-world reads; reach for
+// raw SQL only when the aggregate surface cannot express the query.
 func (v *workspaceValue) queryBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var sql string
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "sql", &sql); err != nil {
@@ -311,7 +326,7 @@ func (v *worldValue) Truth() starlark.Bool  { return starlark.True }
 func (v *worldValue) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable type: world") }
 
 func (v *worldValue) AttrNames() []string {
-	return []string{"evict_history", "head", "history_query", "id", "load", "name", "open", "query", "sim_time", "unload"}
+	return []string{"bibites", "eggs", "evict_history", "head", "history_query", "id", "load", "name", "open", "pellets", "query", "sim_time", "unload"}
 }
 
 func (v *worldValue) Attr(name string) (starlark.Value, error) {
@@ -330,6 +345,16 @@ func (v *worldValue) Attr(name string) (starlark.Value, error) {
 			return starlark.None, nil
 		}
 		return starlark.Float(*v.world.SimTime), nil
+	case "bibites", "eggs", "pellets":
+		// E3 spanning collections over this world's whole retained history (the
+		// object DSL — count/sum/mean/group_by('sim_time')/where, NO raw SQL/JOIN).
+		// Aggregate-only and read-only; scoped BY CONSTRUCTION to this world via the
+		// catalog. world.query/history_query stay the power-user escape hatch.
+		coll, err := v.ws.spanningCollection(v.ctx, thebibites.NewWorldHistoryScope(v.world.ID), name)
+		if err != nil {
+			return nil, fmt.Errorf("world.%s: %w", name, err)
+		}
+		return coll, nil
 	case "history_query":
 		return starlark.NewBuiltin("history_query", v.historyQueryBuiltin), nil
 	case "evict_history":
@@ -388,7 +413,11 @@ func (v *worldValue) queryBuiltin(_ *starlark.Thread, b *starlark.Builtin, args 
 	return mapsToStarlark(rows)
 }
 
-// world.history_query(sql) → list of dicts
+// world.history_query(sql) → list of dicts. The POWER-USER ESCAPE HATCH for raw
+// read-only SQL over this world's retained history (the documented fallback).
+// Prefer the object DSL — world.bibites / world.eggs / world.pellets with
+// .group_by('sim_time') / .where(...) — for history aggregates; reach for raw SQL
+// only when the aggregate surface cannot express the query.
 func (v *worldValue) historyQueryBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var sql string
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "sql", &sql); err != nil {
