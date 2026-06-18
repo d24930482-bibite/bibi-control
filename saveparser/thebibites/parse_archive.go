@@ -77,9 +77,7 @@ func ParseFile(path string, options *Options) (*Archive, error) {
 		archive.Entries = append(archive.Entries, entry)
 	}
 
-	for i := range archive.Entries {
-		archive.parseEntry(&archive.Entries[i])
-	}
+	archive.parseEntries()
 	archive.recomputeCounts()
 	return archive, nil
 }
@@ -145,9 +143,4 @@ func hashFile(path string) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
-}
-
-func (a *Archive) parseEntry(entry *Entry) {
-	result := parseEntryPayload(entry)
-	a.applyParseResult(result)
 }

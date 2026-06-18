@@ -1,6 +1,6 @@
 package thebibites
 
-import "fmt"
+import "strconv"
 
 func parseBrainNodes(entryName, ownerKind, ownerID string, values []any) []BrainNode {
 	nodes := make([]BrainNode, 0, len(values))
@@ -15,7 +15,7 @@ func parseBrainNodes(entryName, ownerKind, ownerID string, values []any) []Brain
 			OwnerKind: ownerKind,
 			OwnerID:   ownerID,
 			Raw:       raw,
-			Scalars:   collectScalars(entryName, ownerKind+"_brain_node", ownerID, fmt.Sprintf("brain.nodes[%d]", i), raw),
+			Scalars:   collectScalars(entryName, ownerKind+"_brain_node", ownerID, "brain.nodes["+strconv.Itoa(i)+"]", raw),
 		}
 		if v, ok := intAt(raw, "Type"); ok {
 			node.Type = v
@@ -65,7 +65,7 @@ func parseBrainSynapses(entryName, ownerKind, ownerID string, values []any) []Br
 			OwnerKind: ownerKind,
 			OwnerID:   ownerID,
 			Raw:       raw,
-			Scalars:   collectScalars(entryName, ownerKind+"_brain_synapse", ownerID, fmt.Sprintf("brain.synapses[%d]", i), raw),
+			Scalars:   collectScalars(entryName, ownerKind+"_brain_synapse", ownerID, "brain.synapses["+strconv.Itoa(i)+"]", raw),
 		}
 		if v, ok := intAt(raw, "Inov"); ok {
 			synapse.Innovation = v
