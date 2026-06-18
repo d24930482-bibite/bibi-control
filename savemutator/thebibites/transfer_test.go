@@ -883,3 +883,74 @@ func entryNames(archive *tb.Archive) []string {
 	}
 	return out
 }
+
+// parseTwoBibiteSource builds a source with two bibites (body 500/501, species
+// 7/8), both non-colliding with parseSpeciesArchive's ids, so two same-kind grafts
+// into one dst session can be exercised.
+func parseTwoBibiteSource(t *testing.T) *tb.Archive {
+	t.Helper()
+	sourcePath := filepath.Join(t.TempDir(), "two_bibite_source.zip")
+	archive := &tb.Archive{
+		Entries: []tb.Entry{
+			{Index: 0, Name: "scene.bb8scene", Kind: tb.EntryScene, Method: zip.Deflate, Raw: withBOM(`{"nBibites":2}`)},
+			{Index: 1, Name: "speciesData.json", Kind: tb.EntrySpecies, Method: zip.Deflate, Raw: withBOM(`{"nextSpeciesID":9,"activeSpeciesList":[7,8],"recordedSpecies":[{"speciesID":7,"parentID":0,"name":"src-seven","template":{"genes":{"SizeRatio":7.7}}},{"speciesID":8,"parentID":0,"name":"src-eight","template":{"genes":{"SizeRatio":8.8}}}]}`)},
+			{Index: 2, Name: "bibites/bibite_0.bb8", Kind: tb.EntryBibite, Method: zip.Deflate, Raw: withBOM(`{"body":{"id":500},"genes":{"speciesID":7,"gen":1},"brain":{"Nodes":[],"Synapses":[]}}`)},
+			{Index: 3, Name: "bibites/bibite_1.bb8", Kind: tb.EntryBibite, Method: zip.Deflate, Raw: withBOM(`{"body":{"id":501},"genes":{"speciesID":8,"gen":1},"brain":{"Nodes":[],"Synapses":[]}}`)},
+		},
+	}
+	if err := tb.WriteArchive(sourcePath, archive); err != nil {
+		t.Fatalf("WriteArchive(two-bibite source) error = %v", err)
+	}
+	parsed, err := tb.ParseFile(sourcePath, nil)
+	if err != nil {
+		t.Fatalf("ParseFile(two-bibite source) error = %v", err)
+	}
+	return parsed
+}
+
+// Multi-graft (F2 cross-world surface): grafting two same-kind entries into ONE
+// dst session must allocate DISTINCT entry names. Staged appends are invisible to
+// dst.Archive().Entries until Apply, so the name allocator must also consider the
+// names handed to earlier grafts — otherwise both would reuse bibite_3 and Apply
+// would reject "already staged for append".
+func TestTransferAppendEntryMultiGraftDistinctNames(t *testing.T) {
+	src := NewSession(parseTwoBibiteSource(t))
+	dst := NewSession(parseSpeciesArchive(t)) // has bibite_0..2, egg_0
+	tr, err := NewTransfer(src, dst)
+	if err != nil {
+		t.Fatalf("NewTransfer() error = %v", err)
+	}
+	for _, name := range []string{"bibites/bibite_0.bb8", "bibites/bibite_1.bb8"} {
+		el, err := tr.CollectEntry(name)
+		if err != nil {
+			t.Fatalf("CollectEntry(%q) error = %v", name, err)
+		}
+		if err := tr.AppendEntry(el); err != nil {
+			t.Fatalf("AppendEntry(%q) error = %v", name, err)
+		}
+	}
+	fresh, err := dst.Commit(filepath.Join(t.TempDir(), "multi_graft.zip"))
+	if err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+	// Both grafts landed under distinct, fresh names (bibite_3 and bibite_4).
+	if fresh.Entry("bibites/bibite_3.bb8") == nil {
+		t.Fatalf("first graft missing: no bibites/bibite_3.bb8 in committed archive")
+	}
+	if fresh.Entry("bibites/bibite_4.bb8") == nil {
+		t.Fatalf("second graft missing: no bibites/bibite_4.bb8 in committed archive")
+	}
+	// Their remapped species ids are distinct fresh dest ids (no conflation).
+	id3 := entitySpeciesIDOf(t, fresh, "bibites/bibite_3.bb8")
+	id4 := entitySpeciesIDOf(t, fresh, "bibites/bibite_4.bb8")
+	if id3 == id4 {
+		t.Fatalf("both grafts got the same fresh species id %d, want distinct", id3)
+	}
+	for _, id := range []int64{id3, id4} {
+		for _, used := range []int64{1, 2, 3} {
+			if id == used {
+				t.Fatalf("grafted species id %d collides with a pre-graft dest id", id)
+			}
+		}
+	}
+}

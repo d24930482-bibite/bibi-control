@@ -246,13 +246,33 @@ func (t *transfer) AppendEntry(element CollectedElement) error {
 		}
 	}
 
-	name, err := nextEntryName(t.dst.Archive(), kind)
+	// Allocate a fresh entry name that collides with neither the archive's existing
+	// entries NOR entries already STAGED for append on the dst session this run.
+	// Staged appends are not reflected in dst.Archive().Entries until Apply, so a
+	// multi-entry graft loop (the F2 cross-world transfer surface) must account for
+	// the names handed out to earlier grafts in the same session — otherwise every
+	// graft would reuse bibite_<n+1> and Apply would reject the duplicate.
+	name, err := nextEntryName(t.dst.Archive(), kind, t.dstStagedAppendNames(kind)...)
 	if err != nil {
 		return fmt.Errorf("transfer: append entry: %w", err)
 	}
 
 	payload := EntryPayload{Name: name, Kind: kind, JSON: cloned}
 	return t.dst.StageAppendBibite(payload)
+}
+
+// dstStagedAppendNames returns the entry names already staged for append on the
+// dst session for the given kind. The name allocator unions these with the live
+// archive entries so a multi-graft loop within one session never reuses a name
+// (staged appends are invisible to dst.Archive().Entries until Apply).
+func (t *transfer) dstStagedAppendNames(kind tb.EntryKind) []string {
+	var names []string
+	for _, op := range t.dst.StagedOperations() {
+		if op.Kind == OperationAppendEntry && op.EntryPayload.Kind == kind {
+			names = append(names, op.EntryPayload.Name)
+		}
+	}
+	return names
 }
 
 // stageSpeciesImport stages the import of a source species record under the fresh

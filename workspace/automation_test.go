@@ -448,13 +448,9 @@ func TestAutomation_DeferredNamesAbsent(t *testing.T) {
 
 	// world.open() is now bound (E2) — it is no longer a deferred name; covered by
 	// TestAutomation_OpenMutateCommitAdvancesHead and friends.
-
-	// workspace.transfer() — F2, must not exist.
-	transferProg := `workspace.transfer("src", "dst")`
-	_, transferErr := runAuto(ctx, ws, transferProg)
-	if transferErr == nil {
-		t.Fatalf("workspace.transfer(): want error (deferred F2), got nil")
-	}
+	//
+	// workspace.transfer() is now bound (F2) — it is no longer a deferred name;
+	// covered by TestAutomation_TransferReplacesP3Stub and friends.
 
 	// workspace.gc() — G3, must not exist.
 	gcProg := `workspace.gc()`
