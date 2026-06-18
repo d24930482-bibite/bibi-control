@@ -15,7 +15,7 @@ func TestLoad_MirrorOnlyHeadRefused(t *testing.T) {
 	ctx := context.Background()
 	ws := newWorkspace(t, ctx)
 
-	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureA), "world-a")
+	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureSmall), "world-a")
 	if err != nil {
 		t.Fatalf("AddWorld: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestOpenWorld_MirrorOnlyHeadRefused(t *testing.T) {
 	ctx := context.Background()
 	ws := newWorkspace(t, ctx)
 
-	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureA), "world-b")
+	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureSmall), "world-b")
 	if err != nil {
 		t.Fatalf("AddWorld: %v", err)
 	}

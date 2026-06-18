@@ -56,7 +56,7 @@ func TestCommitWorldAdvancesHeadAndThreadsParent(t *testing.T) {
 	ctx := context.Background()
 	ws := newWorkspace(t, ctx)
 
-	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureA), "world-a")
+	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureSmall), "world-a")
 	if err != nil {
 		t.Fatalf("AddWorld: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestCommitWorldHistoryRetained(t *testing.T) {
 	ctx := context.Background()
 	ws := newWorkspace(t, ctx)
 
-	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureA), "world-a")
+	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureSmall), "world-a")
 	if err != nil {
 		t.Fatalf("AddWorld: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestCommitWorldHistoryRetained(t *testing.T) {
 	}
 
 	// Every revision's history partition must persist (>0 rows). bibites is
-	// non-empty for fixtureA; save_archives is the per-save_id fallback.
+	// non-empty for fixtureSmall; save_archives is the per-save_id fallback.
 	for i, rev := range revisions {
 		if got := countBySaveID(t, ctx, ws, "bibites", rev.SHA256); got == 0 {
 			t.Errorf("history bibites partition for revision %d (sha %q) is empty", i, rev.SHA256)
@@ -151,7 +151,7 @@ func TestCommitWorldWorkingPartitionReflectsHead(t *testing.T) {
 	ctx := context.Background()
 	ws := newWorkspace(t, ctx)
 
-	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureA), "world-a")
+	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureSmall), "world-a")
 	if err != nil {
 		t.Fatalf("AddWorld: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestCommitWorldNoOpDoesNotAdvanceHead(t *testing.T) {
 	ctx := context.Background()
 	ws := newWorkspace(t, ctx)
 
-	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureA), "world-a")
+	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureSmall), "world-a")
 	if err != nil {
 		t.Fatalf("AddWorld: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestCommitWorldChurn(t *testing.T) {
 	ctx := context.Background()
 	ws := newWorkspace(t, ctx)
 
-	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureA), "world-a")
+	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureSmall), "world-a")
 	if err != nil {
 		t.Fatalf("AddWorld: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestCommitWorldLazyLoads(t *testing.T) {
 	ctx := context.Background()
 	ws := newWorkspace(t, ctx)
 
-	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureA), "world-a")
+	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureSmall), "world-a")
 	if err != nil {
 		t.Fatalf("AddWorld: %v", err)
 	}

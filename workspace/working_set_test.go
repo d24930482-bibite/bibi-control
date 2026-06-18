@@ -14,7 +14,7 @@ func TestLoadReturnsHeadWorkingCopy(t *testing.T) {
 	ctx := context.Background()
 	ws := newWorkspace(t, ctx)
 
-	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureA), "world-a")
+	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureSmall), "world-a")
 	if err != nil {
 		t.Fatalf("AddWorld: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestUnloadDropsHandleButKeepsData(t *testing.T) {
 	ctx := context.Background()
 	ws := newWorkspace(t, ctx)
 
-	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureA), "world-a")
+	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureSmall), "world-a")
 	if err != nil {
 		t.Fatalf("AddWorld: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestOpenWorldLazyLoads(t *testing.T) {
 	ctx := context.Background()
 	ws := newWorkspace(t, ctx)
 
-	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureA), "world-a")
+	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureSmall), "world-a")
 	if err != nil {
 		t.Fatalf("AddWorld: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestOpenWorldReturnsLoadedHandle(t *testing.T) {
 	ctx := context.Background()
 	ws := newWorkspace(t, ctx)
 
-	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureA), "world-a")
+	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureSmall), "world-a")
 	if err != nil {
 		t.Fatalf("AddWorld: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestLoadTwoWorldsIndependent(t *testing.T) {
 	ctx := context.Background()
 	ws := newWorkspace(t, ctx)
 
-	worldA, err := ws.AddWorld(ctx, fixturePath(t, fixtureA), "world-a")
+	worldA, err := ws.AddWorld(ctx, fixturePath(t, fixtureSmall), "world-a")
 	if err != nil {
 		t.Fatalf("AddWorld A: %v", err)
 	}

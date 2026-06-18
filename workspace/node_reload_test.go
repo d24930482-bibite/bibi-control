@@ -139,7 +139,7 @@ func TestReloadNode_ShipsHeadAndSendsReload(t *testing.T) {
 	ctx := context.Background()
 	ws := newWorkspace(t, ctx)
 
-	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureA), "world-a")
+	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureSmall), "world-a")
 	if err != nil {
 		t.Fatalf("AddWorld: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestReloadNode_NoDropPath(t *testing.T) {
 	ctx := context.Background()
 	ws := newWorkspace(t, ctx)
 
-	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureA), "world-a")
+	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureSmall), "world-a")
 	if err != nil {
 		t.Fatalf("AddWorld: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestReloadNode_MirrorOnlyHeadRefused(t *testing.T) {
 	ctx := context.Background()
 	ws := newWorkspace(t, ctx)
 
-	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureA), "world-a")
+	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureSmall), "world-a")
 	if err != nil {
 		t.Fatalf("AddWorld: %v", err)
 	}
@@ -270,7 +270,7 @@ func TestIngestAutosave_AppendsAndAdvancesHead(t *testing.T) {
 	ctx := context.Background()
 	ws := newWorkspace(t, ctx)
 
-	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureA), "world-a")
+	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureSmall), "world-a")
 	if err != nil {
 		t.Fatalf("AddWorld: %v", err)
 	}
@@ -340,7 +340,7 @@ func TestIngestAutosave_DedupSkipsUnchanged(t *testing.T) {
 	ctx := context.Background()
 	ws := newWorkspace(t, ctx)
 
-	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureA), "world-a")
+	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureSmall), "world-a")
 	if err != nil {
 		t.Fatalf("AddWorld: %v", err)
 	}
@@ -348,8 +348,8 @@ func TestIngestAutosave_DedupSkipsUnchanged(t *testing.T) {
 
 	newReloadFakeNode(t, ws, "node-dedup", world.ID, filepath.Join(t.TempDir(), "drop.zip"), "")
 
-	// Re-ingest the SAME save as the head (fixtureA).
-	rev, ingested, err := ws.IngestAutosave(ctx, "node-dedup", fixturePath(t, fixtureA))
+	// Re-ingest the SAME save as the head (fixtureSmall).
+	rev, ingested, err := ws.IngestAutosave(ctx, "node-dedup", fixturePath(t, fixtureSmall))
 	if err != nil {
 		t.Fatalf("IngestAutosave: %v", err)
 	}
@@ -381,7 +381,7 @@ func TestIngestAutosave_DefaultPathFromInfo(t *testing.T) {
 	ctx := context.Background()
 	ws := newWorkspace(t, ctx)
 
-	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureA), "world-a")
+	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureSmall), "world-a")
 	if err != nil {
 		t.Fatalf("AddWorld: %v", err)
 	}
@@ -432,7 +432,7 @@ func TestIngestAutosave_StabilizeRejectsMissing(t *testing.T) {
 	ctx := context.Background()
 	ws := newWorkspace(t, ctx)
 
-	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureA), "world-a")
+	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureSmall), "world-a")
 	if err != nil {
 		t.Fatalf("AddWorld: %v", err)
 	}
@@ -472,7 +472,7 @@ func TestIngestAutosave_NoBoundWorld(t *testing.T) {
 
 	newReloadFakeNode(t, ws, "node-unbound", "", filepath.Join(t.TempDir(), "drop.zip"), "")
 
-	if _, _, err := ws.IngestAutosave(ctx, "node-unbound", fixturePath(t, fixtureA)); err == nil {
+	if _, _, err := ws.IngestAutosave(ctx, "node-unbound", fixturePath(t, fixtureSmall)); err == nil {
 		t.Fatalf("IngestAutosave with no bound world: want error, got nil")
 	}
 }
@@ -481,7 +481,7 @@ func TestIngestAutosave_UnknownNode(t *testing.T) {
 	ctx := context.Background()
 	ws := newWorkspace(t, ctx)
 
-	if _, _, err := ws.IngestAutosave(ctx, "ghost", fixturePath(t, fixtureA)); err == nil {
+	if _, _, err := ws.IngestAutosave(ctx, "ghost", fixturePath(t, fixtureSmall)); err == nil {
 		t.Fatalf("IngestAutosave on unknown node: want error, got nil")
 	}
 }

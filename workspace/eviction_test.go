@@ -9,12 +9,12 @@ import (
 	"github.com/asemones/bibicontrol/script/thebibites"
 )
 
-// commitWorldThrice imports fixtureA and commits it twice so the world has three
-// revisions (import + 2 commits) with the head pointing at the last. Returns the
-// world and its revisions in lineage order.
+// commitWorldThrice imports fixtureSmall and commits it twice so the world has
+// three revisions (import + 2 commits) with the head pointing at the last.
+// Returns the world and its revisions in lineage order.
 func evictWorldWithHistory(t *testing.T, ctx context.Context, ws *Workspace) (revisionstore.World, []revisionstore.Revision) {
 	t.Helper()
-	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureA), "world-a")
+	world, err := ws.AddWorld(ctx, fixturePath(t, fixtureSmall), "world-a")
 	if err != nil {
 		t.Fatalf("AddWorld: %v", err)
 	}

@@ -13,9 +13,13 @@ import (
 // fixtureA and fixtureB are two distinct committed saves under
 // testdata/saves/the-bibites. fixtureA is the largest (used by
 // duckdb/import_test.go) and reliably populates the bibites projection.
+// fixtureSmall is a complete but tiny save (32 bibites vs fixtureA's 1040); use
+// it for structural/lifecycle tests that need a valid world but not data scale,
+// since AddWorld import cost is ~proportional to bibite count.
 const (
-	fixtureA = "autosave_20260301021357.zip"
-	fixtureB = "s.zip"
+	fixtureA     = "autosave_20260301021357.zip"
+	fixtureB     = "s.zip"
+	fixtureSmall = "dasdasd.zip"
 )
 
 // repoRootDir walks up from this test file to the directory containing go.mod so
