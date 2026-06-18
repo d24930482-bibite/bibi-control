@@ -39,7 +39,6 @@ func parseSettings(ctx *parserContext, entry *Entry) *SettingsState {
 	settings := &SettingsState{
 		EntryName: entry.Name,
 		Raw:       raw,
-		Scalars:   collectScalars(entry.Name, "settings", entry.Name, "settings", raw),
 	}
 	settings.SimulationValues = parseSettingsValues(entry.Name, "simulation", "settings", "settings", "settings", raw, settingsTopLevelCollections)
 	if independents, ok := mapAt(raw, "independents"); ok {
@@ -128,10 +127,9 @@ func parseSettingsMaterials(entryName string, settings map[string]any) []Setting
 			continue
 		}
 		out = append(out, SettingsMaterial{
-			Name:    key,
-			Raw:     raw,
-			Scalars: collectScalars(entryName, "settings_material", key, "settings.materials."+key, raw),
-			Values:  parseSettingsValues(entryName, "material", "settings_material", key, "settings.materials."+key, raw, nil),
+			Name:   key,
+			Raw:    raw,
+			Values: parseSettingsValues(entryName, "material", "settings_material", key, "settings.materials."+key, raw, nil),
 		})
 	}
 	return out
@@ -149,9 +147,8 @@ func parseSettingsZones(entryName string, settings map[string]any) []SettingsZon
 			continue
 		}
 		zone := SettingsZone{
-			Index:   i,
-			Raw:     raw,
-			Scalars: collectScalars(entryName, "settings_zone", fmt.Sprintf("%d", i), fmt.Sprintf("settings.zones[%d]", i), raw),
+			Index: i,
+			Raw:   raw,
 		}
 		if v, ok := intAt(raw, "id"); ok {
 			zone.ID = v
@@ -242,9 +239,8 @@ func parseSettingsZoneGroups(entryName string, settings map[string]any) []Settin
 			continue
 		}
 		group := SettingsZoneGroup{
-			Index:   i,
-			Raw:     raw,
-			Scalars: collectScalars(entryName, "settings_zone_group", fmt.Sprintf("%d", i), fmt.Sprintf("settings.zoneGroups[%d]", i), raw),
+			Index: i,
+			Raw:   raw,
 		}
 		if v, ok := stringAt(raw, "name"); ok {
 			group.Name = v
@@ -266,9 +262,8 @@ func parseSettingsBibiteSpawners(entryName string, settings map[string]any) []Se
 			continue
 		}
 		spawner := SettingsBibiteSpawner{
-			Index:   i,
-			Raw:     raw,
-			Scalars: collectScalars(entryName, "settings_bibite_spawner", fmt.Sprintf("%d", i), fmt.Sprintf("settings.bibites[%d]", i), raw),
+			Index: i,
+			Raw:   raw,
 		}
 		if v, ok := stringAt(raw, "path"); ok {
 			spawner.Path = v
@@ -315,9 +310,8 @@ func parseSettingsChangers(entryName string, settings map[string]any, zones []Se
 			continue
 		}
 		changer := SettingsChanger{
-			Index:   i,
-			Raw:     raw,
-			Scalars: collectScalars(entryName, "settings_changer", fmt.Sprintf("%d", i), fmt.Sprintf("settings.settingsChangers[%d]", i), raw),
+			Index: i,
+			Raw:   raw,
 		}
 		if v, ok := stringAt(raw, "name"); ok {
 			changer.Name = v

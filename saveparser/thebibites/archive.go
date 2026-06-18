@@ -62,7 +62,6 @@ type Archive struct {
 	PelletData *PelletData
 	Pheromones []Pheromone
 
-	Scalars     []Scalar
 	Counts      DerivedCounts
 	Diagnostics []Diagnostic
 }
@@ -80,7 +79,6 @@ type ParsedEntry struct {
 	PelletData *PelletData
 	Pheromones []Pheromone
 
-	Scalars     []Scalar
 	Diagnostics []Diagnostic
 }
 
@@ -168,29 +166,14 @@ const (
 	ScalarString ScalarType = "string"
 )
 
-type Scalar struct {
-	EntryName string
-	OwnerKind string
-	OwnerID   string
-	Path      string
-	Type      ScalarType
-
-	StringValue string
-	NumberValue float64
-	BoolValue   bool
-	RawJSON     string
-}
-
 type GenericJSONState struct {
 	EntryName string
 	Raw       map[string]any
-	Scalars   []Scalar
 }
 
 type SceneState struct {
 	EntryName string
 	Raw       map[string]any
-	Scalars   []Scalar
 
 	Version       string
 	NBibites      int64
@@ -204,7 +187,6 @@ type SceneState struct {
 type SettingsState struct {
 	EntryName         string
 	Raw               map[string]any
-	Scalars           []Scalar
 	SimulationValues  []SettingValue
 	IndependentValues []SettingValue
 	Materials         []SettingsMaterial
@@ -231,7 +213,6 @@ type SettingValue struct {
 type SettingsMaterial struct {
 	Name    string
 	Raw     map[string]any
-	Scalars []Scalar
 	Values  []SettingValue
 }
 
@@ -240,7 +221,6 @@ type SettingsZone struct {
 	ID       int64
 	HasID    bool
 	Raw      map[string]any
-	Scalars  []Scalar
 	Geometry []SettingsZoneGeometry
 	Values   []SettingValue
 }
@@ -256,10 +236,9 @@ type SettingsZoneGeometry struct {
 }
 
 type SettingsZoneGroup struct {
-	Index   int
-	Name    string
-	Raw     map[string]any
-	Scalars []Scalar
+	Index int
+	Name  string
+	Raw   map[string]any
 }
 
 type SettingsBibiteSpawner struct {
@@ -273,7 +252,6 @@ type SettingsBibiteSpawner struct {
 	SpawnType      string
 	TotalSpawned   int64
 	Raw            map[string]any
-	Scalars        []Scalar
 }
 
 type SettingsChanger struct {
@@ -282,7 +260,6 @@ type SettingsChanger struct {
 	Repeat  bool
 	Start   float64
 	Raw     map[string]any
-	Scalars []Scalar
 	Points  []SettingsChangerPoint
 	Targets []SettingsChangerTarget
 }
@@ -312,7 +289,6 @@ type SettingsChangerTarget struct {
 type SpeciesData struct {
 	EntryName        string
 	Raw              map[string]any
-	Scalars          []Scalar
 	Records          []SpeciesRecord
 	ActiveSpeciesIDs []int64
 }
@@ -331,8 +307,6 @@ type SpeciesRecord struct {
 	Description               string
 	TemplateVersion           string
 	Raw                       map[string]any
-	Scalars                   []Scalar
-	TemplateGeneScalars       []Scalar
 	TemplateBrainNodes        []BrainNode
 	TemplateBrainSynapses     []BrainSynapse
 }
@@ -347,7 +321,6 @@ type Bibite struct {
 	EntryName string
 	FileIndex int
 	Raw       map[string]any
-	Scalars   []Scalar
 
 	ID    int64
 	HasID bool
@@ -355,9 +328,6 @@ type Bibite struct {
 	Dead  bool
 	Dying bool
 
-	GeneScalars     []Scalar
-	BodyScalars     []Scalar
-	ClockScalars    []Scalar
 	StomachContents []StomachContent
 	Children        []ChildLink
 	BrainNodes      []BrainNode
@@ -368,13 +338,10 @@ type Egg struct {
 	EntryName string
 	FileIndex int
 	Raw       map[string]any
-	Scalars   []Scalar
 
 	ID    int64
 	HasID bool
 
-	GeneScalars   []Scalar
-	EggScalars    []Scalar
 	BrainNodes    []BrainNode
 	BrainSynapses []BrainSynapse
 }
@@ -388,7 +355,6 @@ type StomachContent struct {
 	Amount             float64
 	AverageChunkAmount float64
 	Raw                map[string]any
-	Scalars            []Scalar
 }
 
 type ChildLink struct {
@@ -416,8 +382,7 @@ type BrainNode struct {
 	LastInput      float64
 	LastOutput     float64
 
-	Raw     map[string]any
-	Scalars []Scalar
+	Raw map[string]any
 }
 
 type BrainSynapse struct {
@@ -431,14 +396,12 @@ type BrainSynapse struct {
 	Weight     float64
 	Enabled    bool
 
-	Raw     map[string]any
-	Scalars []Scalar
+	Raw map[string]any
 }
 
 type PelletData struct {
 	EntryName string
 	Raw       map[string]any
-	Scalars   []Scalar
 	Groups    []PelletGroup
 	Pellets   []Pellet
 }
@@ -449,7 +412,6 @@ type PelletGroup struct {
 	Zone      string
 	Count     int
 	Raw       map[string]any
-	Scalars   []Scalar
 }
 
 type Pellet struct {
@@ -459,7 +421,6 @@ type Pellet struct {
 	EntryName        string
 	Zone             string
 	Raw              map[string]any
-	Scalars          []Scalar
 
 	HasMatterDecay bool
 }
@@ -468,6 +429,5 @@ type Pheromone struct {
 	Index          int
 	EntryName      string
 	Raw            map[string]any
-	Scalars        []Scalar
 	HeadingRawJSON string
 }

@@ -134,9 +134,6 @@ func TestParseFixtureArchives(t *testing.T) {
 			if archive.PelletData == nil || archive.Counts.Pellets == 0 {
 				t.Fatalf("pellets were not parsed")
 			}
-			if len(archive.Scalars) == 0 {
-				t.Fatalf("no queryable scalar values were extracted")
-			}
 		})
 	}
 }

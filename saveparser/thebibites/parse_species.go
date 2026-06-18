@@ -11,7 +11,6 @@ func parseSpecies(ctx *parserContext, entry *Entry) *SpeciesData {
 	species := &SpeciesData{
 		EntryName: entry.Name,
 		Raw:       raw,
-		Scalars:   collectScalars(entry.Name, "species", entry.Name, "species", raw),
 	}
 	species.ActiveSpeciesIDs = parseActiveSpeciesIDs(raw)
 	species.Records = parseSpeciesRecords(entry.Name, raw)
@@ -44,9 +43,8 @@ func parseSpeciesRecords(entryName string, species map[string]any) []SpeciesReco
 			continue
 		}
 		record := SpeciesRecord{
-			Index:   i,
-			Raw:     raw,
-			Scalars: collectScalars(entryName, "species_record", fmt.Sprintf("%d", i), fmt.Sprintf("species.recordedSpecies[%d]", i), raw),
+			Index: i,
+			Raw:   raw,
 		}
 		if v, ok := intAt(raw, "speciesID"); ok {
 			record.SpeciesID = v
@@ -75,22 +73,19 @@ func parseSpeciesRecords(entryName string, species map[string]any) []SpeciesReco
 		if v, ok := stringAt(raw, "description"); ok {
 			record.Description = v
 		}
-		parseSpeciesTemplate(entryName, i, ownerID, raw, &record)
+		parseSpeciesTemplate(entryName, ownerID, raw, &record)
 		records = append(records, record)
 	}
 	return records
 }
 
-func parseSpeciesTemplate(entryName string, recordIndex int, ownerID string, recordRaw map[string]any, record *SpeciesRecord) {
+func parseSpeciesTemplate(entryName, ownerID string, recordRaw map[string]any, record *SpeciesRecord) {
 	template, ok := mapAt(recordRaw, "template")
 	if !ok {
 		return
 	}
 	if v, ok := stringAt(template, "version"); ok {
 		record.TemplateVersion = v
-	}
-	if genes, ok := mapAt(template, "genes"); ok {
-		record.TemplateGeneScalars = collectScalars(entryName, "species_template_genes", ownerID, fmt.Sprintf("species.recordedSpecies[%d].template.genes", recordIndex), genes)
 	}
 	if nodes, ok := listAt(template, "nodes"); ok {
 		record.TemplateBrainNodes = parseBrainNodes(entryName, "species_template", ownerID, nodes)

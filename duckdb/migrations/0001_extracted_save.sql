@@ -559,19 +559,6 @@ CREATE TABLE IF NOT EXISTS pheromones (
 	nb DOUBLE
 );
 
-CREATE TABLE IF NOT EXISTS json_scalars (
-	save_id TEXT,
-	entry_name TEXT,
-	owner_kind TEXT,
-	owner_id TEXT,
-	path TEXT,
-	value_type TEXT,
-	number_value DOUBLE,
-	string_value TEXT,
-	bool_value BOOLEAN,
-	raw_json TEXT
-);
-
 CREATE OR REPLACE VIEW bibite_mutation_refs AS
 SELECT save_id, entry_name, body_id, health, energy, dead, dying, has_body_id
 FROM bibites

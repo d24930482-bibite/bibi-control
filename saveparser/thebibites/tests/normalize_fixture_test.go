@@ -62,9 +62,6 @@ func TestExtractTablesLargestFixture(t *testing.T) {
 	if !hasMatterDecayRow(tables.Pellets) {
 		t.Fatalf("expected at least one pellet matterDecay row value")
 	}
-	if len(tables.JSONScalars) == 0 {
-		t.Fatalf("JSON scalar fallback rows were not extracted")
-	}
 }
 
 func TestExtractTablesPheromonesWithoutSettingChangers(t *testing.T) {

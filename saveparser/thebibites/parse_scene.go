@@ -9,7 +9,6 @@ func parseScene(ctx *parserContext, entry *Entry) *SceneState {
 	scene := &SceneState{
 		EntryName: entry.Name,
 		Raw:       raw,
-		Scalars:   collectScalars(entry.Name, "scene", entry.Name, "scene", raw),
 	}
 	if v, ok := stringAt(raw, "version"); ok {
 		scene.Version = v
