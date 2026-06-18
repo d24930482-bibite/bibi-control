@@ -65,34 +65,65 @@ func (ls *LoadedSave) query(q string, args ...any) (*sql.Rows, error) {
 // Starlark conversion via mapsToStarlark — this returns plain Go scalars, NOT
 // Starlark values). It is the world.query() executor.
 //
-// Scoping (load-bearing): ls.query runs raw SQL over the SHARED workspace DuckDB
-// handle whose tables hold EVERY world's working/history partitions keyed by
-// save_id. A naive `SELECT … FROM bibites` would read all save_ids across worlds.
-// So the user query is wrapped with a prepended working_saves CTE exposing only
-// this save's working-partition key:
+// Scoping (load-bearing, ENFORCED BY CONSTRUCTION): ls.query runs raw SQL over
+// the SHARED workspace DuckDB handle whose tables hold EVERY world's
+// working/history partitions keyed by save_id. A naive `SELECT … FROM bibites`
+// over the raw tables would read all save_ids across all worlds (the leak this
+// guards against). To keep the working-copy read isolated WITHOUT requiring the
+// caller to write a JOIN, every normalized base table is shadowed by a CTE that
+// re-defines it as only this save's working partition:
 //
-//	WITH working_saves AS (SELECT '<saveID>' AS save_id) <query>
+//	WITH bibites AS (SELECT * FROM bibites WHERE save_id = '<saveID>'),
+//	     bibite_body AS (SELECT * FROM bibite_body WHERE save_id = '<saveID>'),
+//	     … (one per normalized table) …
+//	<user query>
 //
-// callers JOIN working_saves USING (save_id) to constrain to the open world (the
-// same scoping contract HistoryQuery uses for the history partition). flushMirror
-// runs at the head of ls.query, so a staged-but-uncommitted set is visible to a
-// working-copy read-after-write — proving working-copy semantics, not a stale
-// committed projection. The read-only gate lives at the workspace binding
+// DuckDB resolves a CTE name ahead of the catalog table of the same name, so an
+// un-joined user query like `SELECT count(*) FROM bibites` binds to the scoped
+// CTE and returns ONLY the open world's rows — cross-world reads are not possible
+// through this surface (they belong to workspace.query / world.history_query).
+// This is the working-partition analogue of the world_saves CTE scoping
+// HistoryQuery uses for the history partition. flushMirror runs at the head of
+// ls.query, so a staged-but-uncommitted set is visible to a working-copy
+// read-after-write — proving working-copy semantics, not a stale committed
+// projection. The read-only gate lives at the workspace binding
 // (worldValue.queryBuiltin reuses ensureReadOnly before calling Query); do NOT
 // duplicate it here.
 func (ls *LoadedSave) Query(ctx context.Context, query string) ([]map[string]any, error) {
-	// Prepend the working_saves CTE so callers can JOIN working_saves USING
-	// (save_id) to scope reads to this world's working partition. ls.saveID is a
-	// content/world identifier (no quote injection surface in practice), but
-	// embed it as a single-quoted literal with doubled quotes for safety.
-	wrapped := "WITH working_saves AS (SELECT '" + strings.ReplaceAll(ls.saveID, "'", "''") + "' AS save_id) " + query
-
-	rows, err := ls.query(wrapped)
+	rows, err := ls.query(ls.scopedQuery(query))
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	return scanRowsToMaps(rows)
+}
+
+// scopedQuery wraps a raw user query with one shadowing CTE per normalized base
+// table, each filtered to this save's working partition (save_id = ls.saveID).
+// Because DuckDB binds CTE names before catalog tables, a bare `FROM <table>` in
+// the user query resolves to the per-world CTE — enforcing working-copy isolation
+// by construction so the caller never has to JOIN a scope key. ls.saveID is a
+// content/world identifier with no quote-injection surface in practice, but it is
+// embedded as a single-quoted literal with doubled quotes for defense in depth.
+func (ls *LoadedSave) scopedQuery(query string) string {
+	id := strings.ReplaceAll(ls.saveID, "'", "''")
+	tables := allNormalizedTableNames()
+	var b strings.Builder
+	b.WriteString("WITH ")
+	for i, t := range tables {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		qt := quoteIdent(t)
+		b.WriteString(qt)
+		b.WriteString(" AS (SELECT * FROM ")
+		b.WriteString(qt)
+		b.WriteString(" WHERE save_id = '")
+		b.WriteString(id)
+		b.WriteString("') ")
+	}
+	b.WriteString(query)
+	return b.String()
 }
 
 // scanRowsToMaps materializes a result set as one map[string]any per row (column

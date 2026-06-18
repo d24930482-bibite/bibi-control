@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -519,7 +520,7 @@ r = s.commit()
 print(r["committed"])
 print(r["revision_id"])
 print(len(r["sha256"]))
-rows = w.query("SELECT count(*) AS hits FROM bibites JOIN working_saves USING (save_id) WHERE energy != 50.0")
+rows = w.query("SELECT count(*) AS hits FROM bibites WHERE energy != 50.0")
 print(rows[0]["hits"])
 `
 	res := mustRunAuto(t, ctx, ws, prog)
@@ -557,7 +558,9 @@ print(rows[0]["hits"])
 // ---------------------------------------------------------------------------
 // TestAutomation_OpenQueryWorkingCopy — world.query reads the working partition,
 // and a staged-but-uncommitted set is visible to a re-query in the same script
-// (working-copy read-after-write, not a stale projection).
+// (working-copy read-after-write, not a stale projection). The un-joined query
+// `SELECT count(*) FROM bibites` is the canonical surface: scoping is ENFORCED by
+// LoadedSave.Query (per-world shadowing CTEs), NOT by a caller-written JOIN.
 // ---------------------------------------------------------------------------
 
 func TestAutomation_OpenQueryWorkingCopy(t *testing.T) {
@@ -570,12 +573,12 @@ func TestAutomation_OpenQueryWorkingCopy(t *testing.T) {
 
 	prog := `
 w = workspace.worlds()[0]
-before = w.query("SELECT count(*) AS n FROM bibites JOIN working_saves USING (save_id)")[0]["n"]
+before = w.query("SELECT count(*) AS n FROM bibites")[0]["n"]
 print(before)
 s = w.open()
 s.bibites.where("energy >= 0").set("energy", 7.0)
 # read-after-write on the working copy: the staged set is visible pre-commit.
-hits = w.query("SELECT count(*) AS hits FROM bibites JOIN working_saves USING (save_id) WHERE energy = 7.0")[0]["hits"]
+hits = w.query("SELECT count(*) AS hits FROM bibites WHERE energy = 7.0")[0]["hits"]
 print(hits)
 `
 	res := mustRunAuto(t, ctx, ws, prog)
@@ -591,6 +594,79 @@ print(hits)
 	}
 	if lines[0] != lines[1] {
 		t.Fatalf("read-after-write hits %q != total %q (the staged set should cover every row matched by energy >= 0)", lines[1], lines[0])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestAutomation_WorldQueryScopedToOpenWorld — the data-isolation regression: an
+// un-joined `SELECT count(*) FROM bibites` against world A's open save MUST return
+// only A's working-partition rows, NOT the combined total across every world's
+// working+history partitions sharing the one DuckDB handle. This is the leak the
+// review bounced on (3224 combined vs 1027 for A); scoping is enforced inside
+// LoadedSave.Query, so the test deliberately writes NO JOIN.
+// ---------------------------------------------------------------------------
+
+func TestAutomation_WorldQueryScopedToOpenWorld(t *testing.T) {
+	ctx := testCtxAuto(t)
+	ws := newWorkspace(t, ctx)
+
+	// Two worlds with DIFFERENT bibite counts, both seeding their working
+	// partition into the one shared DuckDB handle. fixtureA is the largest fixture
+	// and fixtureB is a distinct, smaller save, so combined != either alone.
+	worldA, err := ws.AddWorld(ctx, fixturePath(t, fixtureA), "scope-world-a")
+	if err != nil {
+		t.Fatalf("AddWorld A: %v", err)
+	}
+	worldB, err := ws.AddWorld(ctx, fixturePath(t, fixtureB), "scope-world-b")
+	if err != nil {
+		t.Fatalf("AddWorld B: %v", err)
+	}
+
+	// Force both working partitions to exist in the shared handle by opening each
+	// (LoadInto seeds save_id=worldID working rows). Without this only the history
+	// partition would be present; the leak is over BOTH, so seed both working sets.
+	if _, err := ws.OpenWorld(ctx, worldA.ID); err != nil {
+		t.Fatalf("OpenWorld A: %v", err)
+	}
+	if _, err := ws.OpenWorld(ctx, worldB.ID); err != nil {
+		t.Fatalf("OpenWorld B: %v", err)
+	}
+
+	// Ground truth from the shared handle: A's working rows, B's working rows, and
+	// the unscoped total across ALL save_ids (every world's working+history rows).
+	countA := countBySaveID(t, ctx, ws, "bibites", worldA.ID)
+	countB := countBySaveID(t, ctx, ws, "bibites", worldB.ID)
+	if countA == 0 || countB == 0 {
+		t.Fatalf("precondition: counts must be non-zero (A=%d B=%d)", countA, countB)
+	}
+	if countA == countB {
+		t.Fatalf("precondition: A (%d) and B (%d) must differ so a leak is detectable", countA, countB)
+	}
+	var unscopedTotal int64
+	if err := ws.duck().QueryRowContext(ctx, "SELECT count(*) FROM bibites").Scan(&unscopedTotal); err != nil {
+		t.Fatalf("unscoped total: %v", err)
+	}
+	if unscopedTotal <= countA {
+		t.Fatalf("precondition: unscoped total (%d) must exceed A's count (%d) for the leak to be observable", unscopedTotal, countA)
+	}
+
+	// Open A and run the natural, un-joined query. It must return A's count, not
+	// the combined total — proving LoadedSave.Query scopes by construction.
+	prog := `
+w = workspace.world("` + worldA.ID + `")
+s = w.open()
+n = w.query("SELECT count(*) AS n FROM bibites")[0]["n"]
+print(n)
+`
+	res := mustRunAuto(t, ctx, ws, prog)
+	got := strings.TrimSpace(res.Output)
+	wantA := strconv.FormatInt(countA, 10)
+	wantTotal := strconv.FormatInt(unscopedTotal, 10)
+	if got == wantTotal {
+		t.Fatalf("world.query leaked across worlds: got combined total %s, want A's count %s", got, wantA)
+	}
+	if got != wantA {
+		t.Fatalf("world.query(SELECT count(*) FROM bibites) = %s, want A's working count %s (unscoped total %s)", got, wantA, wantTotal)
 	}
 }
 

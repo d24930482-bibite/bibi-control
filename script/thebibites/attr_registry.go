@@ -256,6 +256,28 @@ func saveFieldByTable() map[string]string {
 	return out
 }
 
+var (
+	normalizedTableNamesOnce sync.Once
+	normalizedTableNamesList []string
+)
+
+// allNormalizedTableNames returns every normalized DuckDB table name (in
+// tb.NormalizedTables order), derived once from the generated metadata — no
+// hand-maintained list. Every normalized table carries a save_id column
+// (normalize_metadata.go stamps {Field:"SaveID", Column:"save_id"} on each), so
+// this is the exact set of base tables LoadedSave.Query must shadow with a
+// per-world save_id filter to enforce working-copy scoping by construction. The
+// returned slice is shared read-only — callers must not mutate it.
+func allNormalizedTableNames() []string {
+	normalizedTableNamesOnce.Do(func() {
+		normalizedTableNamesList = make([]string, len(tb.NormalizedTables))
+		for i, spec := range tb.NormalizedTables {
+			normalizedTableNamesList[i] = spec.Table
+		}
+	})
+	return normalizedTableNamesList
+}
+
 // rowTypeFor returns the element struct type of the ExtractedSave field named
 // saveField (handling both []Row and *Row shapes).
 func rowTypeFor(extractedType reflect.Type, saveField string) reflect.Type {
