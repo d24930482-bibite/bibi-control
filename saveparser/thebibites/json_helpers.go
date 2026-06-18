@@ -167,3 +167,13 @@ func rawJSON(value any) string {
 	}
 	return string(raw)
 }
+
+// ownerIDFromInt renders a numeric owner id as a decimal string, falling back to
+// the supplied string (typically the entry name) when the id is absent. Every
+// normalizer uses it to derive a stable owner_id for typed rows.
+func ownerIDFromInt(id int64, ok bool, fallback string) string {
+	if !ok {
+		return fallback
+	}
+	return strconv.FormatInt(id, 10)
+}

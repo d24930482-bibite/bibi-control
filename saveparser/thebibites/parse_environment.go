@@ -1,7 +1,5 @@
 package thebibites
 
-import "strconv"
-
 func parsePellets(ctx *parserContext, entry *Entry) *PelletData {
 	raw, ok := asMap(entry.JSON)
 	if !ok {
@@ -11,7 +9,6 @@ func parsePellets(ctx *parserContext, entry *Entry) *PelletData {
 	data := &PelletData{
 		EntryName: entry.Name,
 		Raw:       raw,
-		Scalars:   collectScalars(entry.Name, "pellets", entry.Name, "pellets", raw),
 	}
 	pelletIndex := 0
 	if groups, ok := listAt(raw, "pellets"); ok {
@@ -37,7 +34,6 @@ func parsePelletGroup(entryName string, groupIndex int, value any, firstPelletIn
 		Index:     groupIndex,
 		EntryName: entryName,
 		Raw:       raw,
-		Scalars:   collectScalars(entryName, "pellet_group", strconv.Itoa(groupIndex), "pellets.groups["+strconv.Itoa(groupIndex)+"]", raw),
 	}
 	if v, ok := stringAt(raw, "zone"); ok {
 		group.Zone = v
@@ -64,8 +60,6 @@ func parsePellet(entryName, zone string, groupIndex, groupPelletIndex, pelletInd
 	if !ok {
 		return nil
 	}
-	ownerID := strconv.Itoa(pelletIndex)
-	path := "pellets.groups[" + strconv.Itoa(groupIndex) + "].pellets[" + strconv.Itoa(groupPelletIndex) + "]"
 	pellet := &Pellet{
 		Index:            pelletIndex,
 		GroupIndex:       groupIndex,
@@ -73,7 +67,6 @@ func parsePellet(entryName, zone string, groupIndex, groupPelletIndex, pelletInd
 		EntryName:        entryName,
 		Zone:             zone,
 		Raw:              raw,
-		Scalars:          collectScalars(entryName, "pellet", ownerID, path, raw),
 	}
 	if _, ok := mapAt(raw, "matterDecay"); ok {
 		pellet.HasMatterDecay = true
@@ -81,16 +74,15 @@ func parsePellet(entryName, zone string, groupIndex, groupPelletIndex, pelletInd
 	return pellet
 }
 
-func parsePheromones(ctx *parserContext, entry *Entry) ([]Pheromone, []Scalar) {
+func parsePheromones(ctx *parserContext, entry *Entry) []Pheromone {
 	raw, ok := asMap(entry.JSON)
 	if !ok {
 		ctx.addDiagnostic(SeverityWarning, "pheromones_not_object", entry.Name, "pheromones JSON is not an object")
-		return nil, nil
+		return nil
 	}
-	scalars := collectScalars(entry.Name, "pheromones", entry.Name, "pheromones", raw)
 	values, ok := listAt(raw, "pheromones")
 	if !ok {
-		return nil, scalars
+		return nil
 	}
 	pheromones := make([]Pheromone, 0, len(values))
 	for i, value := range values {
@@ -102,7 +94,6 @@ func parsePheromones(ctx *parserContext, entry *Entry) ([]Pheromone, []Scalar) {
 			Index:     i,
 			EntryName: entry.Name,
 			Raw:       itemRaw,
-			Scalars:   collectScalars(entry.Name, "pheromone", strconv.Itoa(i), "pheromones["+strconv.Itoa(i)+"]", itemRaw),
 		}
 		if phero, ok := mapAt(itemRaw, "phero"); ok {
 			if heading, ok := phero["heading"]; ok {
@@ -111,5 +102,5 @@ func parsePheromones(ctx *parserContext, entry *Entry) ([]Pheromone, []Scalar) {
 		}
 		pheromones = append(pheromones, pheromone)
 	}
-	return pheromones, scalars
+	return pheromones
 }

@@ -143,46 +143,6 @@ func TestLargestFixtureQueryRefsExistInArchiveState(t *testing.T) {
 		t.Fatalf("Plant stomach refs = %d, want %d from parsed archive state", len(got), len(expected))
 	}
 }
-func TestDumpJSONScalarPaths(t *testing.T) {
-	ctx := context.Background()
-	const saveID = "largest-fixture-query"
-	fixturePath := filepath.Join(repoRoot(t), "testdata", "saves", "the-bibites", "autosave_20260301021357.zip")
-	archive, err := tb.ParseFile(fixturePath, nil)
-	if err != nil {
-		t.Fatalf("ParseFile: %v", err)
-	}
-	save := tb.ExtractTables(saveID, archive)
-	db, err := OpenAndImport(ctx, "", save)
-	if err != nil {
-		t.Fatalf("OpenAndImport: %v", err)
-	}
-	defer db.Close()
-
-	rows, err := db.QueryContext(ctx, `
-		SELECT path, count(*) AS n
-		FROM json_scalars
-		WHERE save_id = ?
-		GROUP BY path
-		ORDER BY n DESC
-		LIMIT 40
-	`, saveID)
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var path string
-		var n int64
-		if err := rows.Scan(&path, &n); err != nil {
-			t.Fatalf("scan: %v", err)
-		}
-		t.Logf("%8d  %s", n, path)
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterate: %v", err)
-	}
-}
-
 func repoRoot(t *testing.T) string {
 	t.Helper()
 
@@ -574,18 +534,6 @@ func sampleExtractedSave() tb.ExtractedSave {
 			NR:                 1,
 			NG:                 2,
 			NB:                 3,
-		}},
-		JSONScalars: []tb.ScalarRow{{
-			SaveID:      saveID,
-			EntryName:   "bibites/bibite_0.bb8",
-			OwnerKind:   "bibite",
-			OwnerID:     "42",
-			Path:        "body.health",
-			Type:        tb.ScalarNumber,
-			NumberValue: 1,
-			StringValue: "",
-			BoolValue:   false,
-			RawJSON:     `1`,
 		}},
 	}
 }

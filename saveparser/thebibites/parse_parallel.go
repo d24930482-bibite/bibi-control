@@ -17,7 +17,7 @@ const parallelParseThreshold = 2
 // DETERMINISM CONTRACT: the produced Archive must be byte-for-byte identical to
 // the old sequential `for i := range archive.Entries { archive.parseEntry(...) }`
 // loop for the same input. The only order-sensitive output is produced by
-// applyParseResult (it appends to a.Bibites/Eggs/Pheromones/Scalars/Diagnostics),
+// applyParseResult (it appends to a.Bibites/Eggs/Pheromones/Diagnostics),
 // which here runs single-threaded over results[0..n-1] in the same order the old
 // loop ran. The parallel section only fills independent results[i] slots and the
 // per-entry Entry fields (entry.JSON / entry.HasUTF8BOM) for the index it owns,
@@ -90,9 +90,9 @@ func (a *Archive) parseEntries() {
 // presizeFromResults grows a's append-target slices once to fit every result, so
 // the subsequent applyParseResult loop never reallocates them. Counting is exact:
 // each result contributes at most one Bibite/Egg and a known number of
-// Pheromones/Scalars/Diagnostics.
+// Pheromones/Diagnostics.
 func (a *Archive) presizeFromResults(results []parseResult) {
-	var bibites, eggs, pheromones, scalars, diagnostics int
+	var bibites, eggs, pheromones, diagnostics int
 	for i := range results {
 		r := &results[i]
 		if r.Bibite != nil {
@@ -102,7 +102,6 @@ func (a *Archive) presizeFromResults(results []parseResult) {
 			eggs++
 		}
 		pheromones += len(r.Pheromones)
-		scalars += len(r.Scalars)
 		diagnostics += len(r.Diagnostics)
 	}
 	if bibites > 0 {
@@ -113,9 +112,6 @@ func (a *Archive) presizeFromResults(results []parseResult) {
 	}
 	if pheromones > 0 {
 		a.Pheromones = growCap(a.Pheromones, pheromones)
-	}
-	if scalars > 0 {
-		a.Scalars = growCap(a.Scalars, scalars)
 	}
 	if diagnostics > 0 {
 		a.Diagnostics = growCap(a.Diagnostics, diagnostics)

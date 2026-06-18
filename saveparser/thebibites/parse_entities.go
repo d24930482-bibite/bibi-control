@@ -1,7 +1,5 @@
 package thebibites
 
-import "strconv"
-
 func parseBibite(ctx *parserContext, entry *Entry) *Bibite {
 	raw, ok := asMap(entry.JSON)
 	if !ok {
@@ -18,28 +16,17 @@ func parseBibite(ctx *parserContext, entry *Entry) *Bibite {
 		Raw:       raw,
 		ID:        id,
 		HasID:     hasID,
-		Scalars:   collectScalars(entry.Name, "bibite", ownerID, "bibite", raw),
 	}
 	if !hasID {
 		ctx.addDiagnostic(SeverityWarning, "bibite_missing_body_id", entry.Name, "bibite body.id is missing or not numeric")
 	}
 
-	parseBibiteGenes(entry.Name, ownerID, raw, bibite)
-	parseBibiteBody(entry.Name, id, hasID, ownerID, body, bibite)
-	parseBibiteClock(entry.Name, ownerID, raw, bibite)
+	parseBibiteBody(entry.Name, id, hasID, body, bibite)
 	parseEntityBrain(entry.Name, "bibite", ownerID, raw, &bibite.BrainNodes, &bibite.BrainSynapses)
 	return bibite
 }
 
-func parseBibiteGenes(entryName, ownerID string, raw map[string]any, bibite *Bibite) {
-	genes, ok := mapAt(raw, "genes")
-	if !ok {
-		return
-	}
-	bibite.GeneScalars = collectScalars(entryName, "bibite_genes", ownerID, "genes", genes)
-}
-
-func parseBibiteBody(entryName string, id int64, hasID bool, ownerID string, body map[string]any, bibite *Bibite) {
+func parseBibiteBody(entryName string, id int64, hasID bool, body map[string]any, bibite *Bibite) {
 	if body == nil {
 		return
 	}
@@ -49,17 +36,8 @@ func parseBibiteBody(entryName string, id int64, hasID bool, ownerID string, bod
 	if v, ok := boolAt(body, "dying"); ok {
 		bibite.Dying = v
 	}
-	bibite.BodyScalars = collectScalars(entryName, "bibite_body", ownerID, "body", body)
 	bibite.StomachContents = parseStomachContents(entryName, id, hasID, body)
 	bibite.Children = parseChildLinks(entryName, id, hasID, body)
-}
-
-func parseBibiteClock(entryName, ownerID string, raw map[string]any, bibite *Bibite) {
-	clock, ok := mapAt(raw, "clock")
-	if !ok {
-		return
-	}
-	bibite.ClockScalars = collectScalars(entryName, "bibite_clock", ownerID, "clock", clock)
 }
 
 func parseStomachContents(entryName string, bibiteID int64, hasBibiteID bool, body map[string]any) []StomachContent {
@@ -72,7 +50,6 @@ func parseStomachContents(entryName string, bibiteID int64, hasBibiteID bool, bo
 		return nil
 	}
 	contents := make([]StomachContent, 0, len(values))
-	ownerID := ownerIDFromInt(bibiteID, hasBibiteID, entryName)
 	for i, value := range values {
 		raw, ok := asMap(value)
 		if !ok {
@@ -84,7 +61,6 @@ func parseStomachContents(entryName string, bibiteID int64, hasBibiteID bool, bo
 			BibiteID:    bibiteID,
 			HasBibiteID: hasBibiteID,
 			Raw:         raw,
-			Scalars:     collectScalars(entryName, "bibite_stomach_content", ownerID, "body.stomach.content["+strconv.Itoa(i)+"]", raw),
 		}
 		if v, ok := stringAt(raw, "material"); ok {
 			content.Material = v
@@ -140,27 +116,9 @@ func parseEgg(ctx *parserContext, entry *Entry) *Egg {
 		Raw:       raw,
 		ID:        id,
 		HasID:     hasID,
-		Scalars:   collectScalars(entry.Name, "egg", ownerID, "egg_entity", raw),
 	}
-	parseEggGenes(entry.Name, ownerID, raw, egg)
-	parseEggState(entry.Name, ownerID, eggState, egg)
 	parseEntityBrain(entry.Name, "egg", ownerID, raw, &egg.BrainNodes, &egg.BrainSynapses)
 	return egg
-}
-
-func parseEggGenes(entryName, ownerID string, raw map[string]any, egg *Egg) {
-	genes, ok := mapAt(raw, "genes")
-	if !ok {
-		return
-	}
-	egg.GeneScalars = collectScalars(entryName, "egg_genes", ownerID, "genes", genes)
-}
-
-func parseEggState(entryName, ownerID string, eggState map[string]any, egg *Egg) {
-	if eggState == nil {
-		return
-	}
-	egg.EggScalars = collectScalars(entryName, "egg_state", ownerID, "egg", eggState)
 }
 
 func parseEntityBrain(entryName, ownerKind, ownerID string, raw map[string]any, nodesOut *[]BrainNode, synapsesOut *[]BrainSynapse) {

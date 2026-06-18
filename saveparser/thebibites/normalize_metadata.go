@@ -538,16 +538,4 @@ var NormalizedTables = []NormalizedTableSpec{
 		{Field: "NG", Column: "ng", SQLType: "DOUBLE", SQLRefPath: "phero.nG"},
 		{Field: "NB", Column: "nb", SQLType: "DOUBLE", SQLRefPath: "phero.nB"},
 	}},
-	{SaveField: "JSONScalars", Table: "json_scalars", RowType: "ScalarRow", Optional: false, Fields: []NormalizedFieldSpec{
-		{Field: "SaveID", Column: "save_id", SQLType: "TEXT"},
-		{Field: "EntryName", Column: "entry_name", SQLType: "TEXT"},
-		{Field: "OwnerKind", Column: "owner_kind", SQLType: "TEXT"},
-		{Field: "OwnerID", Column: "owner_id", SQLType: "TEXT"},
-		{Field: "Path", Column: "path", SQLType: "TEXT"},
-		{Field: "Type", Column: "value_type", SQLType: "TEXT"},
-		{Field: "NumberValue", Column: "number_value", SQLType: "DOUBLE"},
-		{Field: "StringValue", Column: "string_value", SQLType: "TEXT"},
-		{Field: "BoolValue", Column: "bool_value", SQLType: "BOOLEAN"},
-		{Field: "RawJSON", Column: "raw_json", SQLType: "TEXT"},
-	}},
 }

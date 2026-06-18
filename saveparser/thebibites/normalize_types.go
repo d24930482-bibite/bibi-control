@@ -74,8 +74,6 @@ type ExtractedSave struct {
 	PelletGroups []PelletGroupRow `dbtable:"pellet_groups"`
 	Pellets      []PelletRow      `dbtable:"pellets" sqlrefresolver:"pellet_path_map"`
 	Pheromones   []PheromoneRow   `dbtable:"pheromones" sqlrefresolver:"pheromone_path_map"`
-
-	JSONScalars []ScalarRow `dbtable:"json_scalars"`
 }
 
 type SaveArchiveRow struct {
@@ -491,15 +489,3 @@ type PheromoneRow struct {
 	NB                 float64 `sqlref:"phero.nB"`
 }
 
-type ScalarRow struct {
-	SaveID      string
-	EntryName   string
-	OwnerKind   string
-	OwnerID     string
-	Path        string
-	Type        ScalarType
-	NumberValue float64
-	StringValue string
-	BoolValue   bool
-	RawJSON     string
-}

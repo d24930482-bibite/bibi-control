@@ -50,7 +50,6 @@ func ParseEntryBytesAs(name string, kind EntryKind, raw []byte) (*ParsedEntry, e
 		Egg:         result.Egg,
 		PelletData:  result.PelletData,
 		Pheromones:  result.Pheromones,
-		Scalars:     result.Scalars,
 		Diagnostics: result.Diagnostics,
 	}, nil
 }

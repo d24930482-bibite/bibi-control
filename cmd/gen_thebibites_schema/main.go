@@ -445,9 +445,6 @@ var columnOverridesByRow = map[string]map[string]string{
 	"GeneRow": {
 		"Type": "value_type",
 	},
-	"ScalarRow": {
-		"Type": "value_type",
-	},
 	"SettingValueRow": {
 		"Type": "value_type",
 	},
