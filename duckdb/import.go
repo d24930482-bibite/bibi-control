@@ -295,11 +295,13 @@ func appendRows(ctx context.Context, conn *sql.Conn, table string, fields []fiel
 		rows = single
 	}
 
-	// Resolve struct field names to index paths ONCE per table, not per row.
-	// reflect.FieldByName is a linear string-compared scan over the struct's
-	// fields; doing it per row turns into tens of millions of scans on a large
-	// save. FieldByIndex with a precomputed []int is a direct offset lookup.
-	plan, err := buildFieldIndices(rows.Type().Elem(), fields)
+	// Resolve struct field names to index paths AND typed cell-extractors ONCE
+	// per table, not per row. reflect.FieldByName is a linear string-compared
+	// scan over the struct's fields; doing it per row turns into tens of millions
+	// of scans on a large save. The extractor also pins the per-cell conversion to
+	// the field's static reflect.Type at build time, so the per-row hot loop no
+	// longer recomputes a reflect.Value.Kind() type-switch per cell (the H5 win).
+	extractors, err := buildColumnExtractors(rows.Type().Elem(), fields)
 	if err != nil {
 		return fmt.Errorf("duckdb: %s field plan: %w", table, err)
 	}
@@ -328,8 +330,18 @@ func appendRows(ctx context.Context, conn *sql.Conn, table string, fields []fiel
 			}
 		}()
 
+		// AppendRow already batches the cgo boundary: the driver buffers values
+		// into a Go-side DataChunk and only crosses cgo once per full chunk
+		// (GetDataChunkCapacity() = 2048 rows). A columnar / pre-built DataChunk
+		// append is NOT reachable here: in duckdb-go/v2 the Appender's chunk field
+		// and appendDataChunk are unexported and it will not ingest an externally
+		// built chunk, so there is no public columnar path to amortize further.
+		// The remaining per-cell cost we can remove is OUR reflection — done above
+		// via the precomputed extractors; the driver's own setNumeric[any,T]
+		// per-cell type-switch is in the dependency and sets a floor we cannot
+		// cross from Go.
 		for i := 0; i < rows.Len(); i++ {
-			if err := rowValuesInto(buf, table, rows.Index(i), plan); err != nil {
+			if err := rowValuesInto(buf, table, rows.Index(i), extractors); err != nil {
 				return err
 			}
 			if err := appender.AppendRow(buf...); err != nil {
@@ -356,33 +368,11 @@ func fieldColumns(fields []fieldSpec) []string {
 	return columns
 }
 
-// buildFieldIndices resolves each fieldSpec to its struct field index path
-// against the row element type. Done once per table; the result is reused for
-// every row via FieldByIndex.
-func buildFieldIndices(elem reflect.Type, fields []fieldSpec) ([][]int, error) {
-	for elem.Kind() == reflect.Pointer {
-		elem = elem.Elem()
-	}
-	if elem.Kind() != reflect.Struct {
-		return nil, fmt.Errorf("element type %s is not a struct", elem)
-	}
-	plan := make([][]int, len(fields))
-	for i, spec := range fields {
-		sf, ok := elem.FieldByName(spec.field)
-		if !ok {
-			return nil, fmt.Errorf("missing field %s", spec.field)
-		}
-		// Copy: StructField.Index may share backing storage; we hold this long-term.
-		idx := make([]int, len(sf.Index))
-		copy(idx, sf.Index)
-		plan[i] = idx
-	}
-	return plan, nil
-}
-
-// rowValuesInto fills buf with the row's field values using a precomputed index
-// plan. buf must have len(plan) capacity and is overwritten in place.
-func rowValuesInto(buf []driver.Value, table string, row reflect.Value, plan [][]int) error {
+// rowValuesInto fills buf with the row's field values using the precomputed
+// per-column extractors. buf must have len(extractors) capacity and is
+// overwritten in place. The per-cell call is a direct typed read — the kind
+// dispatch was resolved once at build time in buildColumnExtractors.
+func rowValuesInto(buf []driver.Value, table string, row reflect.Value, extractors []columnExtractor) error {
 	for row.Kind() == reflect.Pointer {
 		if row.IsNil() {
 			return fmt.Errorf("duckdb: %s row is nil", table)
@@ -392,8 +382,8 @@ func rowValuesInto(buf []driver.Value, table string, row reflect.Value, plan [][
 	if row.Kind() != reflect.Struct {
 		return fmt.Errorf("duckdb: %s row is %s, want struct", table, row.Kind())
 	}
-	for i, idx := range plan {
-		value, err := fieldValue(row.FieldByIndex(idx))
+	for i, ex := range extractors {
+		value, err := ex.extract(row.FieldByIndex(ex.index))
 		if err != nil {
 			return fmt.Errorf("duckdb: %s field %d: %w", table, i, err)
 		}
@@ -402,14 +392,77 @@ func rowValuesInto(buf []driver.Value, table string, row reflect.Value, plan [][
 	return nil
 }
 
-func fieldValue(value reflect.Value) (driver.Value, error) {
-	for value.Kind() == reflect.Pointer {
-		if value.IsNil() {
-			return nil, nil
-		}
-		value = value.Elem()
-	}
+// cellExtractor reads one column's driver.Value from a row's reflect.Value for
+// that field. The function is chosen once at build time from the field's static
+// reflect.Type, so the per-row hot loop performs a direct typed read instead of
+// re-deriving a reflect.Value.Kind() type-switch per cell (the H5 win). It still
+// operates on a runtime reflect.Value, so a static-vs-dynamic kind mismatch must
+// error rather than panic — mirroring fieldValue's default arm.
+type cellExtractor func(reflect.Value) (driver.Value, error)
 
+// columnExtractor pairs a column's precomputed struct field index path with its
+// typed cell-extractor. Built once per table, reused for every row.
+type columnExtractor struct {
+	index   []int
+	extract cellExtractor
+}
+
+// buildColumnExtractors resolves each fieldSpec against the row element type to
+// its struct field index path and a typed cell-extractor chosen from the field's
+// static reflect.Type. Done once per table; the result is reused for every row.
+//
+// The extractors are the single source of conversion truth and are kept exactly
+// in lockstep with the (now removed) fieldValue switch: pointer deref + nil->NULL,
+// the uint64 > maxDriverInt64 overflow error (returned verbatim), every int/uint/
+// float width, bool and string, and an unsupported-kind error. Divergence here is
+// silent DuckDB corruption — see TestFieldExtractorMatchesFieldValue.
+func buildColumnExtractors(elem reflect.Type, fields []fieldSpec) ([]columnExtractor, error) {
+	for elem.Kind() == reflect.Pointer {
+		elem = elem.Elem()
+	}
+	if elem.Kind() != reflect.Struct {
+		return nil, fmt.Errorf("element type %s is not a struct", elem)
+	}
+	out := make([]columnExtractor, len(fields))
+	for i, spec := range fields {
+		sf, ok := elem.FieldByName(spec.field)
+		if !ok {
+			return nil, fmt.Errorf("missing field %s", spec.field)
+		}
+		// Copy: StructField.Index may share backing storage; we hold this long-term.
+		idx := make([]int, len(sf.Index))
+		copy(idx, sf.Index)
+		out[i] = columnExtractor{index: idx, extract: extractorForType(sf.Type)}
+	}
+	return out, nil
+}
+
+// extractorForType picks the typed cell-extractor for a field's static type at
+// build time. Pointer types deref once per level (loop, for exact parity with
+// fieldValue's pointer chain) and yield NULL on nil; everything else dispatches
+// to the element kind. The returned closure still inspects the runtime kind via
+// the same primitives, so a static/dynamic mismatch errors instead of panicking.
+func extractorForType(t reflect.Type) cellExtractor {
+	if t.Kind() == reflect.Pointer {
+		inner := extractorForType(t.Elem())
+		return func(v reflect.Value) (driver.Value, error) {
+			for v.Kind() == reflect.Pointer {
+				if v.IsNil() {
+					return nil, nil
+				}
+				v = v.Elem()
+			}
+			return inner(v)
+		}
+	}
+	return cellValue
+}
+
+// cellValue is the per-cell conversion primitive shared by every non-pointer
+// extractor. It is byte-for-byte the body of the previous fieldValue switch (minus
+// the leading pointer-deref loop, which the pointer extractor owns), so the
+// migration changes nothing that lands in any column.
+func cellValue(value reflect.Value) (driver.Value, error) {
 	switch value.Kind() {
 	case reflect.Bool:
 		return value.Bool(), nil
@@ -427,6 +480,21 @@ func fieldValue(value reflect.Value) (driver.Value, error) {
 	default:
 		return nil, fmt.Errorf("unsupported kind %s", value.Kind())
 	}
+}
+
+// fieldValue is the original per-cell conversion (pointer deref + value switch).
+// The hot path now uses precomputed columnExtractors, but fieldValue is retained
+// as the single reference implementation the extractors must match exactly — the
+// value-identity test asserts cellValue/extractorForType == fieldValue for every
+// kind, including the uint64-overflow error and nil-pointer->NULL.
+func fieldValue(value reflect.Value) (driver.Value, error) {
+	for value.Kind() == reflect.Pointer {
+		if value.IsNil() {
+			return nil, nil
+		}
+		value = value.Elem()
+	}
+	return cellValue(value)
 }
 
 // QuoteIdent double-quotes a SQL identifier for DuckDB, escaping embedded quotes.
