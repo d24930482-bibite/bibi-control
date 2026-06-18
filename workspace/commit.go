@@ -83,7 +83,92 @@ func (w *Workspace) CommitWorld(ctx context.Context, worldID string, program []b
 		return revisionstore.Revision{}, err
 	}
 
-	// 5. No-op run: nothing committed, head unchanged, mirror untouched.
+	// 5-7. Apply the dual-key DuckDB re-import (shared with CommitWorldLoaded).
+	return w.applyWorldCommit(ctx, worldID, wc)
+}
+
+// CommitWorldLoaded commits the mutations ALREADY staged on the world's cached
+// working copy (ls.session) and advances the world head — the object-based
+// counterpart of CommitWorld with NO script.Run. The automation world.open() ->
+// s.commit() surface uses it: mutations are staged by direct method calls on the
+// Save value (in the same automation thread) onto the cached ls, so re-running a
+// program (CommitWorld) would stage onto a throwaway fresh load and lose them.
+//
+// It shares CommitWorld's exact lock discipline and dual-key re-import:
+//   - resolve the cached working copy via OpenWorld BEFORE taking w.mu (OpenWorld
+//     acquires its own lock; w.mu is non-reentrant). On the fast path OpenWorld
+//     returns the SAME cached handle world.open() staged onto, so s.commit()
+//     commits that staged session. (If an Unload/Load ran between open and commit,
+//     the staged session is lost — within one hermetic automation cycle that does
+//     not happen.)
+//   - take w.mu for the whole body so read-current-head -> record-advancing-head
+//     -> dual-key import is atomic w.r.t. other mutators (the TOCTOU guard).
+//   - thebibites.CommitLoadedWorld performs the single WriteArchive + advancing-
+//     head revision (no program), and applyWorldCommit runs the IDENTICAL
+//     reparse + dual-key ReplaceExtractedSave.
+//
+// A no-op (nothing staged / dry-run / autocommit(False)) returns the zero
+// Revision and a nil error: no head moved, no re-import — same contract as
+// CommitWorld.
+func (w *Workspace) CommitWorldLoaded(ctx context.Context, worldID string, opts thebibites.RunOptions) (revisionstore.Revision, error) {
+	if w == nil {
+		return revisionstore.Revision{}, fmt.Errorf("workspace: CommitWorldLoaded on nil workspace")
+	}
+	if worldID == "" {
+		return revisionstore.Revision{}, fmt.Errorf("workspace: worldID is required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	// 1. Resolve the cached working copy WITHOUT holding w.mu yet (OpenWorld takes
+	// its own lock; nesting w.mu self-deadlocks). On the fast path this is the SAME
+	// *LoadedSave world.open() returned and staged the mutations onto.
+	ls, err := w.OpenWorld(ctx, worldID)
+	if err != nil {
+		return revisionstore.Revision{}, err
+	}
+
+	// 2. Take w.mu for the whole commit body (single DuckDB writer; atomic
+	// read-head -> record-advancing-head sequence).
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	// 3. Read the world's CURRENT head as the parent, INSIDE the lock (TOCTOU
+	// guard). A loadable world always has a head from C1.
+	world, err := w.store().GetWorld(ctx, worldID)
+	if err != nil {
+		if revisionstore.IsNotFound(err) {
+			return revisionstore.Revision{}, fmt.Errorf("workspace: world %q not found", worldID)
+		}
+		return revisionstore.Revision{}, fmt.Errorf("workspace: get world %q: %w", worldID, err)
+	}
+	if world.HeadRevisionID == nil {
+		return revisionstore.Revision{}, fmt.Errorf("workspace: world %q has no head to commit onto", worldID)
+	}
+	parentID := world.HeadRevisionID
+
+	// 4. Commit the already-staged session via the shared script core (no program
+	// run -> blob -> advancing-head revision). It carries truthful commit status in
+	// any returned error.
+	wc, err := thebibites.CommitLoadedWorld(ctx, ls, worldID, parentID, w.blobs(), w.store(), opts)
+	if err != nil {
+		return revisionstore.Revision{}, err
+	}
+
+	// 5-7. Apply the dual-key DuckDB re-import (shared with CommitWorld).
+	return w.applyWorldCommit(ctx, worldID, wc)
+}
+
+// applyWorldCommit is the shared post-commit body for CommitWorld and
+// CommitWorldLoaded: it reparses the committed blob once and re-imports both
+// DuckDB mirror partitions under the dual-key scheme, then drops the consumed
+// working copy from the working set. It MUST be called holding w.mu (the single
+// DuckDB writer) — both callers take w.mu for the whole commit body before
+// invoking it. Factoring this out keeps the dual-key re-import (and the subtle
+// reparse-for-fresh-projection invariant) in ONE place.
+func (w *Workspace) applyWorldCommit(ctx context.Context, worldID string, wc thebibites.WorldCommit) (revisionstore.Revision, error) {
+	// No-op run: nothing committed, head unchanged, mirror untouched.
 	if !wc.Committed {
 		return revisionstore.Revision{}, nil
 	}
@@ -96,7 +181,7 @@ func (w *Workspace) CommitWorld(ctx context.Context, worldID string, program []b
 			"workspace: working save_id %q != world id %q (dual-key desync)", wc.SaveID, worldID)
 	}
 
-	// 6. Project the committed save for the dual-key DuckDB re-import.
+	// Project the committed save for the dual-key DuckDB re-import.
 	//
 	// wc.Applied is the post-Apply archive: Session.Apply rewrites the mutated
 	// entries' JSON/Raw bytes but does NOT re-derive the typed parser projections

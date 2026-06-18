@@ -1,6 +1,7 @@
 package thebibites
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"reflect"
@@ -56,6 +57,108 @@ func (ls *LoadedSave) query(q string, args ...any) (*sql.Rows, error) {
 		return nil, fmt.Errorf("query: %w", err)
 	}
 	return rows, nil
+}
+
+// Query runs a working-copy SELECT scoped to this loaded save's working
+// partition (save_id == ls.saveID == worldID) and materializes the result as
+// []map[string]any for a Go caller (the workspace automation layer owns the
+// Starlark conversion via mapsToStarlark — this returns plain Go scalars, NOT
+// Starlark values). It is the world.query() executor.
+//
+// Scoping (load-bearing, ENFORCED BY CONSTRUCTION): ls.query runs raw SQL over
+// the SHARED workspace DuckDB handle whose tables hold EVERY world's
+// working/history partitions keyed by save_id. A naive `SELECT … FROM bibites`
+// over the raw tables would read all save_ids across all worlds (the leak this
+// guards against). To keep the working-copy read isolated WITHOUT requiring the
+// caller to write a JOIN, every normalized base table is shadowed by a CTE that
+// re-defines it as only this save's working partition:
+//
+//	WITH bibites AS (SELECT * FROM bibites WHERE save_id = '<saveID>'),
+//	     bibite_body AS (SELECT * FROM bibite_body WHERE save_id = '<saveID>'),
+//	     … (one per normalized table) …
+//	<user query>
+//
+// DuckDB resolves a CTE name ahead of the catalog table of the same name, so an
+// un-joined user query like `SELECT count(*) FROM bibites` binds to the scoped
+// CTE and returns ONLY the open world's rows — cross-world reads are not possible
+// through this surface (they belong to workspace.query / world.history_query).
+// This is the working-partition analogue of the world_saves CTE scoping
+// HistoryQuery uses for the history partition. flushMirror runs at the head of
+// ls.query, so a staged-but-uncommitted set is visible to a working-copy
+// read-after-write — proving working-copy semantics, not a stale committed
+// projection. The read-only gate lives at the workspace binding
+// (worldValue.queryBuiltin reuses ensureReadOnly before calling Query); do NOT
+// duplicate it here.
+func (ls *LoadedSave) Query(ctx context.Context, query string) ([]map[string]any, error) {
+	rows, err := ls.query(ls.scopedQuery(query))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRowsToMaps(rows)
+}
+
+// scopedQuery wraps a raw user query with one shadowing CTE per normalized base
+// table, each filtered to this save's working partition (save_id = ls.saveID).
+// Because DuckDB binds CTE names before catalog tables, a bare `FROM <table>` in
+// the user query resolves to the per-world CTE — enforcing working-copy isolation
+// by construction so the caller never has to JOIN a scope key. ls.saveID is a
+// content/world identifier with no quote-injection surface in practice, but it is
+// embedded as a single-quoted literal with doubled quotes for defense in depth.
+func (ls *LoadedSave) scopedQuery(query string) string {
+	id := strings.ReplaceAll(ls.saveID, "'", "''")
+	tables := allNormalizedTableNames()
+	var b strings.Builder
+	b.WriteString("WITH ")
+	for i, t := range tables {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		qt := quoteIdent(t)
+		b.WriteString(qt)
+		b.WriteString(" AS (SELECT * FROM ")
+		b.WriteString(qt)
+		b.WriteString(" WHERE save_id = '")
+		b.WriteString(id)
+		b.WriteString("') ")
+	}
+	b.WriteString(query)
+	return b.String()
+}
+
+// scanRowsToMaps materializes a result set as one map[string]any per row (column
+// name -> raw driver scalar), preserving column order semantics. It is the Go-API
+// analogue of scanRowsToDicts (which returns Starlark values); the automation
+// layer converts these maps to Starlark via its own sqlScalarToStarlark path.
+func scanRowsToMaps(rows *sql.Rows) ([]map[string]any, error) {
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	values := make([]any, len(cols))
+	targets := make([]any, len(cols))
+	for i := range values {
+		targets[i] = &values[i]
+	}
+
+	var out []map[string]any
+	for rows.Next() {
+		for i := range values {
+			values[i] = nil
+		}
+		if err := rows.Scan(targets...); err != nil {
+			return nil, fmt.Errorf("scan row: %w", err)
+		}
+		m := make(map[string]any, len(cols))
+		for i, name := range cols {
+			m[name] = values[i]
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // sqlBuiltin implements save.sql(query) -> list[dict]. The raw escape hatch: the

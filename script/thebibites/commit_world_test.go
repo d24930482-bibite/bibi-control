@@ -6,8 +6,11 @@ import (
 	"strings"
 	"testing"
 
+	"go.starlark.net/starlark"
+
 	"github.com/asemones/bibicontrol/blobstore"
 	"github.com/asemones/bibicontrol/revisionstore"
+	tb "github.com/asemones/bibicontrol/saveparser/thebibites"
 )
 
 // seedCommitWorld creates a world in revs and seeds it with a first revision
@@ -146,6 +149,111 @@ func TestRunAndCommitWorldChurn(t *testing.T) {
 	}
 	if ls2.reparseCount != 1 {
 		t.Errorf("reparseCount = %d, want 1 under verify", ls2.reparseCount)
+	}
+}
+
+// TestCommitLoadedWorldAdvancesHead: the object-based (no program re-run) commit
+// path. Mutations are staged directly on ls (bulkSet, the same primitive
+// s.bibites.where().set() drives); CommitLoadedWorld then advances the head with
+// the IDENTICAL invariants as the program path — parent threaded, refcount == 1
+// (no double IncBlobRef), and the churn counters (one WriteArchive, zero
+// reparses). This guards the factored commit path independent of the run path.
+func TestCommitLoadedWorldAdvancesHead(t *testing.T) {
+	ctx := context.Background()
+	_, blobs, revs := newStores(t)
+	worldID, seededHead := seedCommitWorld(t, ctx, revs)
+
+	ls := loadFixture(t)
+	// Re-key the working copy to worldID (the working-partition key the workspace
+	// pins via LoadInto). The in-memory rows the analytics push-down imports are
+	// stamped with the partition key, so re-extract under worldID — otherwise the
+	// bulkSet WHERE save_id=worldID would match nothing (the LoadInto seam seeds
+	// under worldID for real; loadFixture uses the fixture's archive hash).
+	ls.saveID = worldID
+	ls.tables = tb.ExtractTables(worldID, ls.archive)
+	ls.buildAccess()
+	target := firstBibiteEntry(t, ls)
+
+	// Stage a set directly on ls — no script.Run — exactly as world.open() ->
+	// s.bibites.where(...).set(...) would in the object-based automation surface.
+	staged, err := ls.bulkSet("bibite", fmt.Sprintf("entry_name == '%s'", target), "energy", starlark.Float(4321.0))
+	if err != nil {
+		t.Fatalf("bulkSet: %v", err)
+	}
+	if staged != 1 {
+		t.Fatalf("staged = %d, want 1", staged)
+	}
+
+	wc, err := CommitLoadedWorld(ctx, ls, worldID, &seededHead, blobs, revs, RunOptions{})
+	if err != nil {
+		t.Fatalf("CommitLoadedWorld: %v", err)
+	}
+	if !wc.Committed {
+		t.Fatal("Committed = false, want true for a staged-mutation commit")
+	}
+	if wc.SaveID != worldID {
+		t.Errorf("SaveID = %q, want worldID %q", wc.SaveID, worldID)
+	}
+	if wc.Revision.ParentID == nil || *wc.Revision.ParentID != seededHead {
+		t.Errorf("Revision.ParentID = %v, want %d", wc.Revision.ParentID, seededHead)
+	}
+	if wc.Revision.WorldID != worldID {
+		t.Errorf("Revision.WorldID = %q, want %q", wc.Revision.WorldID, worldID)
+	}
+	// RecordRevisionAdvancingHead self-refs the blob in-tx, so the freshly recorded
+	// revision is at refcount = 1 — no separate IncBlobRef in the factored path.
+	if wc.Revision.Refcount != 1 {
+		t.Errorf("Revision.Refcount = %d, want 1 (no double-count)", wc.Revision.Refcount)
+	}
+	// Churn DoD: exactly one WriteArchive, zero reparses (no verify), DuckDB never
+	// opened by the pure-mutation commit — same shape as TestRunAndCommitWorldChurn.
+	if ls.writeArchiveCount != 1 {
+		t.Errorf("writeArchiveCount = %d, want 1", ls.writeArchiveCount)
+	}
+	if ls.reparseCount != 0 {
+		t.Errorf("reparseCount = %d, want 0 (no verify)", ls.reparseCount)
+	}
+
+	got, err := revs.GetWorld(ctx, worldID)
+	if err != nil {
+		t.Fatalf("GetWorld: %v", err)
+	}
+	if got.HeadRevisionID == nil || *got.HeadRevisionID != wc.Revision.ID {
+		t.Errorf("world HeadRevisionID = %v, want new revision %d", got.HeadRevisionID, wc.Revision.ID)
+	}
+	if got.HeadRevisionID != nil && *got.HeadRevisionID == seededHead {
+		t.Error("world head did not advance off the seeded head")
+	}
+}
+
+// TestCommitLoadedWorldNoOp: an object-based commit with nothing staged produces
+// no revision and leaves the head unchanged (same no-op contract as the program
+// path).
+func TestCommitLoadedWorldNoOp(t *testing.T) {
+	ctx := context.Background()
+	_, blobs, revs := newStores(t)
+	worldID, seededHead := seedCommitWorld(t, ctx, revs)
+
+	ls := loadFixture(t)
+	ls.saveID = worldID
+
+	wc, err := CommitLoadedWorld(ctx, ls, worldID, &seededHead, blobs, revs, RunOptions{})
+	if err != nil {
+		t.Fatalf("CommitLoadedWorld: %v", err)
+	}
+	if wc.Committed {
+		t.Error("Committed = true, want false with nothing staged")
+	}
+	if wc.Revision.ID != 0 {
+		t.Errorf("Revision.ID = %d, want 0 (no revision)", wc.Revision.ID)
+	}
+
+	got, err := revs.GetWorld(ctx, worldID)
+	if err != nil {
+		t.Fatalf("GetWorld: %v", err)
+	}
+	if got.HeadRevisionID == nil || *got.HeadRevisionID != seededHead {
+		t.Errorf("world head = %v, want unchanged seeded head %d", got.HeadRevisionID, seededHead)
 	}
 }
 
