@@ -390,7 +390,7 @@ func TestFilteredCollectionLenAndIterate(t *testing.T) {
 func TestRewritePredicate(t *testing.T) {
 	ls := loadFixture(t)
 
-	got, tables, err := ls.rewritePredicate("bibite", "fat_reserves_amount >= 0 and body_id >= 0")
+	got, tables, err := ls.rewritePredicate("bibite", "fat_reserves_amount >= 0 and body_id >= 0", nil)
 	if err != nil {
 		t.Fatalf("rewritePredicate: %v", err)
 	}
@@ -405,7 +405,7 @@ func TestRewritePredicate(t *testing.T) {
 	}
 
 	// Keywords and function calls survive; the inner column still qualifies.
-	got2, _, err := ls.rewritePredicate("bibite", "abs(energy) > 1 and not dead")
+	got2, _, err := ls.rewritePredicate("bibite", "abs(energy) > 1 and not dead", nil)
 	if err != nil {
 		t.Fatalf("rewritePredicate: %v", err)
 	}
@@ -424,7 +424,7 @@ func TestRewritePredicate(t *testing.T) {
 
 	// String literals are copied verbatim (a column-looking word inside quotes is
 	// not qualified).
-	got3, _, err := ls.rewritePredicate("bibite", "species_id = 1 or energy = 'energy'")
+	got3, _, err := ls.rewritePredicate("bibite", "species_id = 1 or energy = 'energy'", nil)
 	if err != nil {
 		t.Fatalf("rewritePredicate: %v", err)
 	}

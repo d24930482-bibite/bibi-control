@@ -232,7 +232,18 @@ type aggCall struct {
 // Unknown column -> clean diagnostic. The friendly name (the registry key, which
 // may be an alias) resolves to spec.sourceColumn — the real generated DuckDB
 // column — so an aliased column queries the column that actually exists.
-func resolveColumn(kind, col string) (qualified, table string, err error) {
+//
+// catalogCols (non-nil only for a spanning scope) lets the scope's friendly
+// catalog columns (world_id / sim_time) resolve to mirror_saves.<col>. They come
+// from the catalog DDL, NOT a parallel entity allowlist; when resolved, the owning
+// table returned is the catalog sentinel so the caller pulls the catalog JOIN into
+// scope. Entity columns continue to resolve from attrRegistry().
+func resolveColumn(kind, col string, catalogCols map[string]string) (qualified, table string, err error) {
+	if catalogCols != nil {
+		if src, ok := catalogCols[col]; ok {
+			return quoteIdent(catalogTable) + "." + quoteIdent(src), catalogTable, nil
+		}
+	}
 	spec, ok := attrRegistry()[kind][col]
 	if !ok {
 		return "", "", fmt.Errorf("unknown column %q for %s", col, kind)
@@ -241,12 +252,14 @@ func resolveColumn(kind, col string) (qualified, table string, err error) {
 }
 
 // aggExpr builds the SQL aggregate expression and reports the sub-table (if any)
-// it references so the caller can include it in the FROM joins.
-func aggExpr(kind string, agg aggCall) (expr, table string, err error) {
+// it references so the caller can include it in the FROM joins. catalogCols (a
+// spanning scope's catalog columns, else nil) lets an aggregate over world_id /
+// sim_time resolve to the catalog table.
+func aggExpr(kind string, agg aggCall, catalogCols map[string]string) (expr, table string, err error) {
 	if agg.fn == "count" {
 		return "count(*)", "", nil
 	}
-	qualified, table, err := resolveColumn(kind, agg.col)
+	qualified, table, err := resolveColumn(kind, agg.col, catalogCols)
 	if err != nil {
 		return "", "", err
 	}
@@ -298,11 +311,14 @@ func oneToManyTables() map[string]bool {
 	return oneToManySet
 }
 
-// fromClause builds "FROM <identity> [LEFT JOIN <subtable> ON …]" including only
-// the sub-tables actually referenced (in entityTables order, for determinism).
-// Every sub-table is 1:1 with identity on (save_id, entry_name), so LEFT JOIN
-// preserves cardinality and aggregates stay correct.
-func fromClause(kind string, needed map[string]bool) (string, error) {
+// fromClause builds "FROM <identity> [LEFT JOIN <subtable> ON …][catalogJoin]"
+// including only the sub-tables actually referenced (in entityTables order, for
+// determinism). Every sub-table is 1:1 with identity on (save_id, entry_name), so
+// LEFT JOIN preserves cardinality and aggregates stay correct. catalogJoin (the
+// active scope's catalog LEFT JOIN, or "") is appended last when a spanning scope
+// needs world_id / sim_time to resolve — the catalog is keyed 1:1 by save_id on
+// the identity table, so it never inflates aggregate rows.
+func fromClause(kind string, needed map[string]bool, catalogJoin string) (string, error) {
 	tables := entityTables[kind]
 	if len(tables) == 0 {
 		return "", fmt.Errorf("unknown entity kind %q", kind)
@@ -327,22 +343,35 @@ func fromClause(kind string, needed map[string]bool) (string, error) {
 		b.WriteString(" AND ")
 		b.WriteString(quoteIdent(identity) + ".entry_name = " + quoteIdent(t) + ".entry_name")
 	}
+	b.WriteString(catalogJoin)
 	return b.String(), nil
 }
 
-// whereClause builds "WHERE <identity>.save_id = ? [AND (<predicate>)]" and its
-// args. The predicate is already friendly-column-rewritten.
-func (ls *LoadedSave) whereClause(kind, predicate string) (string, []any, error) {
+// whereClause builds "WHERE <scope clause> [AND (<predicate>)]" and its args. The
+// scope supplies the save-partition restriction (working: "<identity>.save_id =
+// ?"/[saveID] — byte-identical to the pre-E3 hardcoded clause; spanning:
+// "<identity>.save_id IN (SELECT save_id FROM mirror_saves …)"). The predicate is
+// already friendly-column-rewritten. Routing the partition filter through the
+// scope is what keeps every push-down query scoped BY CONSTRUCTION.
+func (ls *LoadedSave) whereClause(kind, predicate string, scope SaveScope) (string, []any, error) {
 	identity, err := identityTable(kind)
 	if err != nil {
 		return "", nil, err
 	}
-	clause := "WHERE " + quoteIdent(identity) + ".save_id = ?"
-	args := []any{ls.saveID}
+	scopeSQL, args := scope.scopeClause(identity)
+	clause := "WHERE " + scopeSQL
 	if strings.TrimSpace(predicate) != "" {
 		clause += " AND (" + predicate + ")"
 	}
 	return clause, args, nil
+}
+
+// workingScope returns this save's single-working-partition scope. The mutation
+// and entry-name match builders are single-save by construction (mutation cannot
+// reach history/all-worlds), so they always use this scope; its clause is
+// byte-identical to the pre-E3 hardcoded "<identity>.save_id = ?" / [saveID].
+func (ls *LoadedSave) workingScope() SaveScope {
+	return workingScope{saveID: ls.saveID}
 }
 
 // combineWhere AND-combines two raw predicates (either may be empty).
@@ -358,29 +387,37 @@ func combineWhere(existing, add string) string {
 }
 
 // scalarAgg compiles and runs a single-scalar aggregate over a (possibly
-// narrowed) collection, returning the scalar Starlark value (None for SQL NULL,
-// e.g. an aggregate over the empty set).
-func (ls *LoadedSave) scalarAgg(kind, where string, agg aggCall) (starlark.Value, error) {
+// narrowed) collection under the given scope, returning the scalar Starlark value
+// (None for SQL NULL, e.g. an aggregate over the empty set). scope supplies the
+// save-partition filter + any catalog columns/JOIN (working scope for single-save;
+// spanning scope for world/workspace reads).
+func (ls *LoadedSave) scalarAgg(kind, where string, scope SaveScope, agg aggCall) (starlark.Value, error) {
+	scope = scopeFor(ls, scope)
+	catalogCols := scope.catalogCols()
 	needed := map[string]bool{}
-	expr, aggTable, err := aggExpr(kind, agg)
+	expr, aggTable, err := aggExpr(kind, agg, catalogCols)
 	if err != nil {
 		return nil, err
 	}
 	if aggTable != "" {
 		needed[aggTable] = true
 	}
-	predicate, predTables, err := ls.rewritePredicate(kind, where)
+	predicate, predTables, err := ls.rewritePredicate(kind, where, catalogCols)
 	if err != nil {
 		return nil, err
 	}
 	for t := range predTables {
 		needed[t] = true
 	}
-	from, err := fromClause(kind, needed)
+	identity, err := identityTable(kind)
 	if err != nil {
 		return nil, err
 	}
-	whereSQL, args, err := ls.whereClause(kind, predicate)
+	from, err := fromClause(kind, needed, catalogJoinIfNeeded(scope, identity, needed))
+	if err != nil {
+		return nil, err
+	}
+	whereSQL, args, err := ls.whereClause(kind, predicate, scope)
 	if err != nil {
 		return nil, err
 	}
@@ -404,34 +441,54 @@ func (ls *LoadedSave) scalarAgg(kind, where string, agg aggCall) (starlark.Value
 	return fromSQLValue(v)
 }
 
-// groupedAgg compiles and runs "SELECT <group>, <agg> … GROUP BY <group>" and
-// returns a dict keyed by group value.
-func (ls *LoadedSave) groupedAgg(kind, where, groupCol string, agg aggCall) (*starlark.Dict, error) {
+// catalogJoinIfNeeded returns the scope's catalog LEFT JOIN fragment when the
+// referenced-tables set includes the catalog (a world_id / sim_time column was
+// used), else "". This is the single place that decides whether mirror_saves is
+// pulled into the FROM, so a spanning aggregate that touches no catalog column
+// never pays the JOIN.
+func catalogJoinIfNeeded(scope SaveScope, identity string, needed map[string]bool) string {
+	if needed[catalogTable] {
+		return scope.catalogJoin(identity)
+	}
+	return ""
+}
+
+// groupedAgg compiles and runs "SELECT <group>, <agg> … GROUP BY <group>" under
+// the given scope and returns a dict keyed by group value. group_by('world_id') /
+// group_by('sim_time') resolve through the spanning scope's catalog columns, so a
+// cross-world breakdown needs no JOIN in the script.
+func (ls *LoadedSave) groupedAgg(kind, where, groupCol string, scope SaveScope, agg aggCall) (*starlark.Dict, error) {
+	scope = scopeFor(ls, scope)
+	catalogCols := scope.catalogCols()
 	needed := map[string]bool{}
-	groupQual, groupTable, err := resolveColumn(kind, groupCol)
+	groupQual, groupTable, err := resolveColumn(kind, groupCol, catalogCols)
 	if err != nil {
 		return nil, err
 	}
 	needed[groupTable] = true
-	expr, aggTable, err := aggExpr(kind, agg)
+	expr, aggTable, err := aggExpr(kind, agg, catalogCols)
 	if err != nil {
 		return nil, err
 	}
 	if aggTable != "" {
 		needed[aggTable] = true
 	}
-	predicate, predTables, err := ls.rewritePredicate(kind, where)
+	predicate, predTables, err := ls.rewritePredicate(kind, where, catalogCols)
 	if err != nil {
 		return nil, err
 	}
 	for t := range predTables {
 		needed[t] = true
 	}
-	from, err := fromClause(kind, needed)
+	identity, err := identityTable(kind)
 	if err != nil {
 		return nil, err
 	}
-	whereSQL, args, err := ls.whereClause(kind, predicate)
+	from, err := fromClause(kind, needed, catalogJoinIfNeeded(scope, identity, needed))
+	if err != nil {
+		return nil, err
+	}
+	whereSQL, args, err := ls.whereClause(kind, predicate, scope)
 	if err != nil {
 		return nil, err
 	}
@@ -639,7 +696,7 @@ func (ls *LoadedSave) bulkSetExprQuery(kind, where string, spec attrSpec, expr s
 	}
 	needed := map[string]bool{spec.table: true}
 
-	predicate, predTables, err := ls.rewritePredicate(kind, where)
+	predicate, predTables, err := ls.rewritePredicate(kind, where, nil)
 	if err != nil {
 		return "", nil, err
 	}
@@ -649,7 +706,7 @@ func (ls *LoadedSave) bulkSetExprQuery(kind, where string, spec attrSpec, expr s
 
 	// Qualify the expression with the same tokenizer .where() uses and pull its
 	// referenced sub-tables into the JOIN set so a cross-table expression resolves.
-	exprSQL, exprTables, err := ls.rewritePredicate(kind, expr)
+	exprSQL, exprTables, err := ls.rewritePredicate(kind, expr, nil)
 	if err != nil {
 		return "", nil, err
 	}
@@ -660,11 +717,11 @@ func (ls *LoadedSave) bulkSetExprQuery(kind, where string, spec attrSpec, expr s
 		needed[t] = true
 	}
 
-	from, err := fromClause(kind, needed)
+	from, err := fromClause(kind, needed, "")
 	if err != nil {
 		return "", nil, err
 	}
-	whereSQL, args, err := ls.whereClause(kind, predicate)
+	whereSQL, args, err := ls.whereClause(kind, predicate, ls.workingScope())
 	if err != nil {
 		return "", nil, err
 	}
@@ -882,18 +939,18 @@ func (ls *LoadedSave) bulkSetQuery(kind, where string, spec attrSpec) (string, [
 		return "", nil, err
 	}
 	needed := map[string]bool{spec.table: true}
-	predicate, predTables, err := ls.rewritePredicate(kind, where)
+	predicate, predTables, err := ls.rewritePredicate(kind, where, nil)
 	if err != nil {
 		return "", nil, err
 	}
 	for t := range predTables {
 		needed[t] = true
 	}
-	from, err := fromClause(kind, needed)
+	from, err := fromClause(kind, needed, "")
 	if err != nil {
 		return "", nil, err
 	}
-	whereSQL, args, err := ls.whereClause(kind, predicate)
+	whereSQL, args, err := ls.whereClause(kind, predicate, ls.workingScope())
 	if err != nil {
 		return "", nil, err
 	}
@@ -937,7 +994,7 @@ func (ls *LoadedSave) matchingEntryNames(kind, where string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	predicate, predTables, err := ls.rewritePredicate(kind, where)
+	predicate, predTables, err := ls.rewritePredicate(kind, where, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -945,11 +1002,11 @@ func (ls *LoadedSave) matchingEntryNames(kind, where string) ([]string, error) {
 	for t := range predTables {
 		needed[t] = true
 	}
-	from, err := fromClause(kind, needed)
+	from, err := fromClause(kind, needed, "")
 	if err != nil {
 		return nil, err
 	}
-	whereSQL, args, err := ls.whereClause(kind, predicate)
+	whereSQL, args, err := ls.whereClause(kind, predicate, ls.workingScope())
 	if err != nil {
 		return nil, err
 	}
@@ -1001,7 +1058,13 @@ func wrapWhere(where string, err error) error {
 // numeric/string literals, quoted identifiers, already-qualified refs — passes
 // through verbatim, so no hand-maintained keyword list is needed. It returns the
 // rewritten predicate and the set of sub-tables its columns reference.
-func (ls *LoadedSave) rewritePredicate(kind, expr string) (string, map[string]bool, error) {
+//
+// catalogCols (a spanning scope's catalog columns, else nil) lets a bare world_id
+// / sim_time token rewrite to mirror_saves.<col> and pulls the catalog table into
+// the referenced-tables set, so the caller appends the catalog JOIN. The catalog
+// columns take precedence over an identically named entity column (none collide
+// today) and come from the catalog DDL, not a parallel entity allowlist.
+func (ls *LoadedSave) rewritePredicate(kind, expr string, catalogCols map[string]string) (string, map[string]bool, error) {
 	reg := attrRegistry()[kind]
 	tables := map[string]bool{}
 	if strings.TrimSpace(expr) == "" {
@@ -1074,7 +1137,16 @@ func (ls *LoadedSave) rewritePredicate(kind, expr string) (string, map[string]bo
 			}
 			isCall := k < len(s) && s[k] == '('
 			if !dotted && !isCall {
-				if spec, ok := reg[strings.ToLower(word)]; ok {
+				lower := strings.ToLower(word)
+				if catalogCols != nil {
+					if src, ok := catalogCols[lower]; ok {
+						writeStr(quoteIdent(catalogTable) + "." + quoteIdent(src))
+						tables[catalogTable] = true
+						i = j
+						continue
+					}
+				}
+				if spec, ok := reg[lower]; ok {
 					writeStr(quoteIdent(spec.table) + "." + quoteIdent(spec.sourceColumn))
 					tables[spec.table] = true
 					i = j

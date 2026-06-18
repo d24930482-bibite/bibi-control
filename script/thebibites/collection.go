@@ -76,6 +76,16 @@ type EntityCollection struct {
 	kind  string
 	where string // raw, un-rewritten predicate; "" means unfiltered
 
+	// scope is the save-partition scope this collection's reads run under. nil ⇒
+	// the default single-working-partition scope (every existing single-save
+	// collection), so the working path is byte-identical. A non-nil read-only
+	// spanning scope (E3 world/workspace collections) makes this collection
+	// aggregate-only: mutation and Entity iteration are rejected, and aggregates
+	// push down across the scope's save_id set with world_id/sim_time as friendly
+	// columns. Mutation is per-save by construction (it cannot reach committed
+	// history or other worlds), so a read-only scope is a hard gate, not a hint.
+	scope SaveScope
+
 	// resolved memoizes the predicate push-down for Len/Iterate/Truth on a
 	// filtered collection so a len()+iteration pair runs the query once. Only set
 	// for a filtered collection (where != ""); unfiltered uses the identity table's
@@ -108,16 +118,36 @@ var (
 	_ starlark.HasAttrs = (*EntityCollection)(nil)
 )
 
-func (c *EntityCollection) String() string       { return c.kind + "s" }
-func (c *EntityCollection) Type() string         { return c.kind + "_collection" }
-func (c *EntityCollection) Freeze()              {}
-func (c *EntityCollection) Truth() starlark.Bool { return starlark.Bool(c.Len() > 0) }
+func (c *EntityCollection) String() string { return c.kind + "s" }
+func (c *EntityCollection) Type() string   { return c.kind + "_collection" }
+func (c *EntityCollection) Freeze()        {}
+
+// Truth reports whether the collection is non-empty. A spanning (read-only)
+// collection is aggregate-only and never materialized, so truthiness via Len would
+// panic; it is always truthy as a handle (use .count() for emptiness).
+func (c *EntityCollection) Truth() starlark.Bool {
+	if c.readOnly() {
+		return starlark.True
+	}
+	return starlark.Bool(c.Len() > 0)
+}
 func (c *EntityCollection) Hash() (uint32, error) {
 	return 0, fmt.Errorf("unhashable type: %s", c.Type())
 }
 
+// readOnly reports whether this collection runs under a read-only spanning scope
+// (E3 world/workspace collections). A read-only collection exposes ONLY aggregate/
+// where/group_by; set/set_expr/delete and Entity iteration are gated off.
+func (c *EntityCollection) readOnly() bool {
+	return c.scope != nil && !c.scope.writable()
+}
+
 // Attr exposes the query-backed narrowing/aggregate methods. Unknown names return
-// (nil, nil) for a clean Starlark AttributeError.
+// (nil, nil) for a clean Starlark AttributeError. A read-only spanning collection
+// (world.bibites / workspace.bibites) does NOT expose set/set_expr/delete: mutation
+// is per-save and cannot reach committed history or other worlds, so those names
+// fall through to a clean AttributeError (belt-and-suspenders: the builtins also
+// reject if ever reached directly).
 func (c *EntityCollection) Attr(name string) (starlark.Value, error) {
 	if v, ok := aggAttr(name, c.runAgg); ok {
 		return v, nil
@@ -127,20 +157,29 @@ func (c *EntityCollection) Attr(name string) (starlark.Value, error) {
 		return starlark.NewBuiltin("where", c.whereBuiltin), nil
 	case "group_by":
 		return starlark.NewBuiltin("group_by", c.groupByBuiltin), nil
-	case "set":
-		return starlark.NewBuiltin("set", c.setBuiltin), nil
-	case "set_expr":
-		return starlark.NewBuiltin("set_expr", c.setExprBuiltin), nil
-	case "delete":
-		return starlark.NewBuiltin("delete", c.deleteBuiltin), nil
+	case "set", "set_expr", "delete":
+		if c.readOnly() {
+			// Read-only spanning scope: hide the mutation surface entirely so it is a
+			// clean AttributeError, not a method that errors on call.
+			return nil, nil
+		}
+		switch name {
+		case "set":
+			return starlark.NewBuiltin("set", c.setBuiltin), nil
+		case "set_expr":
+			return starlark.NewBuiltin("set_expr", c.setExprBuiltin), nil
+		case "delete":
+			return starlark.NewBuiltin("delete", c.deleteBuiltin), nil
+		}
 	}
 	return nil, nil
 }
 
 // runAgg is EntityCollection's aggRunner: one scalar result over the (filtered)
-// collection.
+// collection, under this collection's scope (working by default; spanning for
+// world/workspace reads).
 func (c *EntityCollection) runAgg(call aggCall) (starlark.Value, error) {
-	return c.ls.scalarAgg(c.kind, c.where, call)
+	return c.ls.scalarAgg(c.kind, c.where, c.scope, call)
 }
 
 // SourceLoadedSave exposes the underlying working copy this collection enumerates
@@ -156,6 +195,11 @@ func (c *EntityCollection) SourceLoadedSave() *LoadedSave { return c.ls }
 // restricted to the AppendEntry-eligible kinds (bibite/egg); any other kind is
 // rejected loudly so a non-graftable collection cannot be passed to transfer.
 func (c *EntityCollection) EntryNames() ([]string, error) {
+	if c.readOnly() {
+		// A spanning collection is aggregate-only: it never materializes entries, so
+		// it cannot be a transfer source (mutation/transfer is per-save).
+		return nil, fmt.Errorf("transfer selection: a spanning %s collection is aggregate-only and not transferable; select from a single open world (s.%ss.where(...))", c.kind, c.kind)
+	}
 	switch c.kind {
 	case "bibite", "egg":
 	default:
@@ -165,13 +209,33 @@ func (c *EntityCollection) EntryNames() ([]string, error) {
 }
 
 func (c *EntityCollection) AttrNames() []string {
+	if c.readOnly() {
+		// Aggregate/where/group_by only — no set/set_expr/delete on a spanning scope.
+		return []string{"count", "group_by", "max", "mean", "median", "min", "quantile", "sum", "where"}
+	}
 	return []string{"count", "delete", "group_by", "max", "mean", "median", "min", "quantile", "set", "set_expr", "sum", "where"}
+}
+
+// rejectMutation is the belt-and-suspenders gate for the mutation builtins on a
+// read-only spanning collection. The Attr gate already hides set/set_expr/delete,
+// so this only fires if a mutation builtin is reached directly; it names the
+// per-save path the user should take instead. Mutation is per-save by construction
+// — it cannot reach committed history or other worlds.
+func (c *EntityCollection) rejectMutation(op string) error {
+	if !c.readOnly() {
+		return nil
+	}
+	return fmt.Errorf("cannot %s a spanning %s collection; mutation is per-save: open a world and use s.%ss.where(...).%s",
+		op, c.kind, c.kind, op)
 }
 
 // setBuiltin implements where(...).set(column, value): one batched scalar set over
 // every matching entity. value is a Starlark scalar constant applied to all
 // matched rows. Returns the number of rows staged.
 func (c *EntityCollection) setBuiltin(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	if err := c.rejectMutation("set"); err != nil {
+		return nil, err
+	}
 	var column string
 	var value starlark.Value
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "column", &column, "value", &value); err != nil {
@@ -191,6 +255,9 @@ func (c *EntityCollection) setBuiltin(thread *starlark.Thread, b *starlark.Built
 // ambiguous for TEXT columns): the second argument is always a SQL expression.
 // Returns the number of rows staged.
 func (c *EntityCollection) setExprBuiltin(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	if err := c.rejectMutation("set_expr"); err != nil {
+		return nil, err
+	}
 	var column, expr string
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "column", &column, "expr", &expr); err != nil {
 		return nil, err
@@ -209,6 +276,9 @@ func (c *EntityCollection) setExprBuiltin(thread *starlark.Thread, b *starlark.B
 // every entity, not the matches. prune cascades parent links (bibite only). Returns
 // the number staged for deletion.
 func (c *EntityCollection) deleteBuiltin(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	if err := c.rejectMutation("delete"); err != nil {
+		return nil, err
+	}
 	var prune bool
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "prune?", &prune); err != nil {
 		return nil, err
@@ -240,11 +310,19 @@ func (c *EntityCollection) whereBuiltin(thread *starlark.Thread, b *starlark.Bui
 		return nil, err
 	}
 	where := combineWhere(c.where, predicate)
+	// A spanning (read-only) collection is aggregate-only and never iterated, so it
+	// must NOT eagerly resolve entry_names (which runs the working-scope match path
+	// and would both ignore the spanning scope and materialize cross-world rows).
+	// It just carries the combined predicate + scope forward for the next aggregate.
+	if c.readOnly() {
+		return &EntityCollection{ls: c.ls, kind: c.kind, where: where, scope: c.scope}, nil
+	}
 	names, err := c.ls.matchingEntryNames(c.kind, where)
 	return &EntityCollection{
 		ls:            c.ls,
 		kind:          c.kind,
 		where:         where,
+		scope:         c.scope,
 		resolved:      names,
 		resolvedSet:   true,
 		resolveErr:    err,
@@ -257,7 +335,7 @@ func (c *EntityCollection) groupByBuiltin(thread *starlark.Thread, b *starlark.B
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "column", &col); err != nil {
 		return nil, err
 	}
-	return &GroupedCollection{ls: c.ls, kind: c.kind, where: c.where, groupCol: col}, nil
+	return &GroupedCollection{ls: c.ls, kind: c.kind, where: c.where, groupCol: col, scope: c.scope}, nil
 }
 
 // identityAccess returns the access handle for this kind's identity table.
@@ -297,6 +375,13 @@ func (c *EntityCollection) entryNames() ([]string, error) {
 // engine into a clean diagnostic, so a malformed predicate fails loudly instead of
 // silently iterating nothing.
 func (c *EntityCollection) resolveOrPanic() []string {
+	if c.readOnly() {
+		// A spanning collection is aggregate-only in v1: iterating/len-ing it would
+		// materialize cross-world rows and break the read-only guarantee. Len/Iterate
+		// cannot return an error, so panic loudly (recovered by the script engine into
+		// a clean diagnostic) instead of silently iterating an empty/working-scoped set.
+		panic(fmt.Errorf("spanning %s collections are aggregate-only; iterate a single open world (world.open().%ss)", c.kind, c.kind))
+	}
 	names, err := c.entryNames()
 	if err != nil {
 		panic(err)
@@ -342,6 +427,10 @@ type GroupedCollection struct {
 	kind     string
 	where    string
 	groupCol string
+	// scope is inherited from the EntityCollection group_by came from (nil ⇒
+	// working). A spanning scope makes group_by('world_id')/group_by('sim_time')
+	// resolve through the catalog and run aggregate-only across the scope's saves.
+	scope SaveScope
 }
 
 var (
@@ -371,5 +460,5 @@ func (g *GroupedCollection) AttrNames() []string {
 // runAgg is GroupedCollection's aggRunner: a dict keyed by group value over the
 // (filtered) collection grouped by groupCol.
 func (g *GroupedCollection) runAgg(call aggCall) (starlark.Value, error) {
-	return g.ls.groupedAgg(g.kind, g.where, g.groupCol, call)
+	return g.ls.groupedAgg(g.kind, g.where, g.groupCol, g.scope, call)
 }
