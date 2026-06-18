@@ -7,7 +7,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"testing"
+	"time"
 
 	tb "github.com/asemones/bibicontrol/saveparser/thebibites"
 )
@@ -181,6 +183,235 @@ func TestDumpJSONScalarPaths(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterate: %v", err)
 	}
+}
+
+// TestCopySavePartitionEqualsDoubleExtract proves the DB-derived history
+// partition is byte-identical (modulo save_id) to today's second-extract output
+// across every normalized table. It imports a save under a working key W, then
+// builds the dst partition H two ways — the OLD path (ReplaceExtractedSave of a
+// fresh ExtractTables(H, …)) and the NEW path (CopySavePartition(W, H)) — into
+// separate in-memory dbs and asserts the full row set for H matches across all
+// tables. It also asserts CopySavePartition is idempotent (delete-then-insert).
+func TestCopySavePartitionEqualsDoubleExtract(t *testing.T) {
+	ctx := context.Background()
+	const fixtureSaveW = "copy-working-key"
+	const fixtureSaveH = "copy-history-key"
+
+	fixturePath := filepath.Join(repoRoot(t), "testdata", "saves", "the-bibites", "autosave_20260301021357.zip")
+	archive, err := tb.ParseFile(fixturePath, nil)
+	if err != nil {
+		t.Fatalf("ParseFile(%q) error = %v", fixturePath, err)
+	}
+
+	// NEW path: import working under W, derive history under H via CopySavePartition.
+	newDB, err := OpenAndImport(ctx, "", tb.ExtractTables(fixtureSaveW, archive))
+	if err != nil {
+		t.Fatalf("OpenAndImport(new) error = %v", err)
+	}
+	defer newDB.Close()
+	if err := CopySavePartition(ctx, newDB, fixtureSaveW, fixtureSaveH); err != nil {
+		t.Fatalf("CopySavePartition() error = %v", err)
+	}
+
+	// OLD path: import the SAME working under W, then a SECOND ExtractTables(H, …)
+	// + ReplaceExtractedSave into the same db — exactly today's double-import.
+	oldDB, err := OpenAndImport(ctx, "", tb.ExtractTables(fixtureSaveW, archive))
+	if err != nil {
+		t.Fatalf("OpenAndImport(old) error = %v", err)
+	}
+	defer oldDB.Close()
+	if err := ReplaceExtractedSave(ctx, oldDB, tb.ExtractTables(fixtureSaveH, archive)); err != nil {
+		t.Fatalf("ReplaceExtractedSave(old hist) error = %v", err)
+	}
+
+	populated := 0
+	for _, table := range tb.NormalizedTables {
+		oldRows := dumpPartition(t, ctx, oldDB, table, fixtureSaveH)
+		newRows := dumpPartition(t, ctx, newDB, table, fixtureSaveH)
+		if !rowSetsEqual(oldRows, newRows) {
+			t.Fatalf("%s: derived history rows differ from double-extract (old=%d rows, new=%d rows)",
+				table.Table, len(oldRows), len(newRows))
+		}
+		// And history (new path) == working modulo save_id: the working rows under
+		// W with save_id rewritten to H must equal the derived history rows.
+		workingRows := dumpPartitionRewritingSaveID(t, ctx, newDB, table, fixtureSaveW, fixtureSaveH)
+		if !rowSetsEqual(workingRows, newRows) {
+			t.Fatalf("%s: derived history rows differ from working rows modulo save_id", table.Table)
+		}
+		if len(newRows) > 0 {
+			populated++
+		}
+	}
+	if populated == 0 {
+		t.Fatalf("no normalized table had rows; the byte-equality comparison was vacuous")
+	}
+
+	// Idempotency: a second CopySavePartition yields the same row counts.
+	before := dumpPartition(t, ctx, newDB, tb.NormalizedTables[0], fixtureSaveH)
+	if err := CopySavePartition(ctx, newDB, fixtureSaveW, fixtureSaveH); err != nil {
+		t.Fatalf("second CopySavePartition() error = %v", err)
+	}
+	for _, table := range tb.NormalizedTables {
+		got := countRows(t, ctx, newDB, table.Table, fixtureSaveH)
+		want := int64(len(dumpPartition(t, ctx, oldDB, table, fixtureSaveH)))
+		if got != want {
+			t.Fatalf("%s: rows after re-derive = %d, want %d (idempotency broken)", table.Table, got, want)
+		}
+	}
+	_ = before
+}
+
+// TestCopySavePartitionPerf reports the extract+import wall time of the OLD
+// double-extract path (ExtractTables+ReplaceExtractedSave twice) vs the NEW path
+// (one ExtractTables+ImportExtractedSave for the working partition + a single
+// set-based CopySavePartition for history) on the 3.1MB fixture. It is the
+// reviewer's perf evidence that the SECOND extract+import is gone; it does not
+// assert a threshold (timings vary by host) but logs both numbers and asserts the
+// new path imports the same row counts.
+func TestCopySavePartitionPerf(t *testing.T) {
+	if testing.Short() {
+		t.Skip("perf measurement; skipped in -short")
+	}
+	ctx := context.Background()
+	const wKey = "perf-working"
+	const hKey = "perf-history"
+	fixturePath := filepath.Join(repoRoot(t), "testdata", "saves", "the-bibites", "autosave_20260301021357.zip")
+	archive, err := tb.ParseFile(fixturePath, nil)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+
+	// OLD path: working extract+import, THEN a second history extract+import.
+	oldDB, err := Open("")
+	if err != nil {
+		t.Fatalf("Open(old): %v", err)
+	}
+	defer oldDB.Close()
+	if err := ApplyMigrations(ctx, oldDB); err != nil {
+		t.Fatalf("ApplyMigrations(old): %v", err)
+	}
+	oldStart := time.Now()
+	if err := ReplaceExtractedSave(ctx, oldDB, tb.ExtractTables(wKey, archive)); err != nil {
+		t.Fatalf("old working import: %v", err)
+	}
+	oldWorking := time.Since(oldStart)
+	hist2Start := time.Now()
+	if err := ReplaceExtractedSave(ctx, oldDB, tb.ExtractTables(hKey, archive)); err != nil {
+		t.Fatalf("old history import (2nd extract): %v", err)
+	}
+	oldHistory := time.Since(hist2Start)
+	oldTotal := oldWorking + oldHistory
+
+	// NEW path: working extract+import, THEN derive history via CopySavePartition.
+	newDB, err := Open("")
+	if err != nil {
+		t.Fatalf("Open(new): %v", err)
+	}
+	defer newDB.Close()
+	if err := ApplyMigrations(ctx, newDB); err != nil {
+		t.Fatalf("ApplyMigrations(new): %v", err)
+	}
+	newStart := time.Now()
+	if err := ReplaceExtractedSave(ctx, newDB, tb.ExtractTables(wKey, archive)); err != nil {
+		t.Fatalf("new working import: %v", err)
+	}
+	newWorking := time.Since(newStart)
+	copyStart := time.Now()
+	if err := CopySavePartition(ctx, newDB, wKey, hKey); err != nil {
+		t.Fatalf("new history copy: %v", err)
+	}
+	newCopy := time.Since(copyStart)
+	newTotal := newWorking + newCopy
+
+	t.Logf("OLD extract+import: working=%s + 2nd-extract-history=%s = total %s", oldWorking, oldHistory, oldTotal)
+	t.Logf("NEW extract+import: working=%s + DB-copy-history=%s = total %s", newWorking, newCopy, newTotal)
+
+	// Row counts must match the old double-extract for every table (the perf win
+	// must not change what is materialized).
+	for _, table := range tb.NormalizedTables {
+		o := countRows(t, ctx, oldDB, table.Table, hKey)
+		n := countRows(t, ctx, newDB, table.Table, hKey)
+		if o != n {
+			t.Fatalf("%s: new history rows = %d, want %d (perf path changed materialization)", table.Table, n, o)
+		}
+	}
+}
+
+// dumpPartition returns every column of every row for saveID in table, ordered
+// deterministically by all columns so two equal row sets compare equal.
+func dumpPartition(t *testing.T, ctx context.Context, db *sql.DB, table tb.NormalizedTableSpec, saveID string) [][]any {
+	t.Helper()
+	cols := make([]string, len(table.Fields))
+	for i, f := range table.Fields {
+		cols[i] = QuoteIdent(f.Column)
+	}
+	colList := strings.Join(cols, ", ")
+	query := fmt.Sprintf("SELECT %s FROM %s WHERE save_id = ? ORDER BY %s",
+		colList, QuoteIdent(table.Table), colList)
+	return scanAll(t, ctx, db, query, len(cols), saveID)
+}
+
+// dumpPartitionRewritingSaveID returns every row for srcSaveID in table with the
+// save_id column rewritten to dstSaveID, ordered like dumpPartition so it can be
+// compared against the derived dst partition (history == working modulo save_id).
+func dumpPartitionRewritingSaveID(t *testing.T, ctx context.Context, db *sql.DB, table tb.NormalizedTableSpec, srcSaveID, dstSaveID string) [][]any {
+	t.Helper()
+	cols := make([]string, len(table.Fields))
+	sel := make([]string, len(table.Fields))
+	for i, f := range table.Fields {
+		q := QuoteIdent(f.Column)
+		cols[i] = q
+		if f.Column == "save_id" {
+			sel[i] = "? AS " + q
+		} else {
+			sel[i] = q
+		}
+	}
+	query := fmt.Sprintf("SELECT %s FROM %s WHERE save_id = ? ORDER BY %s",
+		strings.Join(sel, ", "), QuoteIdent(table.Table), strings.Join(cols, ", "))
+	return scanAll(t, ctx, db, query, len(cols), dstSaveID, srcSaveID)
+}
+
+func scanAll(t *testing.T, ctx context.Context, db *sql.DB, query string, ncols int, args ...any) [][]any {
+	t.Helper()
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		t.Fatalf("query %q: %v", query, err)
+	}
+	defer rows.Close()
+	var out [][]any
+	for rows.Next() {
+		cells := make([]any, ncols)
+		ptrs := make([]any, ncols)
+		for i := range cells {
+			ptrs[i] = &cells[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		out = append(out, cells)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate: %v", err)
+	}
+	return out
+}
+
+func rowSetsEqual(a, b [][]any) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if len(a[i]) != len(b[i]) {
+			return false
+		}
+		for j := range a[i] {
+			if fmt.Sprintf("%T:%v", a[i][j], a[i][j]) != fmt.Sprintf("%T:%v", b[i][j], b[i][j]) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func repoRoot(t *testing.T) string {
