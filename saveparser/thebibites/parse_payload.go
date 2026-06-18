@@ -43,49 +43,53 @@ func parseEntryPayload(entry *Entry) parseResult {
 		entry.JSON = value
 	}
 
+	// Each entity already collected its scalars into its own slice, and result.Scalars
+	// is empty here, so we share the entity slice directly instead of copying it in
+	// (the copy was a top GC cost on bibite-heavy saves). applyParseResult later
+	// copies these into a.Scalars, so the shared backing is never mutated afterward.
 	switch entry.Kind {
 	case EntryScene:
 		result.Scene = parseScene(ctx, entry)
 		if result.Scene != nil {
-			result.Scalars = append(result.Scalars, result.Scene.Scalars...)
+			result.Scalars = result.Scene.Scalars
 		}
 	case EntryVars:
 		result.Vars = parseGenericJSON(ctx, entry, "vars")
 		if result.Vars != nil {
 			result.Generic = result.Vars
-			result.Scalars = append(result.Scalars, result.Vars.Scalars...)
+			result.Scalars = result.Vars.Scalars
 		}
 	case EntrySettings:
 		result.Settings = parseSettings(ctx, entry)
 		if result.Settings != nil {
-			result.Scalars = append(result.Scalars, result.Settings.Scalars...)
+			result.Scalars = result.Settings.Scalars
 		}
 	case EntrySpecies:
 		result.Species = parseSpecies(ctx, entry)
 		if result.Species != nil {
-			result.Scalars = append(result.Scalars, result.Species.Scalars...)
+			result.Scalars = result.Species.Scalars
 		}
 	case EntryBibite:
 		result.Bibite = parseBibite(ctx, entry)
 		if result.Bibite != nil {
-			result.Scalars = append(result.Scalars, result.Bibite.Scalars...)
+			result.Scalars = result.Bibite.Scalars
 		}
 	case EntryEgg:
 		result.Egg = parseEgg(ctx, entry)
 		if result.Egg != nil {
-			result.Scalars = append(result.Scalars, result.Egg.Scalars...)
+			result.Scalars = result.Egg.Scalars
 		}
 	case EntryPellets:
 		result.PelletData = parsePellets(ctx, entry)
 		if result.PelletData != nil {
-			result.Scalars = append(result.Scalars, result.PelletData.Scalars...)
+			result.Scalars = result.PelletData.Scalars
 		}
 	case EntryPheromones:
 		result.Pheromones, result.Scalars = parsePheromones(ctx, entry)
 	case EntryUnknownJSON:
 		result.Generic = parseGenericJSON(ctx, entry, "unknown_json")
 		if result.Generic != nil {
-			result.Scalars = append(result.Scalars, result.Generic.Scalars...)
+			result.Scalars = result.Generic.Scalars
 		}
 	}
 

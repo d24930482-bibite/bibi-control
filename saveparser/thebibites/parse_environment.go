@@ -1,6 +1,6 @@
 package thebibites
 
-import "fmt"
+import "strconv"
 
 func parsePellets(ctx *parserContext, entry *Entry) *PelletData {
 	raw, ok := asMap(entry.JSON)
@@ -37,7 +37,7 @@ func parsePelletGroup(entryName string, groupIndex int, value any, firstPelletIn
 		Index:     groupIndex,
 		EntryName: entryName,
 		Raw:       raw,
-		Scalars:   collectScalars(entryName, "pellet_group", fmt.Sprintf("%d", groupIndex), fmt.Sprintf("pellets.groups[%d]", groupIndex), raw),
+		Scalars:   collectScalars(entryName, "pellet_group", strconv.Itoa(groupIndex), "pellets.groups["+strconv.Itoa(groupIndex)+"]", raw),
 	}
 	if v, ok := stringAt(raw, "zone"); ok {
 		group.Zone = v
@@ -64,7 +64,8 @@ func parsePellet(entryName, zone string, groupIndex, groupPelletIndex, pelletInd
 	if !ok {
 		return nil
 	}
-	ownerID := fmt.Sprintf("%d", pelletIndex)
+	ownerID := strconv.Itoa(pelletIndex)
+	path := "pellets.groups[" + strconv.Itoa(groupIndex) + "].pellets[" + strconv.Itoa(groupPelletIndex) + "]"
 	pellet := &Pellet{
 		Index:            pelletIndex,
 		GroupIndex:       groupIndex,
@@ -72,7 +73,7 @@ func parsePellet(entryName, zone string, groupIndex, groupPelletIndex, pelletInd
 		EntryName:        entryName,
 		Zone:             zone,
 		Raw:              raw,
-		Scalars:          collectScalars(entryName, "pellet", ownerID, fmt.Sprintf("pellets.groups[%d].pellets[%d]", groupIndex, groupPelletIndex), raw),
+		Scalars:          collectScalars(entryName, "pellet", ownerID, path, raw),
 	}
 	if _, ok := mapAt(raw, "matterDecay"); ok {
 		pellet.HasMatterDecay = true
@@ -101,7 +102,7 @@ func parsePheromones(ctx *parserContext, entry *Entry) ([]Pheromone, []Scalar) {
 			Index:     i,
 			EntryName: entry.Name,
 			Raw:       itemRaw,
-			Scalars:   collectScalars(entry.Name, "pheromone", fmt.Sprintf("%d", i), fmt.Sprintf("pheromones[%d]", i), itemRaw),
+			Scalars:   collectScalars(entry.Name, "pheromone", strconv.Itoa(i), "pheromones["+strconv.Itoa(i)+"]", itemRaw),
 		}
 		if phero, ok := mapAt(itemRaw, "phero"); ok {
 			if heading, ok := phero["heading"]; ok {

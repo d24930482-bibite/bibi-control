@@ -2,10 +2,19 @@ package thebibites
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"strconv"
+
+	// goccy/go-json is a drop-in for encoding/json with a much faster
+	// decode-to-any path (the parser's hot path). It is imported as `json` for
+	// the whole file so the decoder's UseNumber() output type (json.Number) and
+	// the type-switch cases / json.Marshal calls below all refer to the SAME
+	// package consistently. goccy preserves UseNumber/json.Number semantics, the
+	// strict-EOF trailing-token check, and canonical Marshal output for the
+	// scalar types rawJSON handles; the scalar/RawJSON fixture tests are the
+	// arbiter of that equivalence.
+	json "github.com/goccy/go-json"
 )
 
 var utf8BOM = []byte{0xef, 0xbb, 0xbf}

@@ -1,6 +1,6 @@
 package thebibites
 
-import "fmt"
+import "strconv"
 
 func parseBibite(ctx *parserContext, entry *Entry) *Bibite {
 	raw, ok := asMap(entry.JSON)
@@ -84,7 +84,7 @@ func parseStomachContents(entryName string, bibiteID int64, hasBibiteID bool, bo
 			BibiteID:    bibiteID,
 			HasBibiteID: hasBibiteID,
 			Raw:         raw,
-			Scalars:     collectScalars(entryName, "bibite_stomach_content", ownerID, fmt.Sprintf("body.stomach.content[%d]", i), raw),
+			Scalars:     collectScalars(entryName, "bibite_stomach_content", ownerID, "body.stomach.content["+strconv.Itoa(i)+"]", raw),
 		}
 		if v, ok := stringAt(raw, "material"); ok {
 			content.Material = v
