@@ -123,6 +123,94 @@ func ReplaceExtractedSave(ctx context.Context, db *sql.DB, save tb.ExtractedSave
 	return nil
 }
 
+// CopySavePartition replaces all rows for dstSaveID with a copy of every row for
+// srcSaveID across every normalized table, rewriting only the save_id column. It
+// is the DB-side equivalent of ExtractTables(dstSaveID, …)+ReplaceExtractedSave
+// over a save whose other columns are already materialized under srcSaveID.
+//
+// The derived dst rows are byte-identical to the src rows modulo save_id: the
+// per-table INSERT … SELECT projects every column by name in schema order and
+// substitutes only save_id with the bound dstSaveID, so no value is reshuffled.
+// The table list and per-table column lists are derived from tb.NormalizedTables
+// (via allTables) so they cannot drift from the schema; bibite_mutation_refs is a
+// VIEW over physical tables and follows automatically (no copy needed).
+//
+// It mirrors ReplaceExtractedSave's transaction shape: one conn, BEGIN, deferred
+// ROLLBACK unless committed, deleteSaveRows(dst) first (a no-op for a never-seen
+// sha256 so history composes additively, correct on re-derive), then one
+// set-based INSERT … SELECT per table, then COMMIT.
+func CopySavePartition(ctx context.Context, db *sql.DB, srcSaveID, dstSaveID string) error {
+	if db == nil {
+		return fmt.Errorf("duckdb: db is nil")
+	}
+
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, "BEGIN TRANSACTION"); err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		}
+	}()
+
+	if err := deleteSaveRows(ctx, conn, dstSaveID); err != nil {
+		return err
+	}
+
+	for _, table := range tb.NormalizedTables {
+		insertCols, selectExprs := copySaveSelectList(table.Fields)
+		if insertCols == "" {
+			// A table with no fields cannot carry save_id, so there is nothing to
+			// copy; the generated metadata never produces this for normalized tables.
+			continue
+		}
+		quoted := QuoteIdent(table.Table)
+		stmt := fmt.Sprintf(
+			"INSERT INTO %s (%s) SELECT %s FROM %s WHERE save_id = ?",
+			quoted, insertCols, selectExprs, quoted)
+		if _, err := conn.ExecContext(ctx, stmt, dstSaveID, srcSaveID); err != nil {
+			return fmt.Errorf("copy %s rows %q -> %q: %w", table.Table, srcSaveID, dstSaveID, err)
+		}
+	}
+
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+// copySaveSelectList builds the positional INSERT column list and the matching
+// SELECT projection for CopySavePartition from a table's generated field specs.
+// Columns are emitted in schema order and quoted; the save_id column is projected
+// as a bound "?" (the dst save_id) in the SELECT while keeping its position so the
+// positional INSERT (cols…) lines up. The single "?" in selectExprs binds before
+// the WHERE's "?" — callers pass (dstSaveID, srcSaveID) in that order.
+func copySaveSelectList(fields []tb.NormalizedFieldSpec) (insertCols, selectExprs string) {
+	if len(fields) == 0 {
+		return "", ""
+	}
+	cols := make([]string, len(fields))
+	exprs := make([]string, len(fields))
+	for i, field := range fields {
+		quoted := QuoteIdent(field.Column)
+		cols[i] = quoted
+		if field.Column == "save_id" {
+			exprs[i] = "?"
+		} else {
+			exprs[i] = quoted
+		}
+	}
+	return strings.Join(cols, ", "), strings.Join(exprs, ", ")
+}
+
 type execContext interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }

@@ -363,20 +363,25 @@ func (w *Workspace) appendIngestedRevision(ctx context.Context, worldID string, 
 	// Dual-key DuckDB import. Ingest needs no reparse: the parsed archive is
 	// fresh from disk, so its typed projections are accurate — feed ExtractTables
 	// the parsed archive directly (do NOT copy reparseCommitted from commit.go).
+	// The save's extract + Appender import runs ONCE for the working partition;
+	// the history partition is derived inside DuckDB by a set-based save_id-
+	// rewriting copy of those working rows (no second extract+append). Working
+	// MUST run first — it is the copy source.
 	//
-	// History partition (immutable, keyed by the NEW revision sha256): the delete
-	// is a no-op for a never-seen sha256, so this composes additively and never
-	// disturbs any prior revision's partition (history accumulates).
-	hist := tb.ExtractTables(ref.SHA256, archive)
-	if err := duckdb.ReplaceExtractedSave(ctx, w.duck(), hist); err != nil {
-		return revisionstore.Revision{}, fmt.Errorf("workspace: IngestAutosave: import history partition: %w", err)
-	}
 	// Working partition (re-seeded to the new head, keyed by the world id): the
 	// delete drops the previous head's working rows and the insert seeds the new
 	// head. The worldID key never touches history.
 	working := tb.ExtractTables(worldID, archive)
 	if err := duckdb.ReplaceExtractedSave(ctx, w.duck(), working); err != nil {
 		return revisionstore.Revision{}, fmt.Errorf("workspace: IngestAutosave: re-seed working partition: %w", err)
+	}
+	// History partition (immutable, keyed by the NEW revision sha256): derive it
+	// from the just-seeded working rows via CopySavePartition, rewriting only
+	// save_id. The delete is a no-op for a never-seen sha256, so this composes
+	// additively and never disturbs any prior revision's partition (history
+	// accumulates), and the derived rows are byte-identical modulo save_id.
+	if err := duckdb.CopySavePartition(ctx, w.duck(), worldID, ref.SHA256); err != nil {
+		return revisionstore.Revision{}, fmt.Errorf("workspace: IngestAutosave: derive history partition: %w", err)
 	}
 
 	// Drop the cached working copy so a later OpenWorld lazy-reloads from the

@@ -201,29 +201,35 @@ func (w *Workspace) applyWorldCommit(ctx context.Context, worldID string, wc the
 		return revisionstore.Revision{}, err
 	}
 
-	// History partition (retained), keyed by the NEW revision sha256: the delete
-	// is a no-op for a never-seen sha256, so the insert adds a new history
-	// partition WITHOUT disturbing any prior revision's partition (history
-	// accumulates — the immutability invariant). ReplaceExtractedSave (not
-	// ImportExtractedSave) so migrations are not re-run; they ran on Open.
-	hist := tb.ExtractTables(wc.Revision.SHA256, projected)
-	if err := duckdb.ReplaceExtractedSave(ctx, w.duck(), hist); err != nil {
-		// The head + blob are durable in SQLite/blobstore; the working partition
-		// still reflects the prior head. Surface the error — the mirror is a
-		// rebuildable projection, never rolled back against the committed head.
-		return revisionstore.Revision{}, fmt.Errorf("workspace: import history partition: %w", err)
-	}
-
+	// The fresh projection feeds the DuckDB mirror ONCE: the working partition is
+	// imported via the Appender, then the history partition is derived inside
+	// DuckDB by a set-based save_id-rewriting copy of those working rows (no
+	// second extract+append). Working MUST run first — it is the copy source.
+	//
 	// Working partition (re-seeded to head), keyed by the world id: the delete
 	// drops the previous head's working rows and the insert seeds the new head.
 	// This is the only place the working partition is replaced; the worldID key
-	// never touches history.
+	// never touches history. ReplaceExtractedSave (not ImportExtractedSave) so
+	// migrations are not re-run; they ran on Open.
 	working := tb.ExtractTables(worldID, projected)
 	if err := duckdb.ReplaceExtractedSave(ctx, w.duck(), working); err != nil {
 		// Known, non-corrupting drift: the working partition lags at the prior head
 		// until a later successful commit re-seeds it (C2's Load does not re-import
 		// the working partition). The head + blob remain durable — never data loss.
 		return revisionstore.Revision{}, fmt.Errorf("workspace: re-seed working partition: %w", err)
+	}
+
+	// History partition (retained), keyed by the NEW revision sha256: derive it
+	// from the just-seeded working rows via CopySavePartition, rewriting only
+	// save_id. The delete is a no-op for a never-seen sha256, so the insert adds a
+	// new history partition WITHOUT disturbing any prior revision's partition
+	// (history accumulates — the immutability invariant), and the derived rows are
+	// byte-identical to the working rows modulo save_id.
+	if err := duckdb.CopySavePartition(ctx, w.duck(), worldID, wc.Revision.SHA256); err != nil {
+		// The head + blob are durable in SQLite/blobstore; the working partition
+		// still reflects the new head. Surface the error — the mirror is a
+		// rebuildable projection, never rolled back against the committed head.
+		return revisionstore.Revision{}, fmt.Errorf("workspace: derive history partition: %w", err)
 	}
 
 	// The cached working copy is consumed by this commit: prepareCommit Applied its

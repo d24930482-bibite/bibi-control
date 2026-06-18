@@ -138,23 +138,26 @@ func (w *Workspace) importWorldFromArchive(ctx context.Context, archive *tb.Arch
 		return revisionstore.World{}, fmt.Errorf("workspace: record first revision: %w", err)
 	}
 
-	// 6. Project the mirror under both keys into the shared per-workspace DuckDB.
-	// ExtractTables is a pure transform; extract once per key.
+	// 6. Project the mirror into the shared per-workspace DuckDB under both keys.
+	// The save's JSON→rows extract + DuckDB Appender import runs ONCE, for the
+	// working partition; the history partition is derived inside DuckDB by a
+	// set-based save_id-rewriting copy of those working rows (no second extract).
 	//
 	// Working partition (mutable, keyed by world id): ImportExtractedSave runs
 	// the idempotent migrations then a delete-by-save_id + insert (the delete is
-	// a no-op on a fresh world).
+	// a no-op on a fresh world). This is the copy SOURCE, so it MUST run first.
 	working := tb.ExtractTables(world.ID, archive)
 	if err := duckdb.ImportExtractedSave(ctx, w.duck(), working); err != nil {
 		return revisionstore.World{}, fmt.Errorf("workspace: import working partition: %w", err)
 	}
-	// History partition (immutable, keyed by revision sha256): use
-	// ReplaceExtractedSave directly so migrations are not re-run; the delete is a
-	// no-op for a never-seen sha256, so this composes additively and never
-	// disturbs another world's or revision's partition.
-	hist := tb.ExtractTables(ref.SHA256, archive)
-	if err := duckdb.ReplaceExtractedSave(ctx, w.duck(), hist); err != nil {
-		return revisionstore.World{}, fmt.Errorf("workspace: import history partition: %w", err)
+	// History partition (immutable, keyed by revision sha256): derive it from the
+	// just-imported working rows via CopySavePartition, which rewrites only
+	// save_id. The delete-then-insert is a no-op delete for a never-seen sha256,
+	// so this composes additively and never disturbs another world's or
+	// revision's partition — and yields rows byte-identical to the working rows
+	// modulo save_id.
+	if err := duckdb.CopySavePartition(ctx, w.duck(), world.ID, ref.SHA256); err != nil {
+		return revisionstore.World{}, fmt.Errorf("workspace: derive history partition: %w", err)
 	}
 
 	// 7. Return the world with its head set (re-read so the advanced
