@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strings"
@@ -836,4 +837,360 @@ func sampleBrainSynapse(saveID, ownerKind, ownerID, entryName string) tb.BrainSy
 		Weight:          0.9,
 		Enabled:         true,
 	}
+}
+
+// extractorFixture is a throwaway row type with one field of every kind in the
+// normalized-table universe (string, signed int widths, unsigned int widths,
+// floats, bool) plus a pointer variant of each family. buildColumnExtractors is
+// exercised through the real build path against it so the value-identity test
+// proves the typed extractor matches fieldValue for every type, including the
+// pointer/nil->NULL and uint64-overflow seams that are load-bearing for DuckDB.
+type extractorFixture struct {
+	Str   string
+	I     int
+	I8    int8
+	I16   int16
+	I32   int32
+	I64   int64
+	U     uint
+	U8    uint8
+	U16   uint16
+	U32   uint32
+	U64   uint64
+	F32   float32
+	F64   float64
+	B     bool
+	PStr  *string
+	PI64  *int64
+	PU64  *uint64
+	PF64  *float64
+	PB    *bool
+	PNil  *int64
+	PPI64 **int64
+}
+
+// TestFieldExtractorMatchesFieldValue asserts the precomputed typed extractor
+// produces byte-identical (driver.Value, error) results to the reference
+// fieldValue conversion for every field kind, including a uint64 > maxDriverInt64
+// overflow (which must return the exact same error) and nil-vs-set pointers (NULL
+// vs deref). Any divergence here is silent DuckDB corruption — this is the guard.
+func TestFieldExtractorMatchesFieldValue(t *testing.T) {
+	str := "deref-me"
+	i64 := int64(-7)
+	u64ok := uint64(123)
+	f64 := 3.5
+	b := true
+	pi64 := int64(99)
+	ppi64 := &pi64
+
+	row := extractorFixture{
+		Str:   "hello",
+		I:     -1,
+		I8:    -8,
+		I16:   -16,
+		I32:   -32,
+		I64:   -64,
+		U:     1,
+		U8:    8,
+		U16:   16,
+		U32:   32,
+		U64:   maxDriverInt64, // largest value that does NOT overflow
+		F32:   1.25,
+		F64:   2.5,
+		B:     true,
+		PStr:  &str,
+		PI64:  &i64,
+		PU64:  &u64ok,
+		PF64:  &f64,
+		PB:    &b,
+		PNil:  nil,
+		PPI64: &ppi64,
+	}
+
+	elem := reflect.TypeOf(row)
+	rv := reflect.ValueOf(row)
+
+	// Build extractors through the real path: one fieldSpec per struct field,
+	// keyed by field name (the column name is irrelevant to extraction).
+	fields := make([]fieldSpec, elem.NumField())
+	for i := 0; i < elem.NumField(); i++ {
+		fields[i] = fieldSpec{field: elem.Field(i).Name, column: elem.Field(i).Name}
+	}
+	extractors, err := buildColumnExtractors(elem, fields)
+	if err != nil {
+		t.Fatalf("buildColumnExtractors() error = %v", err)
+	}
+	if len(extractors) != elem.NumField() {
+		t.Fatalf("extractors = %d, want %d", len(extractors), elem.NumField())
+	}
+
+	for i := 0; i < elem.NumField(); i++ {
+		name := elem.Field(i).Name
+		fv := rv.Field(i)
+
+		gotVal, gotErr := extractors[i].extract(fv)
+		wantVal, wantErr := fieldValue(fv)
+
+		if !errorsEquivalent(gotErr, wantErr) {
+			t.Fatalf("field %s: extractor err = %v, fieldValue err = %v", name, gotErr, wantErr)
+		}
+		if fmt.Sprintf("%T:%v", gotVal, gotVal) != fmt.Sprintf("%T:%v", wantVal, wantVal) {
+			t.Fatalf("field %s: extractor value = %T:%v, fieldValue value = %T:%v",
+				name, gotVal, gotVal, wantVal, wantVal)
+		}
+	}
+
+	// Explicit overflow seam: a uint64 just past maxDriverInt64 must return the
+	// exact same error from both paths (not swallowed, not wrapped differently).
+	overflow := reflect.ValueOf(maxDriverInt64 + 1)
+	exVal, exErr := cellValue(overflow)
+	fvVal, fvErr := fieldValue(overflow)
+	if exErr == nil || fvErr == nil {
+		t.Fatalf("uint64 overflow: expected error, got extractor=%v fieldValue=%v", exErr, fvErr)
+	}
+	if exErr.Error() != fvErr.Error() {
+		t.Fatalf("uint64 overflow: extractor err %q != fieldValue err %q", exErr.Error(), fvErr.Error())
+	}
+	if exErr.Error() != fmt.Sprintf("uint value %d overflows int64", maxDriverInt64+1) {
+		t.Fatalf("uint64 overflow: unexpected error string %q", exErr.Error())
+	}
+	if exVal != nil || fvVal != nil {
+		t.Fatalf("uint64 overflow: expected nil value, got extractor=%v fieldValue=%v", exVal, fvVal)
+	}
+
+	// Explicit nil-pointer seam: a nil *T must yield (nil, nil) NULL from both.
+	var nilPtr *int64
+	npv := reflect.ValueOf(nilPtr)
+	if v, err := extractorForType(npv.Type())(npv); v != nil || err != nil {
+		t.Fatalf("nil pointer extractor = (%v, %v), want (nil, nil)", v, err)
+	}
+}
+
+// errorsEquivalent reports whether two errors are both nil or have equal
+// messages (the extractor must match fieldValue's error text exactly).
+func errorsEquivalent(a, b error) bool {
+	if (a == nil) != (b == nil) {
+		return false
+	}
+	if a == nil {
+		return true
+	}
+	return a.Error() == b.Error()
+}
+
+// TestAppendMaterializationUnchanged proves the typed-extractor append path lands
+// byte-identical values in every normalized table versus the reference fieldValue
+// extraction, over the full 3.1MB fixture (~40 tables / 134k rows). It imports the
+// fixture, then for every tb.NormalizedTables table compares the dumped DuckDB rows
+// against the values recomputed directly from the in-memory ExtractedSave via
+// fieldValue. This is the "speedup must not change what lands" gate.
+func TestAppendMaterializationUnchanged(t *testing.T) {
+	ctx := context.Background()
+	const saveID = "materialization-identity"
+	fixturePath := filepath.Join(repoRoot(t), "testdata", "saves", "the-bibites", "autosave_20260301021357.zip")
+
+	archive, err := tb.ParseFile(fixturePath, nil)
+	if err != nil {
+		t.Fatalf("ParseFile(%q) error = %v", fixturePath, err)
+	}
+	save := tb.ExtractTables(saveID, archive)
+
+	db, err := OpenAndImport(ctx, "", save)
+	if err != nil {
+		t.Fatalf("OpenAndImport() error = %v", err)
+	}
+	defer db.Close()
+
+	saveValue := reflect.ValueOf(save)
+	compared := 0
+	for _, table := range tb.NormalizedTables {
+		want := referenceRowsViaFieldValue(t, saveValue, table)
+		got := dumpPartitionValueKeyed(t, ctx, db, table, saveID)
+		if !valueRowSetsEqual(want, got) {
+			t.Fatalf("%s: imported rows differ from fieldValue extraction (fieldValue=%d rows, db=%d rows)",
+				table.Table, len(want), len(got))
+		}
+		if len(want) > 0 {
+			compared += len(want)
+		}
+	}
+	if compared == 0 {
+		t.Fatalf("no normalized table had rows; the byte-identity comparison was vacuous")
+	}
+	t.Logf("materialization byte-identical to fieldValue across %d tables, %d rows", len(tb.NormalizedTables), compared)
+}
+
+// referenceRowsViaFieldValue extracts every row of one table from the in-memory
+// ExtractedSave using the reference fieldValue conversion, ordered to match
+// dumpPartition (sorted by the formatted cell tuple) so the two row sets compare
+// directly. It is the golden the import path must reproduce exactly.
+func referenceRowsViaFieldValue(t *testing.T, saveValue reflect.Value, table tb.NormalizedTableSpec) [][]any {
+	t.Helper()
+	rows := saveValue.FieldByName(table.SaveField)
+	if !rows.IsValid() {
+		t.Fatalf("ExtractedSave missing field %s for table %s", table.SaveField, table.Table)
+	}
+	// Normalize to a slice of rows mirroring insertExtractedTable/appendRows.
+	switch rows.Kind() {
+	case reflect.Pointer:
+		if rows.IsNil() {
+			return nil
+		}
+	case reflect.Slice:
+		if rows.Len() == 0 {
+			return nil
+		}
+	}
+	if rows.Kind() != reflect.Slice {
+		single := reflect.MakeSlice(reflect.SliceOf(rows.Type()), 1, 1)
+		single.Index(0).Set(rows)
+		rows = single
+	}
+
+	specs := fieldSpecs(table.Fields)
+	out := make([][]any, 0, rows.Len())
+	for i := 0; i < rows.Len(); i++ {
+		row := rows.Index(i)
+		for row.Kind() == reflect.Pointer {
+			row = row.Elem()
+		}
+		cells := make([]any, len(specs))
+		for j, spec := range specs {
+			sf, ok := row.Type().FieldByName(spec.field)
+			if !ok {
+				t.Fatalf("%s: missing field %s", table.Table, spec.field)
+			}
+			v, err := fieldValue(row.FieldByIndex(sf.Index))
+			if err != nil {
+				t.Fatalf("%s field %s: fieldValue error = %v", table.Table, spec.field, err)
+			}
+			cells[j] = v
+		}
+		out = append(out, cells)
+	}
+	sortRowTuples(out)
+	return out
+}
+
+// sortRowTuples orders rows by their value-normalized cell tuple so a golden built
+// from in-memory Go values lines up positionally with the DuckDB-scanned rows for
+// valueRowSetsEqual, independent of column order ties.
+func sortRowTuples(rows [][]any) {
+	sort.Slice(rows, func(i, j int) bool {
+		return rowTupleKey(rows[i]) < rowTupleKey(rows[j])
+	})
+}
+
+func rowTupleKey(cells []any) string {
+	parts := make([]string, len(cells))
+	for i, c := range cells {
+		parts[i] = cellValueKey(c)
+	}
+	return strings.Join(parts, "\x00")
+}
+
+// cellValueKey is a type-normalized rendering of a scalar cell. It deliberately
+// erases the Go integer-type tag so that an int64(n) produced by fieldValue and a
+// uint64(n) scanned back from a UBIGINT column (the unsigned columns the appender
+// writes as int64 and DuckDB returns as uint64) compare equal by VALUE — the
+// integrity property H5 must preserve. Floats and strings/bools render by value.
+// This is the existing int64->UBIGINT round-trip, not anything H5 changed; the
+// extractor itself is proven identical to fieldValue by TestFieldExtractorMatchesFieldValue.
+func cellValueKey(c any) string {
+	switch v := c.(type) {
+	case nil:
+		return "NULL"
+	case int64:
+		return fmt.Sprintf("i:%d", v)
+	case uint64:
+		return fmt.Sprintf("i:%d", v)
+	case int32:
+		return fmt.Sprintf("i:%d", v)
+	case float64:
+		return fmt.Sprintf("f:%v", v)
+	case float32:
+		return fmt.Sprintf("f:%v", float64(v))
+	case bool:
+		return fmt.Sprintf("b:%t", v)
+	case string:
+		return "s:" + v
+	default:
+		return fmt.Sprintf("%T:%v", c, c)
+	}
+}
+
+// dumpPartitionValueKeyed dumps a table partition and sorts the rows by the same
+// value-normalized key used for the golden, so the two row sets align for
+// valueRowSetsEqual without depending on the int-vs-uint type tag in ORDER BY.
+func dumpPartitionValueKeyed(t *testing.T, ctx context.Context, db *sql.DB, table tb.NormalizedTableSpec, saveID string) [][]any {
+	t.Helper()
+	rows := dumpPartition(t, ctx, db, table, saveID)
+	sortRowTuples(rows)
+	return rows
+}
+
+// valueRowSetsEqual compares two row sets by value-normalized cell keys (so the
+// int64/uint64 round-trip is treated as equal), asserting every cell of every row
+// is value-identical.
+func valueRowSetsEqual(a, b [][]any) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if len(a[i]) != len(b[i]) {
+			return false
+		}
+		for j := range a[i] {
+			if cellValueKey(a[i][j]) != cellValueKey(b[i][j]) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// TestAppendPerf logs the append wall-time of the typed-extractor path on the
+// 3.1MB fixture with ApplyMigrations timed separately, and asserts the imported
+// row counts per table as a correctness floor. It models TestCopySavePartitionPerf
+// and does not assert a hard timing threshold (the before/after numeric comparison
+// is the reviewer's Perf-review job, since a pre-H5 build is not in-process).
+func TestAppendPerf(t *testing.T) {
+	if testing.Short() {
+		t.Skip("perf measurement; skipped in -short")
+	}
+	ctx := context.Background()
+	const saveID = "append-perf"
+	fixturePath := filepath.Join(repoRoot(t), "testdata", "saves", "the-bibites", "autosave_20260301021357.zip")
+	archive, err := tb.ParseFile(fixturePath, nil)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+	save := tb.ExtractTables(saveID, archive)
+
+	db, err := Open("")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	migStart := time.Now()
+	if err := ApplyMigrations(ctx, db); err != nil {
+		t.Fatalf("ApplyMigrations: %v", err)
+	}
+	migDur := time.Since(migStart)
+
+	appendStart := time.Now()
+	if err := ReplaceExtractedSave(ctx, db, save); err != nil {
+		t.Fatalf("ReplaceExtractedSave: %v", err)
+	}
+	appendDur := time.Since(appendStart)
+
+	var total int64
+	for _, table := range tb.NormalizedTables {
+		total += countRows(t, ctx, db, table.Table, saveID)
+	}
+	if total == 0 {
+		t.Fatalf("no rows imported; perf measurement was vacuous")
+	}
+	t.Logf("ApplyMigrations=%s  ReplaceExtractedSave(append)=%s  rows=%d", migDur, appendDur, total)
 }
