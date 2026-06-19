@@ -267,36 +267,42 @@ func TestNodesInfo_AliveAndLogs(t *testing.T) {
 	})
 }
 
-// TestNodesInfo_Detached verifies that a node with a persisted "running" row
-// but no active runtime entry is reported as liveness=="detached" with no
-// telemetry. This is the invariant: liveness comes from the active set, not
-// the persisted status column.
+// TestNodesInfo_Detached verifies that a node with a GENUINE persisted
+// "running" row but no active runtime entry on the querying handle is reported
+// as liveness=="detached" with no telemetry.
+//
+// This is the critical liveness invariant: the verdict must come from the
+// active-set membership (ws.Node), never from row.Status. A stale "running"
+// row whose process is gone (or simply not in the querying handle's in-memory
+// set) must read as detached.
+//
+// Strategy: start the node on workspace handle ws (persisted row becomes
+// status="running"). Then close ws WITHOUT calling KillNode — ws.Close kills
+// the process but does NOT update the persisted status, so the row stays
+// "running". Open a fresh daemon d2 over the same root with NO seeded handle.
+// d2.ws() opens its own workspace.Open handle, which has an empty nodes map.
+// The fresh handle sees the "running" row via PersistedNodes but ws.Node
+// returns (nil, false) → liveness="detached".
 func TestNodesInfo_Detached(t *testing.T) {
 	ctx := testCtx(t)
 	root := t.TempDir()
 
-	// Create the workspace and a world, start a node, then kill it (which sets
-	// persisted status to "stopped"). We actually need a stale "running" row,
-	// but we can't produce one via the public API (KillNode always flips to
-	// stopped). Instead, we use a fresh daemon handle (d2) that has an empty
-	// active set — the persisted "running" row from ws.StartNode is still
-	// there, but d2.ws() opens a new handle with empty nodes map, so
-	// ws.Node("n-detach") returns (nil, false) → detached.
-
+	// Create the workspace.
 	ws, err := workspace.Create(ctx, root, "owner", "detached-ws")
 	if err != nil {
 		t.Fatalf("workspace.Create: %v", err)
 	}
 	id := ws.ID()
-	// Explicit cleanup so we can close ws before opening d2.
-	wsCleanup := func() { _ = ws.Close() }
 
+	// Add a world so StartNode has a valid WorldID.
 	world, err := ws.AddWorld(ctx, testFixtureSave(t), "test-world-detach")
 	if err != nil {
-		wsCleanup()
+		_ = ws.Close()
 		t.Fatalf("AddWorld: %v", err)
 	}
 
+	// Start the node — this writes a persisted row with status="running".
+	// ConnectOnStart=false so we don't need a fake sim listener for this case.
 	_, _, err = ws.StartNode(ctx, workspace.StartNodeSpec{
 		WorldID:        world.ID,
 		NodeID:         "n-detach",
@@ -304,22 +310,25 @@ func TestNodesInfo_Detached(t *testing.T) {
 		ConnectOnStart: false,
 	})
 	if err != nil {
-		wsCleanup()
+		_ = ws.Close()
 		t.Fatalf("StartNode: %v", err)
 	}
 
-	// Kill the node (removes from active set, sets persisted status "stopped").
-	// Then open a fresh daemon (d2) with NO seeded handle so d2.ws() opens its
-	// own handle over the same root. The fresh handle has an empty active set.
-	// Note: the persisted row is "stopped" after KillNode, not "running" — but
-	// the detached verdict still fires because ws.Node returns (nil, false) for
-	// any node not in the in-memory set, regardless of persisted status.
-	_ = ws.KillNode(ctx, "n-detach") // best-effort — don't fail the test on kill error
+	// Close ws WITHOUT calling KillNode. ws.Close kills the OS process but
+	// intentionally does NOT update the persisted status row (see workspace.go
+	// "Status rows are not updated here"). The row remains status="running",
+	// giving us the genuine stale-running-row scenario.
+	//
+	// We MUST close ws before opening d2 to avoid two concurrent DuckDB writers
+	// on the same file.
+	if err := ws.Close(); err != nil {
+		// Close errors are non-fatal for this test's goal (row is still "running").
+		t.Logf("ws.Close: %v (non-fatal)", err)
+	}
 
-	// Close ws before opening d2 to avoid two writers on the same DuckDB file.
-	wsCleanup()
-
-	// Open d2 fresh — it will open the workspace lazily on the first request.
+	// Open d2 fresh — it will lazily open the workspace on the first request.
+	// Its workspace handle has an empty nodes map (no active node registrations),
+	// so ws.Node("n-detach") returns (nil, false) despite the "running" row.
 	d2 := api.New(root, "owner")
 	t.Cleanup(func() { _ = d2.Close() })
 
@@ -336,6 +345,7 @@ func TestNodesInfo_Detached(t *testing.T) {
 		t.Fatalf("decode nodes/info (d2): %v", err)
 	}
 
+	// Locate the n-detach entry.
 	var found map[string]any
 	for _, obj := range infos {
 		if obj["id"] == "n-detach" {
@@ -347,10 +357,18 @@ func TestNodesInfo_Detached(t *testing.T) {
 		t.Fatalf("n-detach not in nodes/info response (d2); got %v", infos)
 	}
 
+	// The persisted row is still "running" — assert the status field so the
+	// test proves we have a genuine stale-running row (not a stopped one).
+	if got := found["status"]; got != "running" {
+		t.Errorf("status = %v, want running (test invariant: must be a genuine stale running row)", got)
+	}
+
+	// Liveness must be "detached" because the querying handle has no active entry.
 	if got := found["liveness"]; got != "detached" {
 		t.Errorf("liveness = %v, want detached", got)
 	}
-	// No telemetry should be present.
+
+	// No telemetry should be present for a detached node.
 	if found["tps"] != nil {
 		t.Errorf("tps should be absent for detached node; got %v", found["tps"])
 	}
