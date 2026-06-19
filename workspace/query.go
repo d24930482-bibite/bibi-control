@@ -3,7 +3,9 @@ package workspace
 // query.go — read-only query methods for the workspace analytics mirror.
 //
 // C4 ships three read-only entry-points:
-//   - Query: SELECT over all history partitions in this workspace's DuckDB file.
+//   - Query: SELECT over all history partitions in this workspace's DuckDB file,
+//     with a prepended all-worlds world_saves CTE (save_id/world_id/sim_time) so
+//     callers can JOIN world_saves for world_id attribution (M1).
 //   - HistoryQuery: SELECT scoped to one world's history partitions, with a
 //     prepended world_saves CTE so callers can JOIN world_saves to stay in scope.
 //   - ensureReadOnly: the primary gate that rejects any non-SELECT statement
@@ -229,6 +231,21 @@ func (w *Workspace) readSceneSimTimes(ctx context.Context, conn *sql.Conn) (map[
 // The query is validated by ensureReadOnly before touching the database. Any
 // non-SELECT statement (including chained statements and leading-comment bypasses)
 // is rejected with ErrReadOnlyQuery.
+//
+// world_id attribution (M1): like HistoryQuery, the user query is wrapped with a
+// prepended CTE
+//
+//	WITH world_saves AS (SELECT save_id, world_id, sim_time FROM mirror_saves) <query>
+//
+// so an all-worlds caller can `JOIN world_saves USING (save_id)` for automatic
+// world_id / sim_time attribution WITHOUT hand-writing the mirror_saves JOIN. The
+// wrapper is prepend-only — a leading WITH that ensureReadOnly already accepts — and
+// runs AFTER ensureReadOnly so the gate sees the user's verbatim query, not the
+// wrapped form. The catalog is refreshed before the wrap so world_saves is current.
+// world_saves matches the name HistoryQuery uses (the all-worlds variant carries the
+// extra world_id/sim_time columns for attribution); a user CTE of the same name would
+// shadow it (pre-existing behavior, not new). The raw mirror_saves JOIN still works
+// for callers that prefer it.
 func (w *Workspace) Query(ctx context.Context, query string) ([]map[string]any, error) {
 	if err := ensureReadOnly(query); err != nil {
 		return nil, err
@@ -241,7 +258,15 @@ func (w *Workspace) Query(ctx context.Context, query string) ([]map[string]any, 
 	}
 	w.mu.Unlock()
 
-	rows, err := w.duck().QueryContext(ctx, query)
+	// Prepend-only wrapper (mirrors HistoryQuery, query.go): world_saves is added as a
+	// leading WITH so a caller can JOIN world_saves USING (save_id) without writing the
+	// mirror_saves JOIN. A query that already opens with its own WITH is the
+	// power-user/raw escape-hatch case — it keeps using the explicit `JOIN mirror_saves`
+	// form (the wrapper is the convenience path, not a CTE rewriter; see the
+	// HistoryQuery precedent). ensureReadOnly has already validated the verbatim query.
+	wrapped := "WITH world_saves AS (SELECT save_id, world_id, sim_time FROM mirror_saves) " + query
+
+	rows, err := w.duck().QueryContext(ctx, wrapped)
 	if err != nil {
 		return nil, fmt.Errorf("workspace: query: %w", err)
 	}
@@ -335,6 +360,15 @@ var forbiddenVerbs = map[string]bool{
 //     is what closes the CTE-wrapped-mutation bypass — a leading WITH no longer
 //     waves through `WITH x AS (SELECT 1) DELETE FROM t`, because DELETE is a
 //     bare top-level token. A real WITH…SELECT carries none of these verbs.
+//
+// Design note (M1): the bare-keyword blocklist deliberately ERRS SAFE. A read-only
+// query that happens to contain a forbidden word as a bare token in a position the
+// scanner cannot prove is benign (e.g. an unquoted identifier that collides with a
+// verb) is rejected rather than risk waving a mutation through. The literal/identifier/
+// comment-aware scan keeps the realistic false-positive rate near zero (verbs inside
+// strings/quoted identifiers are skipped), and the caller can always double-quote a
+// colliding identifier. This is an intentional, documented trade — NOT a bug to "fix"
+// by rewriting the keyword scanner into a full SQL parser (out of scope, high-risk).
 func ensureReadOnly(query string) error {
 	tok, _ := nextToken(query)
 	upper := strings.ToUpper(tok)

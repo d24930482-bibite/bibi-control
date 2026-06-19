@@ -500,3 +500,125 @@ func callBuiltin(t *testing.T, b *starlark.Builtin, args ...starlark.Value) (sta
 	t.Helper()
 	return b.CallInternal(&starlark.Thread{}, starlark.Tuple(args), nil)
 }
+
+// TestSpanningFromExprShape locks the UNION-ALL derived identity the spanning kinds
+// compile to: both carrier members project save_id FIRST (load-bearing — the scope
+// clause + catalog join bind to "<alias>".save_id) plus the friendly source columns,
+// aliased to the plural kind name the registry qualifies its columns against. A
+// dropped save_id here would make every per-world aggregate silently SUM across worlds.
+func TestSpanningFromExprShape(t *testing.T) {
+	expr, err := spanningFromExpr("synapse")
+	if err != nil {
+		t.Fatalf("spanningFromExpr(synapse): %v", err)
+	}
+	for _, want := range []string{
+		`FROM "bibite_brain_synapses"`,
+		` UNION ALL `,
+		`FROM "egg_brain_synapses"`,
+		`) AS "synapses"`,
+		`"save_id"`, // save_id must be projected (scope/catalog binding)
+		`"weight"`,
+		`"node_in"`,
+	} {
+		if !strings.Contains(expr, want) {
+			t.Errorf("spanningFromExpr(synapse) = %q, missing %q", expr, want)
+		}
+	}
+	// The projection must list save_id FIRST in BOTH members so the union is aligned
+	// and the scope clause's "<alias>".save_id binds.
+	if !strings.HasPrefix(strings.TrimPrefix(expr, "(SELECT "), `"save_id"`) {
+		t.Errorf("spanningFromExpr(synapse) must project save_id first: %q", expr)
+	}
+
+	// Gene: the friendly value/name/type resolve to number_value/gene_name/value_type,
+	// so the union must project those generated source columns.
+	geneExpr, err := spanningFromExpr("gene")
+	if err != nil {
+		t.Fatalf("spanningFromExpr(gene): %v", err)
+	}
+	for _, want := range []string{`"number_value"`, `"gene_name"`, `"value_type"`, `) AS "genes"`} {
+		if !strings.Contains(geneExpr, want) {
+			t.Errorf("spanningFromExpr(gene) = %q, missing %q", geneExpr, want)
+		}
+	}
+}
+
+// TestSpanningAggregateOverFixture proves the spanning push-down compiles a VALID
+// aggregate SELECT for the new kinds and returns the correct scoped count. It seeds a
+// minimal mirror_saves catalog (the one the spanning scope's IN-subquery + catalog
+// join require) mapping the fixture's single save_id to a synthetic world, then asserts
+// the spanning synapse/gene count equals the direct count(*) over the carrier tables
+// scoped to that save_id — the same single SELECT a bibite .count() runs, over the
+// UNION-ALL identity.
+func TestSpanningAggregateOverFixture(t *testing.T) {
+	ls := loadFixture(t)
+	ctx := ls.queryCtx()
+	db, err := ls.openDB(ctx)
+	if err != nil {
+		t.Fatalf("openDB: %v", err)
+	}
+	// Seed the catalog the spanning scope needs, mapping the fixture's save_id to one
+	// synthetic world so the IN-subquery + catalog join resolve.
+	if _, err := db.ExecContext(ctx,
+		"CREATE TABLE IF NOT EXISTS mirror_saves (save_id TEXT, world_id TEXT, tier TEXT, blob_present BOOLEAN, sim_time DOUBLE)"); err != nil {
+		t.Fatalf("create mirror_saves: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO mirror_saves (save_id, world_id, sim_time) VALUES (?, 'world-x', 1.0)", ls.saveID); err != nil {
+		t.Fatalf("seed mirror_saves: %v", err)
+	}
+
+	// Ground truth: direct count(*) over both carrier tables scoped to this save_id.
+	for kind, tables := range map[string][2]string{
+		"synapse": {"bibite_brain_synapses", "egg_brain_synapses"},
+		"node":    {"bibite_brain_nodes", "egg_brain_nodes"},
+		"gene":    {"bibite_genes", "egg_genes"},
+	} {
+		var want int64
+		row := db.QueryRowContext(ctx,
+			"SELECT (SELECT count(*) FROM "+tables[0]+" WHERE save_id = ?) + "+
+				"(SELECT count(*) FROM "+tables[1]+" WHERE save_id = ?)", ls.saveID, ls.saveID)
+		if err := row.Scan(&want); err != nil {
+			t.Fatalf("ground-truth count for %s: %v", kind, err)
+		}
+
+		// Spanning push-down (all-worlds scope; our single seeded world).
+		c := &EntityCollection{ls: ls, kind: kind, scope: NewWorkspaceScope()}
+		got, err := callMethod(t, c, "count")
+		if err != nil {
+			t.Fatalf("spanning %s count: %v", kind, err)
+		}
+		if int64(mustFloat(t, got)) != want {
+			t.Errorf("spanning %s count = %v, want %d (carrier-union ground truth)", kind, mustFloat(t, got), want)
+		}
+		// The world-scoped count must equal the same value (one seeded world).
+		cw := &EntityCollection{ls: ls, kind: kind, scope: NewWorldHistoryScope("world-x")}
+		gotW, err := callMethod(t, cw, "count")
+		if err != nil {
+			t.Fatalf("world-scoped %s count: %v", kind, err)
+		}
+		if int64(mustFloat(t, gotW)) != want {
+			t.Errorf("world-scoped %s count = %v, want %d", kind, mustFloat(t, gotW), want)
+		}
+	}
+
+	// A friendly-column predicate over a spanning kind compiles + runs (synapse
+	// where("enabled"), gene where("type == 'number'")) — proving resolveColumn binds
+	// the friendly column to the union projection.
+	syn := &EntityCollection{ls: ls, kind: "synapse", scope: NewWorkspaceScope()}
+	narrowed, err := callMethod(t, syn, "where", starlark.String("enabled"))
+	if err != nil {
+		t.Fatalf("synapse.where(enabled): %v", err)
+	}
+	if _, err := callMethod(t, narrowed.(*EntityCollection), "count"); err != nil {
+		t.Fatalf("synapse.where(enabled).count(): %v", err)
+	}
+	gene := &EntityCollection{ls: ls, kind: "gene", scope: NewWorkspaceScope()}
+	gn, err := callMethod(t, gene, "where", starlark.String("type == 'number'"))
+	if err != nil {
+		t.Fatalf("gene.where(type==number): %v", err)
+	}
+	if _, err := callMethod(t, gn.(*EntityCollection), "mean", starlark.String("value")); err != nil {
+		t.Fatalf("gene.where(type==number).mean(value): %v", err)
+	}
+}

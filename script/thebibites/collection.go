@@ -338,9 +338,15 @@ func (c *EntityCollection) groupByBuiltin(thread *starlark.Thread, b *starlark.B
 	return &GroupedCollection{ls: c.ls, kind: c.kind, where: c.where, groupCol: col, scope: c.scope}, nil
 }
 
-// identityAccess returns the access handle for this kind's identity table.
+// identityAccess returns the in-memory access handle for this kind's identity table,
+// or nil when there is none. Routed through tablesForKind so a spanning kind
+// (gene/node/synapse) resolves to its source tables, but ls.access is built ONLY over
+// the working entityTables (buildAccess in loadedsave.go), so a spanning kind always
+// returns nil here — it is aggregate-only and never materialized (the readOnly() gate
+// rejects iteration before this is reached). The single-save working kinds
+// (bibite/egg/pellet) resolve exactly as before.
 func (c *EntityCollection) identityAccess() *tableAccess {
-	tables := entityTables[c.kind]
+	tables := tablesForKind(c.kind)
 	if len(tables) == 0 {
 		return nil
 	}

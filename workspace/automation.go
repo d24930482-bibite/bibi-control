@@ -71,17 +71,24 @@ func (v *workspaceValue) Truth() starlark.Bool  { return starlark.True }
 func (v *workspaceValue) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable type: workspace") }
 
 func (v *workspaceValue) AttrNames() []string {
-	return []string{"add_world", "bibites", "eggs", "node", "nodes", "pellets", "poll", "query", "start_node", "transfer", "world", "worlds"}
+	return []string{"add_world", "bibites", "eggs", "genes", "node", "nodes", "pellets", "poll", "query", "start_node", "synapses", "transfer", "world", "worlds"}
 }
 
 func (v *workspaceValue) Attr(name string) (starlark.Value, error) {
 	switch name {
-	case "bibites", "eggs", "pellets":
-		// E3 spanning collections over EVERY world's history in the workspace (the
+	case "bibites", "eggs", "pellets", "genes", "synapses":
+		// E3/M1 spanning collections over EVERY world's history in the workspace (the
 		// object DSL — group_by('world_id')/where("world_id = …")/count, NO raw SQL/
 		// JOIN). Aggregate-only and read-only; the all-worlds scope is injected BY
 		// CONSTRUCTION via the catalog. workspace.query stays the power-user escape
 		// hatch.
+		//
+		// genes/synapses (M1) join bibites/eggs/pellets as spanning analytics kinds.
+		// The spanning brain-NODE aggregate is exposed as world.nodes (and via
+		// world.synapses/genes); workspace.nodes is NOT the spanning node kind — that
+		// name is the host-trusted cluster process-node listing (nodesBuiltin below),
+		// which must not be shadowed. Reach the all-worlds node aggregate through
+		// world.nodes or workspace.synapses/genes.
 		coll, err := v.ws.spanningCollection(v.ctx, thebibites.NewWorkspaceScope(), name)
 		if err != nil {
 			return nil, fmt.Errorf("workspace.%s: %w", name, err)
@@ -405,7 +412,7 @@ func (v *worldValue) Truth() starlark.Bool  { return starlark.True }
 func (v *worldValue) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable type: world") }
 
 func (v *worldValue) AttrNames() []string {
-	return []string{"bibites", "eggs", "evict_history", "head", "history_query", "id", "load", "name", "open", "pellets", "query", "sim_time", "unload"}
+	return []string{"bibites", "eggs", "evict_history", "genes", "head", "history_query", "id", "load", "name", "nodes", "open", "pellets", "query", "sim_time", "synapses", "unload"}
 }
 
 func (v *worldValue) Attr(name string) (starlark.Value, error) {
@@ -424,11 +431,14 @@ func (v *worldValue) Attr(name string) (starlark.Value, error) {
 			return starlark.None, nil
 		}
 		return starlark.Float(*v.world.SimTime), nil
-	case "bibites", "eggs", "pellets":
-		// E3 spanning collections over this world's whole retained history (the
+	case "bibites", "eggs", "pellets", "genes", "nodes", "synapses":
+		// E3/M1 spanning collections over this world's whole retained history (the
 		// object DSL — count/sum/mean/group_by('sim_time')/where, NO raw SQL/JOIN).
 		// Aggregate-only and read-only; scoped BY CONSTRUCTION to this world via the
-		// catalog. world.query/history_query stay the power-user escape hatch.
+		// catalog. world.query/history_query stay the power-user escape hatch. genes/
+		// nodes/synapses (M1) join bibites/eggs/pellets — unlike workspaceValue, world
+		// has no process-node builtin, so world.nodes is unambiguously the spanning
+		// brain-node aggregate.
 		coll, err := v.ws.spanningCollection(v.ctx, thebibites.NewWorldHistoryScope(v.world.ID), name)
 		if err != nil {
 			return nil, fmt.Errorf("world.%s: %w", name, err)

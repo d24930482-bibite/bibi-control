@@ -125,6 +125,52 @@ func TestQueryAttributesViaMirrorCatalog(t *testing.T) {
 	}
 }
 
+// TestQueryWorldSavesWrapper verifies the M1 all-worlds world_id-attribution CTE: a
+// raw all-worlds Query can JOIN world_saves USING (save_id) for per-world world_id
+// attribution WITHOUT hand-writing the mirror_saves JOIN, the wrapper is prepend-only
+// (a leading WITH ensureReadOnly accepts), and a mutating query through the wrapped
+// path is still rejected (the gate runs on the verbatim query, before the wrap).
+func TestQueryWorldSavesWrapper(t *testing.T) {
+	ctx := context.Background()
+	ws := newWorkspace(t, ctx)
+
+	worldA, err := ws.AddWorld(ctx, fixturePath(t, fixtureA), "world-a")
+	if err != nil {
+		t.Fatalf("AddWorld A: %v", err)
+	}
+	worldB, err := ws.AddWorld(ctx, fixturePath(t, fixtureB), "world-b")
+	if err != nil {
+		t.Fatalf("AddWorld B: %v", err)
+	}
+
+	// No hand-written mirror_saves JOIN — world_saves is injected by the wrapper.
+	rows, err := ws.Query(ctx,
+		"SELECT world_id, count(*) AS n FROM bibite_genes JOIN world_saves USING (save_id) GROUP BY world_id")
+	if err != nil {
+		t.Fatalf("Query with world_saves JOIN (no mirror_saves JOIN written): %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 world rows, got %d: %v", len(rows), rows)
+	}
+	ids := map[string]bool{}
+	for _, row := range rows {
+		wid, _ := row["world_id"].(string)
+		ids[wid] = true
+		if asInt64Col(t, row["n"]) < 1 {
+			t.Errorf("world %q gene count < 1", wid)
+		}
+	}
+	if !ids[worldA.ID] || !ids[worldB.ID] {
+		t.Errorf("world_saves attribution missing a world: A=%v B=%v (ids=%v)", ids[worldA.ID], ids[worldB.ID], ids)
+	}
+
+	// A mutating query through the wrapped path is still rejected (ensureReadOnly runs
+	// on the verbatim query before the wrap).
+	if _, err := ws.Query(ctx, "DELETE FROM save_archives"); !errors.Is(err, ErrReadOnlyQuery) {
+		t.Errorf("Query(DELETE) through wrapper: got %v, want ErrReadOnlyQuery", err)
+	}
+}
+
 // TestHistoryQueryScopesToOneWorld verifies that HistoryQuery with the
 // world_saves CTE restricts results to the specified world's revisions only.
 func TestHistoryQueryScopesToOneWorld(t *testing.T) {

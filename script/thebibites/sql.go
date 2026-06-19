@@ -31,9 +31,18 @@ func quoteIdent(identifier string) string {
 	return duckdb.QuoteIdent(identifier)
 }
 
-// identityTable returns the identity (one-row-per-entity) table backing a kind.
+// identityTable returns the identity table reference backing a kind: for a working
+// kind (bibite/egg/pellet) it is the generated identity table name; for a spanning
+// kind (gene/node/synapse) it is the synthesized UNION-ALL alias (spanningAlias)
+// that the scope clause / catalog join qualify their save_id against (fromClause
+// emits the union under that alias via spanningFromExpr). Routing through
+// tablesForKind is what makes the push-down generic over the spanning kinds without
+// teaching the working-path buildAccess about them.
 func identityTable(kind string) (string, error) {
-	tables := entityTables[kind]
+	if isSpanningKind(kind) {
+		return spanningAlias(kind), nil
+	}
+	tables := tablesForKind(kind)
 	if len(tables) == 0 {
 		return "", fmt.Errorf("unknown entity kind %q", kind)
 	}
@@ -324,6 +333,18 @@ func oneToManyTables() map[string]bool {
 // needs world_id / sim_time to resolve — the catalog is keyed 1:1 by save_id on
 // the identity table, so it never inflates aggregate rows.
 func fromClause(kind string, needed map[string]bool, catalogJoin string) (string, error) {
+	// Spanning kinds (gene/node/synapse) have a synthesized UNION-ALL identity, not a
+	// generated identity table with 1:1 sub-tables. Emit it BEFORE the sub-table loop
+	// so the union members (which ARE 1:many sub-tables in entitySubCollections) never
+	// reach the oneToManyTables() inflate-guard — for the spanning push-down they are
+	// the identity, never scalar-joined.
+	if isSpanningKind(kind) {
+		fromExpr, err := spanningFromExpr(kind)
+		if err != nil {
+			return "", err
+		}
+		return "FROM " + fromExpr + catalogJoin, nil
+	}
 	tables := entityTables[kind]
 	if len(tables) == 0 {
 		return "", fmt.Errorf("unknown entity kind %q", kind)
@@ -349,6 +370,50 @@ func fromClause(kind string, needed map[string]bool, catalogJoin string) (string
 		b.WriteString(quoteIdent(identity) + ".entry_name = " + quoteIdent(t) + ".entry_name")
 	}
 	b.WriteString(catalogJoin)
+	return b.String(), nil
+}
+
+// spanningFromExpr builds the UNION-ALL derived identity for a spanning kind
+// (gene/node/synapse), e.g.
+//
+//	(SELECT save_id, gene_name, value_type, number_value, … FROM bibite_genes
+//	 UNION ALL
+//	 SELECT save_id, gene_name, value_type, number_value, … FROM egg_genes) AS "genes"
+//
+// projecting EXACTLY spanningProjection(kind) — save_id plus every friendly source
+// column — in the same order for every member so the UNION-ALL is column-aligned.
+// save_id is carried through both members (load-bearing): the scope clause's
+// "<alias>".save_id IN (SELECT save_id FROM mirror_saves …) and the catalog LEFT JOIN
+// (1:1 by save_id, never inflates) bind to the union alias, so a per-world spanning
+// aggregate stays isolated. Dropping save_id from the projection would make every
+// per-world aggregate silently SUM across ALL worlds — a count() would not notice —
+// which is exactly the cross-world isolation invariant the workspace integration test
+// guards. The catalog JOIN keys on "<alias>".save_id and is appended by fromClause.
+func spanningFromExpr(kind string) (string, error) {
+	tables := spanningEntityTables[kind]
+	if len(tables) == 0 {
+		return "", fmt.Errorf("unknown spanning kind %q", kind)
+	}
+	cols := spanningProjection(kind)
+	projection := make([]string, len(cols))
+	for i, c := range cols {
+		projection[i] = quoteIdent(c)
+	}
+	colList := strings.Join(projection, ", ")
+
+	var b strings.Builder
+	b.WriteString("(")
+	for i, t := range tables {
+		if i > 0 {
+			b.WriteString(" UNION ALL ")
+		}
+		b.WriteString("SELECT ")
+		b.WriteString(colList)
+		b.WriteString(" FROM ")
+		b.WriteString(quoteIdent(t))
+	}
+	b.WriteString(") AS ")
+	b.WriteString(quoteIdent(spanningAlias(kind)))
 	return b.String(), nil
 }
 
