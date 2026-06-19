@@ -70,6 +70,34 @@ func (w *Workspace) AddWorldBytes(ctx context.Context, data []byte, name string)
 	return w.importWorldFromArchive(ctx, archive, data, tmpPath, name)
 }
 
+// ListWorlds returns the worlds in this workspace ordered by created_at then id.
+// It is a thin passthrough to the registry's ListWorlds, mirroring the
+// PersistedNodes pattern in node.go.
+func (w *Workspace) ListWorlds(ctx context.Context) ([]revisionstore.World, error) {
+	if w == nil {
+		return nil, fmt.Errorf("workspace: ListWorlds on nil workspace")
+	}
+	worlds, err := w.store().ListWorlds(ctx, w.id)
+	if err != nil {
+		return nil, fmt.Errorf("workspace: ListWorlds: %w", err)
+	}
+	return worlds, nil
+}
+
+// RevisionsForWorld returns every revision recorded against worldID, ordered
+// by insertion id (oldest→newest). It is a thin passthrough to the registry's
+// RevisionsForWorld.
+func (w *Workspace) RevisionsForWorld(ctx context.Context, worldID string) ([]revisionstore.Revision, error) {
+	if w == nil {
+		return nil, fmt.Errorf("workspace: RevisionsForWorld on nil workspace")
+	}
+	revs, err := w.store().RevisionsForWorld(ctx, worldID)
+	if err != nil {
+		return nil, fmt.Errorf("workspace: RevisionsForWorld: %w", err)
+	}
+	return revs, nil
+}
+
 // importWorldFromArchive is the shared AddWorld/AddWorldBytes core: parse is
 // already done. It holds the workspace mutex for the whole body because it is
 // the single DuckDB writer per workspace, and records registry/blob state
