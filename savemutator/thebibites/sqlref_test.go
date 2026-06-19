@@ -40,6 +40,7 @@ func TestStageSQLSetStagesResolvesAndCommits(t *testing.T) {
 		OwnerKind: "bibite",
 		OwnerID:   "42",
 		Path:      "genes.genes.Diet",
+		ValueType: "number",
 	}, 0.1, 0.55)
 	stageSQLRefSet(t, session, SQLValueRef{
 		Table:           "bibite_stomach_contents",
@@ -663,6 +664,97 @@ func TestSQLSetRejectsUnsafeSettingsValueRefs(t *testing.T) {
 	}
 }
 
+// TestResolveGeneColumnTypeMismatch pins the M8 write-guard: the gene resolver
+// must reject a wrong-typed gene cell loudly (a number routed into the string/bool
+// column, or a typeless cell), exactly like the settings resolver. A same-type
+// happy path passes with or without the guard, so this cross-type case is the test
+// that actually proves the fix. The happy paths are covered by
+// TestResolveSQLValueRefsAllowlist (bibite_genes/egg_genes value columns) and the
+// live gene write tests in script/thebibites.
+func TestResolveGeneColumnTypeMismatch(t *testing.T) {
+	valid := SQLValueRef{
+		Table:     "bibite_genes",
+		Column:    "number_value",
+		EntryName: "bibites/bibite_0.bb8",
+		OwnerKind: "bibite",
+		OwnerID:   "42",
+		Path:      "genes.genes.Diet",
+		ValueType: "number",
+	}
+
+	// Sanity: the matched happy path resolves cleanly, so the failures below are
+	// attributable to the type mismatch and not a mis-built ref.
+	if _, _, err := ResolveSQLValueRef(valid); err != nil {
+		t.Fatalf("ResolveSQLValueRef(matched number gene) error = %v, want nil", err)
+	}
+
+	tests := []struct {
+		name string
+		ref  SQLValueRef
+		want string
+	}{
+		{
+			name: "number column with string value_type",
+			ref: func() SQLValueRef {
+				ref := valid
+				ref.ValueType = "string"
+				return ref
+			}(),
+			want: "value_type",
+		},
+		{
+			name: "number column with bool value_type",
+			ref: func() SQLValueRef {
+				ref := valid
+				ref.ValueType = "bool"
+				return ref
+			}(),
+			want: "value_type",
+		},
+		{
+			name: "string column with number value_type",
+			ref: func() SQLValueRef {
+				ref := valid
+				ref.Column = "string_value"
+				ref.ValueType = "number"
+				return ref
+			}(),
+			want: "value_type",
+		},
+		{
+			name: "egg gene number column with string value_type",
+			ref: func() SQLValueRef {
+				ref := valid
+				ref.Table = "egg_genes"
+				ref.OwnerKind = "egg"
+				ref.OwnerID = "99"
+				ref.ValueType = "string"
+				return ref
+			}(),
+			want: "value_type",
+		},
+		{
+			name: "typeless gene cell",
+			ref: func() SQLValueRef {
+				ref := valid
+				ref.ValueType = ""
+				return ref
+			}(),
+			want: "value_type",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, _, err := ResolveSQLValueRef(tt.ref); err == nil {
+				t.Fatalf("ResolveSQLValueRef() error = nil, want %q", tt.want)
+			} else if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("ResolveSQLValueRef() error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestSQLSetExpectedGuardMismatchDoesNotChangeRaw(t *testing.T) {
 	archive := parseSyntheticArchive(t)
 	bibite := archive.Entry("bibites/bibite_0.bb8")
@@ -723,10 +815,15 @@ func addSQLRefPathCases(tests *[]sqlRefResolveCase, table string, base SQLValueR
 }
 
 func addSQLRefValueColumnCases(tests *[]sqlRefResolveCase, table string, base SQLValueRef, target Target, wantPath string) {
-	for _, column := range sortedSQLRefKeys(settingsValueColumnTypes) {
+	for _, column := range sortedSQLRefKeys(geneValueColumnTypes) {
 		ref := base
 		ref.Table = table
 		ref.Column = column
+		// The gene resolver now enforces value_type matches the target column
+		// (number_value->number, etc.), exactly like the settings resolver. Feed
+		// the column's own type so the happy-path allowlist cases keep passing; the
+		// cross-type rejection is pinned separately in TestResolveGeneColumnTypeMismatch.
+		ref.ValueType = geneValueColumnTypes[column]
 		*tests = append(*tests, sqlRefResolveCase{
 			name:       table + "." + column,
 			ref:        ref,
@@ -1102,6 +1199,7 @@ func addLiveGeneCases(t *testing.T, cases *[]liveSQLRefMutationCase, tables tb.E
 			OwnerKind: row.OwnerKind,
 			OwnerID:   row.OwnerID,
 			Path:      row.Path,
+			ValueType: string(valueType),
 		}
 		matcher := liveRowMatcher{
 			"EntryName": ref.EntryName,

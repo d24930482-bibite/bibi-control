@@ -166,6 +166,7 @@ func (ls *LoadedSave) setGeneValue(kind string, row *tb.GeneRow, v starlark.Valu
 		OwnerKind: row.OwnerKind,
 		OwnerID:   row.OwnerID,
 		Path:      row.Path,
+		ValueType: string(row.Type),
 	}
 	if err := ls.stageScalarSet(ref, old, staged, table, column, sqlType, []mirrorLocator{
 		{column: "entry_name", value: row.EntryName},
