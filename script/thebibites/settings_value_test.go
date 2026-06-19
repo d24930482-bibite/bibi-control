@@ -262,6 +262,144 @@ func TestSettingsMirrorEverything(t *testing.T) {
 	}
 }
 
+// TestSettingScopeGet is the contract proof for scope.get(key, default=None) —
+// the tolerant settings read that mirrors genes.get. It pins: a hit returns the
+// Setting handle (exact and recased), a genuine miss returns the default (None or
+// the supplied value), and a fold-collision is loud (never swallowed).
+func TestSettingScopeGet(t *testing.T) {
+	ls := loadFixture(t)
+
+	row, ok := firstSettingOfType(ls.tables.SettingsSimulationValues, tb.ScalarNumber)
+	if !ok {
+		t.Skip("fixture has no numeric simulation setting")
+	}
+	sc := &SettingScope{ls: ls, table: "settings_simulation_values", ownerID: simulationOwnerID}
+
+	// .get("name") returns a *Setting handle (not a bare value).
+	got, err := callMethod(t, sc, "get", starlark.String(row.SettingName))
+	if err != nil {
+		t.Fatalf("scope.get(%q): %v", row.SettingName, err)
+	}
+	h, ok := got.(*Setting)
+	if !ok {
+		t.Fatalf("scope.get(%q) is %T, want *Setting handle", row.SettingName, got)
+	}
+	if h.row.SettingName != row.SettingName {
+		t.Errorf("scope.get(%q) handle name=%q, want %q", row.SettingName, h.row.SettingName, row.SettingName)
+	}
+
+	// Recased lookup resolves the same handle (case-fold inherited from M3).
+	upper := toUpperAlpha(row.SettingName)
+	gotUp, err := callMethod(t, sc, "get", starlark.String(upper))
+	if err != nil {
+		t.Fatalf("scope.get(%q) recased: %v", upper, err)
+	}
+	if _, ok := gotUp.(*Setting); !ok {
+		t.Errorf("scope.get(%q) recased is %T, want *Setting", upper, gotUp)
+	}
+
+	// .get("absent") returns None (default default).
+	absent, err := callMethod(t, sc, "get", starlark.String("definitely_not_a_setting"))
+	if err != nil {
+		t.Fatalf("scope.get(absent): %v", err)
+	}
+	if absent != starlark.None {
+		t.Errorf("scope.get(absent)=%v, want None", absent)
+	}
+
+	// .get("absent", X) returns the supplied default.
+	withDefault, err := callMethod(t, sc, "get", starlark.String("definitely_not_a_setting"), starlark.Float(7.0))
+	if err != nil {
+		t.Fatalf("scope.get(absent, 7.0): %v", err)
+	}
+	if withDefault != starlark.Float(7.0) {
+		t.Errorf("scope.get(absent, 7.0)=%v, want 7.0", withDefault)
+	}
+
+	// Subscript stays loud on a miss (found=false -> KeyError), distinct from .get.
+	if v, found, err := sc.Get(starlark.String("definitely_not_a_setting")); err != nil || found || v != nil {
+		t.Errorf("scope[absent]: value=%v found=%v err=%v, want nil/false/nil (loud KeyError)", v, found, err)
+	}
+
+	// Collision is loud through .get — never the default.
+	ls.settingsOnce.Do(ls.buildSettingsIndex)
+	const (
+		canon1 = "M4Setting" // folds to "m4setting"
+		canon2 = "m4Setting" // also folds to "m4setting"
+		query  = "m4setting" // exact-matches neither
+	)
+	byName := ls.settingsIdx["settings_simulation_values"][simulationOwnerID]
+	idx1 := len(ls.tables.SettingsSimulationValues)
+	ls.tables.SettingsSimulationValues = append(ls.tables.SettingsSimulationValues,
+		tb.SettingValueRow{OwnerID: simulationOwnerID, SettingName: canon1, Type: tb.ScalarNumber, NumberValue: 10},
+		tb.SettingValueRow{OwnerID: simulationOwnerID, SettingName: canon2, Type: tb.ScalarNumber, NumberValue: 20},
+	)
+	byName[canon1] = idx1
+	byName[canon2] = idx1 + 1
+	if _, err := callMethod(t, sc, "get", starlark.String(query)); err == nil {
+		t.Errorf("scope.get(%q) collision: want error, got nil (default-swallowed)", query)
+	}
+	if _, err := callMethod(t, sc, "get", starlark.String(query), starlark.Float(99)); err == nil {
+		t.Errorf("scope.get(%q, default) collision: want error, got nil", query)
+	}
+}
+
+// TestSettingScopeIterate verifies `for s in scope` yields *Setting handles and
+// len(scope) matches the row count for that owner, in a deterministic order. This
+// closes the "iterate only on genes" gap for the settings name-keyed surface.
+func TestSettingScopeIterate(t *testing.T) {
+	ls := loadFixture(t)
+
+	if len(ls.tables.SettingsSimulationValues) == 0 {
+		t.Skip("fixture has no simulation settings")
+	}
+	sc := &SettingScope{ls: ls, table: "settings_simulation_values", ownerID: simulationOwnerID}
+
+	// Expected count: every simulation row shares the constant owner_id.
+	var want int
+	for _, r := range ls.tables.SettingsSimulationValues {
+		if r.OwnerID == simulationOwnerID {
+			want++
+		}
+	}
+
+	if got := sc.Len(); got != want {
+		t.Errorf("scope.Len()=%d, want %d", got, want)
+	}
+
+	it := sc.Iterate()
+	defer it.Done()
+	var v starlark.Value
+	n := 0
+	var prevName string
+	for it.Next(&v) {
+		h, ok := v.(*Setting)
+		if !ok {
+			t.Fatalf("scope iter yielded %T, want *Setting handle", v)
+		}
+		// Iteration order is name-sorted and stable (not Go map order).
+		if n > 0 && h.row.SettingName < prevName {
+			t.Errorf("scope iteration out of order: %q after %q", h.row.SettingName, prevName)
+		}
+		prevName = h.row.SettingName
+		n++
+	}
+	if n != want {
+		t.Errorf("iterated %d settings, want %d", n, want)
+	}
+
+	// An empty/absent material scope iterates zero times and len()s to 0.
+	empty := &SettingScope{ls: ls, table: "settings_material_values", ownerID: "DefinitelyNoSuchMaterial_M4"}
+	if got := empty.Len(); got != 0 {
+		t.Errorf("absent scope.Len()=%d, want 0", got)
+	}
+	emptyIt := empty.Iterate()
+	defer emptyIt.Done()
+	if emptyIt.Next(&v) {
+		t.Errorf("absent scope iterated a value, want none")
+	}
+}
+
 // TestSettingsViaScript: the end-to-end Starlark surface
 // save.settings.simulation["k"].set(v) stages and persists.
 func TestSettingsViaScript(t *testing.T) {

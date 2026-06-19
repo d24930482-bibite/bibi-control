@@ -105,8 +105,19 @@ func TestGeneRead(t *testing.T) {
 		t.Errorf("gene ClockSpeed=%v, want 1", float64(f))
 	}
 
+	// .get is tolerant: a miss returns None.
 	if got := callGene(t, first, "NoSuchGene"); got != starlark.None {
-		t.Errorf("missing gene returned %v, want None", got)
+		t.Errorf("genes.get(missing) returned %v, want None", got)
+	}
+
+	// Subscript is loud: a miss reports found=false, which Starlark surfaces as a
+	// KeyError. The asymmetry between ["X"] and .get is the whole point.
+	genesAttr, err := first.Attr("genes")
+	if err != nil {
+		t.Fatalf("Attr(genes): %v", err)
+	}
+	if _, found, err := genesAttr.(*GeneCollection).Get(starlark.String("NoSuchGene")); err != nil || found {
+		t.Errorf("genes[missing]: found=%v err=%v, want found=false err=nil (loud KeyError)", found, err)
 	}
 }
 
@@ -124,7 +135,7 @@ func TestGeneCollectionIter(t *testing.T) {
 	}
 
 	// Count must match the rows for this entity, and order/value must line up
-	// with gene(name) point lookups.
+	// with genes.get(name) tolerant lookups.
 	var want int
 	for _, g := range ls.tables.BibiteGenes {
 		if g.EntryName == first.entryName {
@@ -148,7 +159,7 @@ func TestGeneCollectionIter(t *testing.T) {
 		gv, _ := g.Attr("value")
 		if callGene(t, first, string(name.(starlark.String))) != gv {
 			// values are comparable starlark scalars (Float/Bool/String/None)
-			t.Errorf("genes iter value for %v disagrees with gene() lookup", name)
+			t.Errorf("genes iter value for %v disagrees with genes.get() lookup", name)
 		}
 		n++
 	}
@@ -269,19 +280,30 @@ func attrInt(t *testing.T, e *Entity, name string) int64 {
 	return n
 }
 
+// callGene reads one gene via the tolerant b.genes.get(name) surface (the read
+// that replaced the removed gene() point read). It returns the value-direct
+// scalar on a hit and None on a miss.
 func callGene(t *testing.T, e *Entity, name string) starlark.Value {
 	t.Helper()
-	attr, err := e.Attr("gene")
+	genesAttr, err := e.Attr("genes")
 	if err != nil {
-		t.Fatalf("Attr(gene): %v", err)
+		t.Fatalf("Attr(genes): %v", err)
 	}
-	fn, ok := attr.(*starlark.Builtin)
+	c, ok := genesAttr.(*GeneCollection)
 	if !ok {
-		t.Fatalf("gene attr is %T, want *Builtin", attr)
+		t.Fatalf("genes attr is %T, want *GeneCollection", genesAttr)
+	}
+	getAttr, err := c.Attr("get")
+	if err != nil {
+		t.Fatalf("genes.Attr(get): %v", err)
+	}
+	fn, ok := getAttr.(*starlark.Builtin)
+	if !ok {
+		t.Fatalf("genes.get attr is %T, want *Builtin", getAttr)
 	}
 	v, err := fn.CallInternal(&starlark.Thread{}, starlark.Tuple{starlark.String(name)}, nil)
 	if err != nil {
-		t.Fatalf("gene(%q): %v", name, err)
+		t.Fatalf("genes.get(%q): %v", name, err)
 	}
 	return v
 }

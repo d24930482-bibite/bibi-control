@@ -1580,7 +1580,7 @@ var SL_METHODS = {};
  'max', 'min', 'median', 'quantile', 'value', 'values', 'delete', 'clone',
  'append', 'query', 'history_query', 'info', 'state', 'status', 'stop', 'resume',
  'reload', 'kill', 'wait', 'ingest_autosave', 'load', 'unload', 'evict_history',
- 'gene', 'genes', 'material', 'simulation', 'independent', 'zones', 'bibites',
+ 'get', 'genes', 'material', 'simulation', 'independent', 'zones', 'bibites',
  'eggs', 'pellets', 'name', 'id', 'head', 'sim_time']
   .forEach(function(k) { SL_METHODS[k] = 1; });
 
@@ -1718,7 +1718,10 @@ var AC_TYPE_MEMBERS = {
   session:    ['bibites', 'commit', 'eggs', 'pellets', 'settings', 'sql', 'zones'],
   collection: ['count', 'delete', 'group_by', 'max', 'mean', 'median', 'min', 'quantile', 'set', 'set_expr', 'sum', 'where'],
   node:       ['id', 'ingest_autosave', 'info', 'kill', 'reload', 'resume', 'run_id', 'state', 'status', 'stop', 'wait', 'world'],
-  settings:   ['independent', 'material', 'simulation', 'zones']
+  settings:   ['independent', 'material', 'simulation', 'zones'],
+  // setting_scope: a name-keyed scope. scope["k"] is loud; scope.get("k", default)
+  // is tolerant; the scope is also iterable (for s in scope) yielding Setting handles.
+  setting_scope: ['get']
 };
 var AC_RESULT = {
   workspace:  { world: 'world', worlds: 'world', add_world: 'world', start_node: 'node', node: 'node', nodes: 'node', bibites: 'collection', eggs: 'collection', pellets: 'collection' },
@@ -1726,7 +1729,8 @@ var AC_RESULT = {
   session:    { bibites: 'collection', eggs: 'collection', pellets: 'collection', settings: 'settings' },
   collection: { where: 'collection', group_by: 'collection' },
   node:       { world: 'world' },
-  settings:   {}
+  settings:   { simulation: 'setting_scope', independent: 'setting_scope', material: 'setting_scope' },
+  setting_scope: {}
 };
 
 // acStripGroups(s) removes balanced (...) and [...] spans so a receiver chain

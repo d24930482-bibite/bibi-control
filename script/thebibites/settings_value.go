@@ -75,7 +75,10 @@ func (s *Settings) materialBuiltin(thread *starlark.Thread, b *starlark.Builtin,
 
 // SettingScope is one settings scope (simulation / independent / a single
 // material). It is a mapping keyed by setting name: subscripting returns a Setting
-// handle whose .value reads and .set(v) writes.
+// handle whose .value reads and .set(v) writes (loud KeyError on miss), and the
+// tolerant scope.get("name", default) returns the handle or default. It is also
+// iterable (`for s in scope`, yielding Setting handles) and supports len(scope),
+// matching the gene surface.
 type SettingScope struct {
 	ls      *LoadedSave
 	table   string
@@ -83,8 +86,11 @@ type SettingScope struct {
 }
 
 var (
-	_ starlark.Value   = (*SettingScope)(nil)
-	_ starlark.Mapping = (*SettingScope)(nil)
+	_ starlark.Value    = (*SettingScope)(nil)
+	_ starlark.Mapping  = (*SettingScope)(nil)
+	_ starlark.HasAttrs = (*SettingScope)(nil)
+	_ starlark.Iterable = (*SettingScope)(nil)
+	_ starlark.Sequence = (*SettingScope)(nil)
 )
 
 func (sc *SettingScope) String() string {
@@ -100,6 +106,7 @@ func (sc *SettingScope) Hash() (uint32, error) {
 // Get implements scope["setting_name"] -> Setting handle. The lookup is
 // case-insensitive; a missing setting reports found=false (Starlark raises a
 // KeyError); a case-collision (≥2 canonical names fold equal) returns a loud error.
+// scope.get("setting_name", default) is the tolerant counterpart.
 func (sc *SettingScope) Get(k starlark.Value) (starlark.Value, bool, error) {
 	name, ok := starlark.AsString(k)
 	if !ok {
@@ -114,6 +121,73 @@ func (sc *SettingScope) Get(k starlark.Value) (starlark.Value, bool, error) {
 	}
 	return &Setting{ls: sc.ls, table: sc.table, row: row}, true, nil
 }
+
+// Attr exposes the tolerant .get reader; every other name returns (nil, nil) so
+// Starlark reports a clean "setting_scope has no .<name> attribute".
+func (sc *SettingScope) Attr(name string) (starlark.Value, error) {
+	if name == "get" {
+		return starlark.NewBuiltin("get", sc.getBuiltin), nil
+	}
+	return nil, nil
+}
+
+func (sc *SettingScope) AttrNames() []string { return []string{"get"} }
+
+// getBuiltin implements scope.get(key, default=None): the tolerant counterpart to
+// the loud scope["key"] subscript. It returns the Setting handle on a hit and
+// `default` (None unless supplied) on a genuine miss, matching Starlark dict.get
+// exactly. A case-collision is NOT a miss — it propagates the loud error from
+// Get, so an ambiguous name can never silently resolve to default.
+func (sc *SettingScope) getBuiltin(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var key starlark.Value
+	dflt := starlark.Value(starlark.None)
+	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "key", &key, "default?", &dflt); err != nil {
+		return nil, err
+	}
+	v, found, err := sc.Get(key)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return dflt, nil
+	}
+	return v, nil
+}
+
+// Len reports the number of settings in this scope (for len(scope) and for-loop
+// setup). It walks the per-owner row index, not Go map order.
+func (sc *SettingScope) Len() int {
+	rows, err := sc.ls.settingRows(sc.table, sc.ownerID)
+	if err != nil {
+		return 0
+	}
+	return len(rows)
+}
+
+// Iterate yields a *Setting handle per row, in deterministic (name-sorted) order
+// so `for s in scope` and len(scope) agree and stay stable across runs.
+func (sc *SettingScope) Iterate() starlark.Iterator {
+	rows, _ := sc.ls.settingRows(sc.table, sc.ownerID)
+	return &settingScopeIterator{ls: sc.ls, table: sc.table, rows: rows}
+}
+
+type settingScopeIterator struct {
+	ls    *LoadedSave
+	table string
+	rows  []*tb.SettingValueRow
+	pos   int
+}
+
+func (it *settingScopeIterator) Next(p *starlark.Value) bool {
+	if it.pos >= len(it.rows) {
+		return false
+	}
+	*p = &Setting{ls: it.ls, table: it.table, row: it.rows[it.pos]}
+	it.pos++
+	return true
+}
+
+func (it *settingScopeIterator) Done() {}
 
 // Setting is a handle on one settings value: .value/.name/.type/.scope read it,
 // .set(v) stages a guarded write. It retains the full locator via a pointer into
