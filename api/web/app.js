@@ -768,21 +768,27 @@ function renderNodes(rows) {
               row.liveness === 'crashed' ? '&#9675;' : '&#10687;';
     var stateLabel = row.liveness.toUpperCase();
 
-    var topHtml =
-      '<div class="node-top">' +
-        '<span class="node-dot">' + dot + '</span>' +
-        '<span class="node-name">' + escapeHtml(row.id) + '</span>' +
-        '<span class="node-state">' + stateLabel + '</span>' +
-      '</div>';
+    // top section: static markup only, no onclick — safe to set via innerHTML
+    var topDiv = document.createElement('div');
+    topDiv.className = 'node-top';
+    topDiv.innerHTML =
+      '<span class="node-dot">' + dot + '</span>' +
+      '<span class="node-name">' + escapeHtml(row.id) + '</span>' +
+      '<span class="node-state">' + stateLabel + '</span>';
 
-    var worldHtml =
-      '<div class="node-world" onclick="focusWorld(' + JSON.stringify(row.world_id) + ')" title="bound world">' +
-        '<span class="nw-ico">&#11041;</span> world ' +
-        '<span class="nw-name">' + escapeHtml(row.world_id) + '</span>' +
-      '</div>';
+    // node-world: create as a real element so we can setAttribute onclick with
+    // single-quoted JS arg — avoids the JSON.stringify double-quote inside
+    // an innerHTML attribute string (which the HTML parser would mis-tokenise).
+    var worldDiv = document.createElement('div');
+    worldDiv.className = 'node-world';
+    worldDiv.title = 'bound world';
+    worldDiv.setAttribute('onclick', "focusWorld('" + row.world_id.replace(/'/g, "\\'") + "')");
+    worldDiv.innerHTML =
+      '<span class="nw-ico">&#11041;</span> world ' +
+      '<span class="nw-name">' + escapeHtml(row.world_id) + '</span>';
 
-    // telemetry block (alive only, feature-detect each field)
-    var metricsHtml = '';
+    // telemetry block (alive only, feature-detect each field); no onclick here
+    var metricsDiv = null;
     if (row.liveness === 'alive') {
       var parts = [];
       if (row.tps != null) {
@@ -811,37 +817,68 @@ function renderNodes(rows) {
         parts.push('paused: ' + pausedStr + autosaveStr);
       }
       if (parts.length) {
-        metricsHtml = '<div class="node-metrics">' + parts.join('<br>') + '</div>';
+        metricsDiv = document.createElement('div');
+        metricsDiv.className = 'node-metrics';
+        metricsDiv.innerHTML = parts.join('<br>');
       }
     } else if (row.liveness === 'crashed') {
+      metricsDiv = document.createElement('div');
+      metricsDiv.className = 'node-metrics dim';
       var exitStr = row.exit_code != null ? ' exit code <span class="m-val">' + escapeHtml(String(row.exit_code)) + '</span>' : '';
-      metricsHtml = '<div class="node-metrics dim">crashed' + exitStr + '</div>';
+      metricsDiv.innerHTML = 'crashed' + exitStr;
     } else {
       // detached
-      metricsHtml = '<div class="node-metrics dim">persisted row, no live handle</div>';
+      metricsDiv = document.createElement('div');
+      metricsDiv.className = 'node-metrics dim';
+      metricsDiv.textContent = 'persisted row, no live handle';
     }
 
-    // action buttons by liveness
+    // action buttons: create as real elements and setAttribute onclick with
+    // single-quoted JS string args — same pattern as renderWorlds setAttribute.
+    // This avoids JSON.stringify double-quotes corrupting an innerHTML attribute.
     var id = row.id;
-    var actionsHtml = '<div class="node-actions">';
+    var escapedId = id.replace(/'/g, "\\'");  // single-quote-safe id for JS strings
+    var actionsDiv = document.createElement('div');
+    actionsDiv.className = 'node-actions';
     if (row.liveness === 'alive') {
-      actionsHtml +=
-        '<button class="btn btn-sm" onclick="nodeAction(' + JSON.stringify(id) + ',\'stop\')">&#9208; stop</button>' +
-        '<button class="btn btn-sm" onclick="nodeAction(' + JSON.stringify(id) + ',\'resume\')">&#9654; resume</button>' +
-        '<button class="btn btn-sm" onclick="nodeAction(' + JSON.stringify(id) + ',\'reload\')">&#10231; reload</button>' +
-        '<button class="btn btn-sm" onclick="nodeAction(' + JSON.stringify(id) + ',\'kill\')">&#10005; kill</button>';
+      var btnDefs = [
+        ['&#9208; stop',   "nodeAction('" + escapedId + "','stop')"],
+        ['&#9654; resume', "nodeAction('" + escapedId + "','resume')"],
+        ['&#10231; reload',"nodeAction('" + escapedId + "','reload')"],
+        ['&#10005; kill',  "nodeAction('" + escapedId + "','kill')"]
+      ];
+      btnDefs.forEach(function(b) {
+        var btn = document.createElement('button');
+        btn.className = 'btn btn-sm';
+        btn.innerHTML = b[0];
+        btn.setAttribute('onclick', b[1]);
+        actionsDiv.appendChild(btn);
+      });
     } else if (row.liveness === 'crashed') {
-      actionsHtml +=
-        '<button class="btn btn-sm" onclick="openLogs(' + JSON.stringify(id) + ')">view logs</button>';
+      var btn = document.createElement('button');
+      btn.className = 'btn btn-sm';
+      btn.textContent = 'view logs';
+      btn.setAttribute('onclick', "openLogs('" + escapedId + "')");
+      actionsDiv.appendChild(btn);
     } else {
-      // detached
-      actionsHtml +=
-        '<button class="btn btn-sm" onclick="toast(\'reconnect not yet implemented\')">reconnect</button>' +
-        '<button class="btn btn-sm" onclick="toast(\'drop row (U14)\')">drop row</button>';
+      // detached — stubs (real drop-row is U14)
+      var btnR = document.createElement('button');
+      btnR.className = 'btn btn-sm';
+      btnR.textContent = 'reconnect';
+      btnR.setAttribute('onclick', "toast('reconnect not yet implemented')");
+      var btnD = document.createElement('button');
+      btnD.className = 'btn btn-sm';
+      btnD.textContent = 'drop row';
+      btnD.setAttribute('onclick', "toast('drop row (U14)')");
+      actionsDiv.appendChild(btnR);
+      actionsDiv.appendChild(btnD);
     }
-    actionsHtml += '</div>';
 
-    div.innerHTML = topHtml + worldHtml + metricsHtml + actionsHtml;
+    // Assemble card by appending each piece — no onclick in any innerHTML string.
+    div.appendChild(topDiv);
+    div.appendChild(worldDiv);
+    if (metricsDiv) div.appendChild(metricsDiv);
+    div.appendChild(actionsDiv);
     list.appendChild(div);
   });
 
