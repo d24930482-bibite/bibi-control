@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"time"
 
 	"github.com/asemones/bibicontrol/duckdb"
 	"github.com/asemones/bibicontrol/ipc"
@@ -69,7 +70,7 @@ func (v *workspaceValue) Truth() starlark.Bool  { return starlark.True }
 func (v *workspaceValue) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable type: workspace") }
 
 func (v *workspaceValue) AttrNames() []string {
-	return []string{"add_world", "bibites", "eggs", "node", "nodes", "pellets", "query", "start_node", "transfer", "world", "worlds"}
+	return []string{"add_world", "bibites", "eggs", "node", "nodes", "pellets", "poll", "query", "start_node", "transfer", "world", "worlds"}
 }
 
 func (v *workspaceValue) Attr(name string) (starlark.Value, error) {
@@ -97,6 +98,8 @@ func (v *workspaceValue) Attr(name string) (starlark.Value, error) {
 		return starlark.NewBuiltin("node", v.nodeBuiltin), nil
 	case "start_node":
 		return starlark.NewBuiltin("start_node", v.startNodeBuiltin), nil
+	case "poll":
+		return starlark.NewBuiltin("poll", v.pollBuiltin), nil
 	case "query":
 		return starlark.NewBuiltin("query", v.queryBuiltin), nil
 	case "transfer":
@@ -590,7 +593,7 @@ func (v *nodeValue) Truth() starlark.Bool  { return starlark.True }
 func (v *nodeValue) Hash() (uint32, error) { return 0, fmt.Errorf("unhashable type: node") }
 
 func (v *nodeValue) AttrNames() []string {
-	return []string{"id", "ingest_autosave", "info", "kill", "reload", "resume", "run_id", "state", "status", "stop", "world"}
+	return []string{"id", "ingest_autosave", "info", "kill", "reload", "resume", "run_id", "state", "status", "stop", "wait", "world"}
 }
 
 func (v *nodeValue) Attr(name string) (starlark.Value, error) {
@@ -617,6 +620,8 @@ func (v *nodeValue) Attr(name string) (starlark.Value, error) {
 		return starlark.NewBuiltin("ingest_autosave", v.ingestAutosaveBuiltin), nil
 	case "kill":
 		return starlark.NewBuiltin("kill", v.killBuiltin), nil
+	case "wait":
+		return starlark.NewBuiltin("wait", v.waitBuiltin), nil
 	default:
 		return nil, nil
 	}
@@ -842,4 +847,275 @@ func evictResultToDict(r EvictResult) *starlark.Dict {
 	_ = d.SetKey(starlark.String("refused_head"), starlark.MakeInt(r.RefusedHead))
 	_ = d.SetKey(starlark.String("refused_shared"), starlark.MakeInt(r.RefusedShared))
 	return d
+}
+
+// ---------------------------------------------------------------------------
+// Blocking automation loops: node.wait(...) and workspace.poll(...)
+// ---------------------------------------------------------------------------
+//
+// These are the foreground, imperative loop primitives. Each BLOCKS inside a
+// single RunAutomation cycle: node.wait polls live telemetry until a condition
+// holds; workspace.poll runs a Starlark body until it returns truthy. They let an
+// operator write "resume; wait until sim_time X; stop; ingest" top-to-bottom
+// without leaving the run — the host owns the loop, so the Starlark side needs no
+// while/sleep (which the language deliberately lacks).
+//
+// Concurrency: a parked wait/poll holds NO workspace lock. NodeInfo runs without
+// w.mu (node_control.go) and the inter-poll sleep is a bare select on the run
+// context, so other runs and queries on the same workspace proceed while one run
+// is parked — there is deliberately no whole-run/per-workspace lock. The price is
+// that state can move under a long run: code AFTER a wait must re-read (call
+// info() / re-open the world) rather than trust a pre-wait snapshot.
+//
+// Bounding: wall-clock is bounded by the per-call timeout. A sleeping wait burns
+// no Starlark steps, so the engine's MaxExecutionSteps budget does NOT bound it —
+// the timeout does. A hard run-context cancel (the UI's cancel button) interrupts
+// the parked select immediately and surfaces the engine's standard "cancelled"
+// diagnostic; a timeout is graceful (returns timed_out=True, never raises).
+//
+// PRINT STREAMING — follow-on, NOT built yet. During a long wait/poll, anything
+// the script print()s is buffered by the engine's thread.Print closure
+// (script/engine.go) and only lands in script.Result.Output when the run RETURNS.
+// So a multi-minute wait shows no output until it finishes. Making the notebook
+// surface progress live needs the host to expose an incremental output sink
+// (stream Output) instead of returning one final string — a daemon-side change
+// tracked in the design doc. Until then, prefer a short poll_every plus a final
+// printed summary.
+
+const defaultPollInterval = time.Second
+
+// node.wait(sim_time=, paused=, autosave_after=, timeout=, poll_every=) → dict.
+// Blocks polling node.info() until every supplied condition holds (AND), or until
+// the required timeout elapses. timeout is GRACEFUL: on expiry it returns
+// {timed_out: True} with the latest info rather than raising. Returns
+// {"info": <info dict>, "timed_out": bool, "waited": <seconds>}.
+func (v *nodeValue) waitBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var simTimeV, pausedV, autosaveAfterV, timeoutV, pollEveryV starlark.Value
+	if err := starlark.UnpackArgs(b.Name(), args, kwargs,
+		"sim_time?", &simTimeV,
+		"paused?", &pausedV,
+		"autosave_after?", &autosaveAfterV,
+		"timeout?", &timeoutV,
+		"poll_every?", &pollEveryV,
+	); err != nil {
+		return nil, err
+	}
+
+	pred, err := buildWaitPredicate(simTimeV, pausedV, autosaveAfterV)
+	if err != nil {
+		return nil, fmt.Errorf("node.wait: %w", err)
+	}
+	if pred == nil {
+		return nil, fmt.Errorf("node.wait: at least one condition is required (sim_time=, paused=, or autosave_after=)")
+	}
+	timeout, err := requireDuration("node.wait", "timeout", timeoutV)
+	if err != nil {
+		return nil, err
+	}
+	pollEvery, err := optionalDuration("node.wait", "poll_every", pollEveryV, defaultPollInterval)
+	if err != nil {
+		return nil, err
+	}
+
+	// Park OUTSIDE any lock: NodeInfo releases w.mu before the IPC round-trip, and
+	// the sleep below is a bare select. A blocked wait therefore holds nothing.
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	start := time.Now()
+	for {
+		info, infoErr := v.ws.NodeInfo(v.ctx, v.node.NodeID)
+		if infoErr != nil {
+			return nil, fmt.Errorf("node.wait: %w", infoErr)
+		}
+		if pred(info) {
+			return waitResultDict(info, false, time.Since(start)), nil
+		}
+		select {
+		case <-v.ctx.Done():
+			// Hard cancel / run-deadline: surface the engine's "cancelled" path.
+			return nil, v.ctx.Err()
+		case <-deadline.C:
+			return waitResultDict(info, true, time.Since(start)), nil
+		case <-time.After(pollEvery):
+		}
+	}
+}
+
+// workspace.poll(do=, every=, timeout=, max_iters=) → dict.
+// Calls do() every `every` until it returns a truthy value (reason "condition"),
+// the required timeout elapses (reason "timeout"), or max_iters is reached
+// (reason "max_iters"). The bounded "loop doing Y until X" primitive. Returns
+// {"iters": int, "reason": str, "timed_out": bool, "result": <last do() value>}.
+func (v *workspaceValue) pollBuiltin(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var doV, everyV, timeoutV, maxItersV starlark.Value
+	if err := starlark.UnpackArgs(b.Name(), args, kwargs,
+		"do", &doV,
+		"every?", &everyV,
+		"timeout?", &timeoutV,
+		"max_iters?", &maxItersV,
+	); err != nil {
+		return nil, err
+	}
+	fn, ok := doV.(starlark.Callable)
+	if !ok {
+		return nil, fmt.Errorf("workspace.poll: do must be callable, got %s", doV.Type())
+	}
+	timeout, err := requireDuration("workspace.poll", "timeout", timeoutV)
+	if err != nil {
+		return nil, err
+	}
+	every, err := optionalDuration("workspace.poll", "every", everyV, defaultPollInterval)
+	if err != nil {
+		return nil, err
+	}
+	maxIters := 0
+	if maxItersV != nil {
+		n, convErr := toInt64("max_iters", maxItersV)
+		if convErr != nil {
+			return nil, fmt.Errorf("workspace.poll: %w", convErr)
+		}
+		if n <= 0 {
+			return nil, fmt.Errorf("workspace.poll: max_iters must be positive")
+		}
+		maxIters = int(n)
+	}
+
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	iters := 0
+	var last starlark.Value = starlark.None
+	for {
+		res, callErr := starlark.Call(thread, fn, nil, nil)
+		if callErr != nil {
+			// do() raised — already a clean Starlark error; propagate unwrapped.
+			return nil, callErr
+		}
+		iters++
+		last = res
+		if bool(res.Truth()) {
+			return pollResultDict(iters, "condition", last), nil
+		}
+		if maxIters > 0 && iters >= maxIters {
+			return pollResultDict(iters, "max_iters", last), nil
+		}
+		select {
+		case <-v.ctx.Done():
+			return nil, v.ctx.Err()
+		case <-deadline.C:
+			return pollResultDict(iters, "timeout", last), nil
+		case <-time.After(every):
+		}
+	}
+}
+
+// buildWaitPredicate composes the supplied wait conditions (AND-ed). It returns
+// nil (not an error) when no condition was supplied so the caller can require at
+// least one.
+func buildWaitPredicate(simTimeV, pausedV, autosaveAfterV starlark.Value) (func(ipc.InfoResult) bool, error) {
+	var checks []func(ipc.InfoResult) bool
+	if simTimeV != nil {
+		target, ok := starlark.AsFloat(simTimeV)
+		if !ok {
+			return nil, fmt.Errorf("sim_time must be a number, got %s", simTimeV.Type())
+		}
+		checks = append(checks, func(i ipc.InfoResult) bool { return i.SimTime >= target })
+	}
+	if pausedV != nil {
+		want := bool(pausedV.Truth())
+		checks = append(checks, func(i ipc.InfoResult) bool { return i.Paused == want })
+	}
+	if autosaveAfterV != nil {
+		marker, err := toInt64("autosave_after", autosaveAfterV)
+		if err != nil {
+			return nil, err
+		}
+		checks = append(checks, func(i ipc.InfoResult) bool {
+			return i.LastAutosave != nil && i.LastAutosave.ModifiedUnix > marker
+		})
+	}
+	if len(checks) == 0 {
+		return nil, nil
+	}
+	return func(i ipc.InfoResult) bool {
+		for _, c := range checks {
+			if !c(i) {
+				return false
+			}
+		}
+		return true
+	}, nil
+}
+
+func waitResultDict(info ipc.InfoResult, timedOut bool, waited time.Duration) *starlark.Dict {
+	d := starlark.NewDict(3)
+	_ = d.SetKey(starlark.String("info"), infoResultToDict(info))
+	_ = d.SetKey(starlark.String("timed_out"), starlark.Bool(timedOut))
+	_ = d.SetKey(starlark.String("waited"), starlark.Float(waited.Seconds()))
+	return d
+}
+
+func pollResultDict(iters int, reason string, last starlark.Value) *starlark.Dict {
+	d := starlark.NewDict(4)
+	_ = d.SetKey(starlark.String("iters"), starlark.MakeInt(iters))
+	_ = d.SetKey(starlark.String("reason"), starlark.String(reason))
+	_ = d.SetKey(starlark.String("timed_out"), starlark.Bool(reason == "timeout"))
+	_ = d.SetKey(starlark.String("result"), last)
+	return d
+}
+
+// parseDuration accepts a Go duration string ("5s", "2h") or a positive number of
+// seconds.
+func parseDuration(name string, v starlark.Value) (time.Duration, error) {
+	if s, ok := v.(starlark.String); ok {
+		d, err := time.ParseDuration(string(s))
+		if err != nil {
+			return 0, fmt.Errorf("%s: %w", name, err)
+		}
+		if d <= 0 {
+			return 0, fmt.Errorf("%s: must be positive", name)
+		}
+		return d, nil
+	}
+	if f, ok := starlark.AsFloat(v); ok {
+		if f <= 0 {
+			return 0, fmt.Errorf("%s: must be positive", name)
+		}
+		return time.Duration(f * float64(time.Second)), nil
+	}
+	return 0, fmt.Errorf("%s: expected a duration string (e.g. \"5s\") or seconds, got %s", name, v.Type())
+}
+
+func requireDuration(fn, name string, v starlark.Value) (time.Duration, error) {
+	if v == nil {
+		return 0, fmt.Errorf("%s: %s is required", fn, name)
+	}
+	d, err := parseDuration(name, v)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", fn, err)
+	}
+	return d, nil
+}
+
+func optionalDuration(fn, name string, v starlark.Value, def time.Duration) (time.Duration, error) {
+	if v == nil {
+		return def, nil
+	}
+	d, err := parseDuration(name, v)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", fn, err)
+	}
+	return d, nil
+}
+
+func toInt64(name string, v starlark.Value) (int64, error) {
+	if i, ok := v.(starlark.Int); ok {
+		if n, ok := i.Int64(); ok {
+			return n, nil
+		}
+		return 0, fmt.Errorf("%s: integer out of range", name)
+	}
+	if f, ok := starlark.AsFloat(v); ok {
+		return int64(f), nil
+	}
+	return 0, fmt.Errorf("%s: expected an integer, got %s", name, v.Type())
 }
