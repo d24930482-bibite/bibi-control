@@ -155,13 +155,12 @@
     <!-- notebook toolbar -->
     <div class="nb-toolbar">
       <span class="nb-label">Notebook</span>
-      <select class="select" id="flow">
-        <option>flow: "seed+run"</option>
-        <option>flow: "transfer predators"</option>
-        <option>flow: "scratch"</option>
+      <!-- populated by loadNotebookList() in app.js on workspace selection -->
+      <select class="select" id="flow" onchange="if(this.value) loadNotebook(this.value)">
+        <option value="">(no notebooks)</option>
       </select>
       <div class="spacer"></div>
-      <button class="btn btn-sm" onclick="toast('notebook saved (mock)')">Save</button>
+      <button class="btn btn-sm" onclick="saveNotebook()">Save</button>
       <span class="add-split">
         <button class="btn btn-sm btn-accent" onclick="addCell('code')">+ Code</button>
         <button class="btn btn-sm btn-accent" onclick="addCell('text')">+ Text</button>
