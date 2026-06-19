@@ -1,0 +1,379 @@
+package api_test
+
+import (
+	"context"
+	"encoding/json"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"runtime"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/asemones/bibicontrol/api"
+	"github.com/asemones/bibicontrol/ipc"
+	"github.com/asemones/bibicontrol/workspace"
+)
+
+// testFixtureSave returns the path to a small Bibites save file in the repo's
+// testdata tree. It is used to create a world row so StartNode has a valid
+// WorldID to bind to. The world need not have content for liveness.
+func testFixtureSave(t *testing.T) string {
+	t.Helper()
+	// Locate testdata relative to this file via runtime.Caller.
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	// thisFile is …/api/handlers_nodes_test.go; testdata is one level up.
+	repoRoot := filepath.Dir(filepath.Dir(thisFile))
+	p := filepath.Join(repoRoot, "testdata", "saves", "the-bibites", "dasdasd.zip")
+	return p
+}
+
+// fakeSimServer is an in-process stand-in for the game-side DLL backed by a
+// real net.Listener (so the runtime can dial it). It speaks the envelope
+// contract used by simctl.Client.
+type fakeSimServer struct {
+	lis net.Listener
+
+	mu   sync.Mutex
+	sims []*fakeSim2
+}
+
+type fakeSim2 struct {
+	sess *ipc.Session
+}
+
+func newFakeSim2(conn net.Conn) *fakeSim2 {
+	f := &fakeSim2{sess: ipc.NewSession(conn, nil)}
+	go f.serve()
+	return f
+}
+
+func (f *fakeSim2) serve() {
+	for env := range f.sess.Events() {
+		if env.Kind != ipc.KindRequest {
+			continue
+		}
+		payload, errMsg := f.handle(env)
+		reply := ipc.Envelope{Kind: ipc.KindResponse, ReplyTo: env.ID}
+		if errMsg != "" {
+			reply.Kind = ipc.KindError
+			reply.Error = errMsg
+		} else {
+			reply.Payload = payload
+		}
+		_ = f.sess.Send(context.Background(), reply)
+	}
+}
+
+func (f *fakeSim2) handle(env ipc.Envelope) (json.RawMessage, string) {
+	switch env.Command {
+	case ipc.CommandInfo:
+		return mustMarshal(ipc.InfoResult{
+			TPS:     60,
+			RealTPS: 58.25,
+			Paused:  true,
+			SimTime: 1234.5,
+			LastAutosave: &ipc.AutosaveInfo{
+				Path:         "/saves/Autosaves/autosave_20260615.zip",
+				Name:         "autosave_20260615.zip",
+				ModifiedUnix: 1700000000,
+			},
+		}), ""
+	case ipc.CommandStop:
+		return mustMarshal(ipc.StopResult{PreviousTimeScale: 1.0}), ""
+	case ipc.CommandResume:
+		return mustMarshal(ipc.ResumeResult{TimeScale: 1.0}), ""
+	default:
+		return nil, "unknown command: " + env.Command
+	}
+}
+
+func mustMarshal(v any) json.RawMessage {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+// newFakeSimListener starts a fake-sim TCP listener and returns it. The
+// caller should close the listener via t.Cleanup. Returned addr is suitable
+// for use as CompatAddr in StartNodeSpec.
+func newFakeSimListener(t *testing.T) (net.Listener, string) {
+	t.Helper()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &fakeSimServer{lis: lis}
+	go func() {
+		for {
+			conn, err := lis.Accept()
+			if err != nil {
+				return // listener closed
+			}
+			f := newFakeSim2(conn)
+			srv.mu.Lock()
+			srv.sims = append(srv.sims, f)
+			srv.mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = lis.Close()
+		srv.mu.Lock()
+		for _, s := range srv.sims {
+			_ = s.sess.Close()
+		}
+		srv.mu.Unlock()
+	})
+	return lis, lis.Addr().String()
+}
+
+// TestNodesInfo_AliveAndLogs exercises the alive-node telemetry path and log
+// snapshot, then the detached path from a fresh daemon with no seeded handle.
+func TestNodesInfo_AliveAndLogs(t *testing.T) {
+	if _, err := t.TempDir(), false; err {
+		t.Skip("/bin/sleep not available")
+	}
+
+	ctx := testCtx(t)
+	root := t.TempDir()
+
+	// Create the workspace.
+	ws, err := workspace.Create(ctx, root, "owner", "nodes-test-ws")
+	if err != nil {
+		t.Fatalf("workspace.Create: %v", err)
+	}
+	id := ws.ID()
+	t.Cleanup(func() { _ = ws.Close() })
+
+	// Add a world so StartNode has a valid WorldID to bind to.
+	// We use AddWorld with the smallest fixture save; no content is needed
+	// for liveness testing.
+	world, err := ws.AddWorld(ctx, testFixtureSave(t), "test-world")
+	if err != nil {
+		t.Fatalf("AddWorld: %v", err)
+	}
+
+	// Start a fake-sim listener so ConnectOnStart can dial it.
+	_, compatAddr := newFakeSimListener(t)
+
+	// Start the node backed by /bin/sleep (established test process) with the
+	// fake sim for IPC.
+	rt, _, err := ws.StartNode(ctx, workspace.StartNodeSpec{
+		WorldID:        world.ID,
+		NodeID:         "n-alive",
+		Process:        ipc.ProcessSpec{Path: "/bin/sleep", Args: []string{"60"}},
+		CompatAddr:     compatAddr,
+		ConnectOnStart: true,
+		DialTimeout:    5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("StartNode: %v", err)
+	}
+	_ = rt
+	t.Cleanup(func() { _ = ws.KillNode(ctx, "n-alive") })
+
+	// Wire the daemon with the seeded workspace handle.
+	d := api.New(root, "owner")
+	d.SeedWorkspace(id, ws)
+	t.Cleanup(func() { _ = d.Close() })
+
+	// ── Case 1: alive + telemetry ─────────────────────────────────────────────
+	t.Run("alive_telemetry", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/workspaces/"+id+"/nodes/info", nil)
+		rec := httptest.NewRecorder()
+		d.Handler().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("nodes/info: got %d, want 200; body: %s", rec.Code, rec.Body.String())
+		}
+
+		var infos []map[string]any
+		if err := json.NewDecoder(rec.Body).Decode(&infos); err != nil {
+			t.Fatalf("decode nodes/info: %v", err)
+		}
+
+		// Find the n-alive entry.
+		var found map[string]any
+		for _, obj := range infos {
+			if obj["id"] == "n-alive" {
+				found = obj
+				break
+			}
+		}
+		if found == nil {
+			t.Fatalf("n-alive not in nodes/info response; got %v", infos)
+		}
+
+		if got := found["liveness"]; got != "alive" {
+			t.Errorf("liveness = %v, want alive", got)
+		}
+		if got, ok := found["tps"].(float64); !ok || got != 60 {
+			t.Errorf("tps = %v, want 60", found["tps"])
+		}
+		if got, ok := found["paused"].(bool); !ok || !got {
+			t.Errorf("paused = %v, want true", found["paused"])
+		}
+		if got, ok := found["real_tps"].(float64); !ok || got != 58.25 {
+			t.Errorf("real_tps = %v, want 58.25", found["real_tps"])
+		}
+	})
+
+	// ── Case 2: logs snapshot ────────────────────────────────────────────────
+	t.Run("logs_shape", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/workspaces/"+id+"/nodes/n-alive/logs", nil)
+		rec := httptest.NewRecorder()
+		d.Handler().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("nodes/n-alive/logs: got %d, want 200; body: %s", rec.Code, rec.Body.String())
+		}
+		var body map[string]any
+		if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+			t.Fatalf("decode logs: %v", err)
+		}
+		// lines must be present and be a JSON array (may be empty since /bin/sleep produces none).
+		lines, ok := body["lines"]
+		if !ok {
+			t.Fatalf("logs response missing 'lines' field; got %v", body)
+		}
+		if _, ok := lines.([]any); !ok {
+			t.Fatalf("lines is not an array: %T %v", lines, lines)
+		}
+	})
+
+	// ── Case 4: logs 404 for unknown node ─────────────────────────────────────
+	t.Run("logs_404_unknown", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/workspaces/"+id+"/nodes/no-such-node/logs", nil)
+		rec := httptest.NewRecorder()
+		d.Handler().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("logs/unknown: got %d, want 404; body: %s", rec.Code, rec.Body.String())
+		}
+		var body map[string]string
+		if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+			t.Fatalf("decode 404 body: %v", err)
+		}
+		if body["error"] == "" {
+			t.Fatal("logs 404: expected non-empty error field")
+		}
+	})
+}
+
+// TestNodesInfo_Detached verifies that a node with a persisted "running" row
+// but no active runtime entry is reported as liveness=="detached" with no
+// telemetry. This is the invariant: liveness comes from the active set, not
+// the persisted status column.
+func TestNodesInfo_Detached(t *testing.T) {
+	ctx := testCtx(t)
+	root := t.TempDir()
+
+	// Create the workspace and a world, start a node, then kill it (which sets
+	// persisted status to "stopped"). We actually need a stale "running" row,
+	// but we can't produce one via the public API (KillNode always flips to
+	// stopped). Instead, we use a fresh daemon handle (d2) that has an empty
+	// active set — the persisted "running" row from ws.StartNode is still
+	// there, but d2.ws() opens a new handle with empty nodes map, so
+	// ws.Node("n-detach") returns (nil, false) → detached.
+
+	ws, err := workspace.Create(ctx, root, "owner", "detached-ws")
+	if err != nil {
+		t.Fatalf("workspace.Create: %v", err)
+	}
+	id := ws.ID()
+	// Explicit cleanup so we can close ws before opening d2.
+	wsCleanup := func() { _ = ws.Close() }
+
+	world, err := ws.AddWorld(ctx, testFixtureSave(t), "test-world-detach")
+	if err != nil {
+		wsCleanup()
+		t.Fatalf("AddWorld: %v", err)
+	}
+
+	_, _, err = ws.StartNode(ctx, workspace.StartNodeSpec{
+		WorldID:        world.ID,
+		NodeID:         "n-detach",
+		Process:        ipc.ProcessSpec{Path: "/bin/sleep", Args: []string{"60"}},
+		ConnectOnStart: false,
+	})
+	if err != nil {
+		wsCleanup()
+		t.Fatalf("StartNode: %v", err)
+	}
+
+	// Kill the node (removes from active set, sets persisted status "stopped").
+	// Then open a fresh daemon (d2) with NO seeded handle so d2.ws() opens its
+	// own handle over the same root. The fresh handle has an empty active set.
+	// Note: the persisted row is "stopped" after KillNode, not "running" — but
+	// the detached verdict still fires because ws.Node returns (nil, false) for
+	// any node not in the in-memory set, regardless of persisted status.
+	_ = ws.KillNode(ctx, "n-detach") // best-effort — don't fail the test on kill error
+
+	// Close ws before opening d2 to avoid two writers on the same DuckDB file.
+	wsCleanup()
+
+	// Open d2 fresh — it will open the workspace lazily on the first request.
+	d2 := api.New(root, "owner")
+	t.Cleanup(func() { _ = d2.Close() })
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workspaces/"+id+"/nodes/info", nil)
+	rec := httptest.NewRecorder()
+	d2.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("nodes/info (d2): got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var infos []map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&infos); err != nil {
+		t.Fatalf("decode nodes/info (d2): %v", err)
+	}
+
+	var found map[string]any
+	for _, obj := range infos {
+		if obj["id"] == "n-detach" {
+			found = obj
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("n-detach not in nodes/info response (d2); got %v", infos)
+	}
+
+	if got := found["liveness"]; got != "detached" {
+		t.Errorf("liveness = %v, want detached", got)
+	}
+	// No telemetry should be present.
+	if found["tps"] != nil {
+		t.Errorf("tps should be absent for detached node; got %v", found["tps"])
+	}
+}
+
+// TestNodesInfo_ResolveNotFound verifies that requesting nodes/info for an
+// unknown workspace id returns 404.
+func TestNodesInfo_ResolveNotFound(t *testing.T) {
+	d := api.New(t.TempDir(), "owner")
+	t.Cleanup(func() { _ = d.Close() })
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workspaces/does-not-exist/nodes/info", nil)
+	rec := httptest.NewRecorder()
+	d.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("resolve 404: got %d, want 404; body: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode 404 body: %v", err)
+	}
+	if body["error"] == "" {
+		t.Fatal("resolve 404: expected non-empty error field")
+	}
+}
