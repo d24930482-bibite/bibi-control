@@ -360,9 +360,13 @@ func (w *Workspace) setNodeStatusByLogicalID(ctx context.Context, nodeID, status
 
 // reapNode is the supervisor callback fired when a node's OS process exits
 // without a workspace-driven Stop/Kill. It:
-//  1. Under w.mu: removes the runtime from w.nodes if it is still the SAME
-//     runtime (same-runtime guard prevents reaping a NEW node that reused the
-//     logical id after a fast stop+restart).
+//  1. Under w.mu: removes the runtime from w.nodes if it is still present.
+//     The invariant against reaping a NEW node that reused the logical id is
+//     held by two complementary guards: (a) the Supervisor's sync.Once ensures
+//     onExit fires at most once per Watch registration, and (b) the watcher
+//     goroutine only deletes its own entry from s.entries when
+//     s.entries[nodeID] == e, so a superseding Watch cannot be accidentally
+//     cancelled or double-fired.
 //  2. Drops the log ring for the node.
 //  3. Writes a terminal persisted status ("crashed" for a failed exit,
 //     "exited" otherwise). The write is idempotent-safe against a concurrent
@@ -372,7 +376,6 @@ func (w *Workspace) setNodeStatusByLogicalID(ctx context.Context, nodeID, status
 // discipline in StopNode). All non-trivial operations run after the lock is
 // released.
 func (w *Workspace) reapNode(nodeID string) {
-	// Capture the runtime pointer to compare later (same-runtime guard).
 	w.mu.Lock()
 	rt, exists := w.nodes[nodeID]
 	if exists {
@@ -407,15 +410,16 @@ func (w *Workspace) reapNode(nodeID string) {
 // NodeLiveness returns a live liveness verdict string for the given nodeID.
 // The verdict is derived from the active-set membership and the process state:
 //
-//   - "running"  — the node is in the active set and its process is alive.
-//   - "crashed"  — the node is in the active set but its process has failed.
-//   - the persisted row status ("stopped", "exited", "crashed", "detached") —
-//     the node is NOT in the active set; the most-recent persisted row is returned.
-//     If no persisted row exists, "detached" is returned.
+//   - "running"   — the node is in the active set and its process is alive.
+//   - "crashed"   — the node is in the active set but its process has failed.
+//   - "stopped"   — the node is NOT active; its persisted status is "stopped".
+//   - "exited"    — the node is NOT active; its persisted status is "exited".
+//   - "detached"  — the node is NOT active and its persisted row is still
+//     "running" (the supervisor has not yet reconciled it, or this is a fresh
+//     Open with a stale row) — or no persisted row exists at all.
 //
-// NodeLiveness is the single source of truth shared by handleNodesInfo and the
-// Starlark node.status attribute so the HTTP and Starlark surfaces cannot
-// disagree.
+// NodeLiveness is the single source of truth called by handleNodesInfo and the
+// Starlark node.status attribute so the HTTP and Starlark surfaces always agree.
 func (w *Workspace) NodeLiveness(ctx context.Context, nodeID string) string {
 	rt, live := w.Node(nodeID)
 	if live {
@@ -425,13 +429,20 @@ func (w *Workspace) NodeLiveness(ctx context.Context, nodeID string) string {
 		}
 		return "running"
 	}
-	// Not active — return the most-recent persisted row status.
+	// Not active — consult the most-recent persisted row.
+	// A persisted "running" status with no active entry means the supervisor
+	// has not yet reconciled the row (or this is a fresh Open with a stale
+	// "running" row). Expose this as "detached" so callers can distinguish
+	// "cleanly stopped" from "process gone but row not yet updated".
 	nodes, err := w.store().ListNodes(ctx, w.id)
 	if err != nil {
 		return "detached"
 	}
 	for _, n := range nodes {
 		if n.NodeID == nodeID {
+			if n.Status == "running" {
+				return "detached"
+			}
 			return n.Status
 		}
 	}

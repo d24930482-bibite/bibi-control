@@ -211,8 +211,11 @@ func TestNodesInfo_AliveAndLogs(t *testing.T) {
 			t.Fatalf("n-alive not in nodes/info response; got %v", infos)
 		}
 
-		if got := found["liveness"]; got != "alive" {
-			t.Errorf("liveness = %v, want alive", got)
+		// NodeLiveness returns "running" for an active, healthy process. The
+		// HTTP liveness field must match because handleNodesInfo calls the same
+		// shared helper as Starlark node.status.
+		if got := found["liveness"]; got != "running" {
+			t.Errorf("liveness = %v, want running", got)
 		}
 		if got, ok := found["tps"].(float64); !ok || got != 60 {
 			t.Errorf("tps = %v, want 60", found["tps"])
@@ -471,13 +474,15 @@ func TestDeleteNode(t *testing.T) {
 	})
 }
 
-// TestNodesInfo_Reaped verifies that after the supervisor reaps a dead node,
-// GET /nodes/info reports liveness="crashed" (or "detached" if the reaper has
-// already removed it) and the persisted status is no longer "running".
+// TestNodesInfo_Reaped verifies that after the supervisor reaps a dead node:
+//   - GET /nodes/info reports a liveness verdict that EXACTLY MATCHES what
+//     workspace.NodeLiveness returns for the same node id (proving both surfaces
+//     share the same helper and cannot disagree).
+//   - The persisted status is no longer "running".
 //
 // Strategy: start a fast-exit process on ws, seed ws into a fresh daemon, wait
-// for the reaper to fire, then poll /nodes/info. The node must NOT appear with
-// liveness="alive" or status="running" after reaping.
+// for the reaper to fire (polls ws.Node until false), then call /nodes/info and
+// compare the HTTP liveness field against the direct NodeLiveness() return value.
 func TestNodesInfo_Reaped(t *testing.T) {
 	ctx := testCtx(t)
 	root := t.TempDir()
@@ -506,7 +511,7 @@ func TestNodesInfo_Reaped(t *testing.T) {
 		t.Skipf("StartNode with /bin/true: %v — skipping (fast-exit process not available)", err)
 	}
 
-	// Wait for the supervisor to reap the node.
+	// Wait for the supervisor to reap the node (polls ws.Node until false).
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, active := ws.Node("n-reaped"); !active {
@@ -514,6 +519,13 @@ func TestNodesInfo_Reaped(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+	if _, stillActive := ws.Node("n-reaped"); stillActive {
+		t.Fatal("n-reaped still active after 5s — supervisor did not reap")
+	}
+
+	// Read the ground-truth verdict directly from the shared helper.
+	// This is what Starlark node.status would return for the same node.
+	wantLiveness := ws.NodeLiveness(ctx, "n-reaped")
 
 	// Wire the daemon with the workspace.
 	d := api.New(root, "owner")
@@ -544,9 +556,11 @@ func TestNodesInfo_Reaped(t *testing.T) {
 		t.Fatalf("n-reaped not in nodes/info response; got %v", infos)
 	}
 
-	// After reaping, the node must NOT be alive.
-	if got := found["liveness"]; got == "alive" {
-		t.Errorf("liveness = alive after reap, want crashed or detached")
+	// The HTTP liveness field MUST equal the shared helper's verdict.
+	// If handleNodesInfo used a separate inline ladder this assertion would
+	// fail (e.g. "alive" vs "running", or "detached" vs "exited").
+	if got := found["liveness"]; got != wantLiveness {
+		t.Errorf("HTTP liveness = %q, NodeLiveness() = %q — surfaces diverge (shared helper not used)", got, wantLiveness)
 	}
 
 	// The persisted status must NOT be "running" after reaping.
