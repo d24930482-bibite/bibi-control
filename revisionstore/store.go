@@ -570,6 +570,7 @@ type CatalogFingerprint struct {
 //   - a 'full' row contributes id*1, a 'mirror_only' row id*2 (the tier flips
 //     the multiplier);
 //   - blob_present adds id*4, blob_present=0 adds id*8 (the presence flips it);
+//
 // so a G2 evict (full,1 -> mirror_only,0) changes both terms for that row, and
 // because every term is scaled by the row's unique id, no swap of two rows'
 // states can net to the same sum.
@@ -1255,6 +1256,34 @@ func (s *Store) DeleteNode(ctx context.Context, id string) error {
 	affected, err := result.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("revisionstore: delete node rows affected: %w", err)
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// DeleteNodeByNodeID removes the node row whose node_id matches the given
+// nodeID string. node_id is the user-facing logical identifier (nodes.node_id),
+// distinct from nodes.id (the internal UUID PK). An unknown nodeID (0 rows
+// affected) returns sql.ErrNoRows, detectable via IsNotFound.
+func (s *Store) DeleteNodeByNodeID(ctx context.Context, nodeID string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("revisionstore: Store is nil")
+	}
+	ctx, err := usableContext(ctx)
+	if err != nil {
+		return err
+	}
+	result, err := s.db.ExecContext(ctx, `
+		DELETE FROM nodes WHERE node_id = ?
+	`, nodeID)
+	if err != nil {
+		return fmt.Errorf("revisionstore: delete node by node_id: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("revisionstore: delete node by node_id rows affected: %w", err)
 	}
 	if affected == 0 {
 		return sql.ErrNoRows

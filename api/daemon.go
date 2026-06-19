@@ -97,6 +97,7 @@ func (d *Daemon) Handler() http.Handler {
 	// Nodes (U8).
 	mux.HandleFunc("GET /api/workspaces/{id}/nodes/info", d.handleNodesInfo)
 	mux.HandleFunc("GET /api/workspaces/{id}/nodes/{nid}/logs", d.handleNodeLogs)
+	mux.HandleFunc("DELETE /api/workspaces/{id}/nodes/{nid}", d.handleDeleteNode)
 
 	// Upload (U5).
 	mux.HandleFunc("POST /api/workspaces/{id}/upload", d.handleUpload)

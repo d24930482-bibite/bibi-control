@@ -861,7 +861,7 @@ function renderNodes(rows) {
       btn.setAttribute('onclick', "openLogs('" + escapedId + "')");
       actionsDiv.appendChild(btn);
     } else {
-      // detached — stubs (real drop-row is U14)
+      // detached
       var btnR = document.createElement('button');
       btnR.className = 'btn btn-sm';
       btnR.textContent = 'reconnect';
@@ -869,7 +869,7 @@ function renderNodes(rows) {
       var btnD = document.createElement('button');
       btnD.className = 'btn btn-sm';
       btnD.textContent = 'drop row';
-      btnD.setAttribute('onclick', "toast('drop row (U14)')");
+      btnD.setAttribute('onclick', "dropNode('" + escapedId + "')");
       actionsDiv.appendChild(btnR);
       actionsDiv.appendChild(btnD);
     }
@@ -1012,6 +1012,100 @@ function nodeAction(id, verb) {
     }
     toast(verb + ' ok');
     pollNodes();
+  }).catch(function(err) { toast(err.message); });
+}
+
+/* ---------- column B: drop detached node row ----------
+   dropNode(id) calls DELETE /api/workspaces/{id}/nodes/{nid} after a confirm().
+   On success it toasts and re-polls so the row disappears from the UI.
+   Wired only from the detached branch of renderNodes — never called for alive
+   or crashed nodes; the backend is row-only and does not stop a process. */
+function dropNode(id) {
+  if (!selectedWsId) { toast('select a workspace first'); return; }
+  if (!confirm('Drop node row "' + id + '"?')) return;
+  deleteNode(selectedWsId, id).then(function() {
+    toast('node row dropped');
+    pollNodes();
+  }).catch(function(err) { toast(err.message); });
+}
+
+/* ---------- column B: transfer modal ----------
+   transferToWorld() reads the m-transfer modal fields, builds an object-DSL
+   program (workspace.world().open().bibites/eggs.where() + workspace.transfer()),
+   runs it via /run, and refreshes the destination world on success.
+
+   DSL chain confirmed from automation.go:
+     workspace.world(<id>).open()    → saveValue (world.openBuiltin)
+     <save>.bibites / <save>.eggs    → EntityCollection delegated from thebibites.Save
+     <coll>.where(<expr>)            → filtered EntityCollection (optional)
+     workspace.transfer(selector=<coll>, dst=<dstId>) → {transferred, committed, ...}
+*/
+
+/* Rebuild a <select> element with the current world options.
+   Mirrors _rebuildSnWorldOptions but targets an arbitrary select element. */
+function _rebuildTransferWorldOptions(sel) {
+  if (!sel) return;
+  var current = sel.value;
+  sel.innerHTML = '';
+  document.querySelectorAll('.world').forEach(function(el) {
+    var worldId = el.id.replace('world-', '');
+    var nameEl = el.querySelector('.w-name');
+    var name = nameEl ? nameEl.textContent : worldId;
+    var opt = document.createElement('option');
+    opt.value = worldId;
+    opt.textContent = name;
+    sel.appendChild(opt);
+  });
+  if (current) sel.value = current;
+}
+
+function openTransferModal() {
+  _rebuildTransferWorldOptions(document.getElementById('tr-src'));
+  _rebuildTransferWorldOptions(document.getElementById('tr-dst'));
+  openModal('m-transfer');
+}
+
+function transferToWorld() {
+  if (!selectedWsId) { toast('select a workspace first'); return; }
+
+  var src = (document.getElementById('tr-src').value || '').trim();
+  var dst = (document.getElementById('tr-dst').value || '').trim();
+  var kind = document.querySelector('input[name="tr-kind"]:checked');
+  var kindVal = kind ? kind.value : 'bibites';
+  var where = (document.getElementById('tr-where').value || '').trim();
+
+  if (!src) { toast('select a source world'); return; }
+  if (!dst) { toast('select a destination world'); return; }
+  if (src === dst) { toast('source and destination must differ'); return; }
+
+  // Build object-DSL program — NEVER raw SQL.
+  // workspace.world(<id>).open() returns a saveValue; .bibites/.eggs is the collection.
+  var srcLit = JSON.stringify(src);
+  var dstLit = JSON.stringify(dst);
+  var prog = 's = workspace.world(' + srcLit + ').open()\n';
+  if (where) {
+    prog += 'sel = s.' + kindVal + '.where(' + where + ')\n';
+  } else {
+    prog += 'sel = s.' + kindVal + '\n';
+  }
+  prog += 'print(workspace.transfer(selector=sel, dst=' + dstLit + '))';
+
+  runProgram(selectedWsId, prog).then(function(res) {
+    if (res.Diagnostics && res.Diagnostics.length) {
+      toast(res.Diagnostics[0].Message || 'transfer failed');
+      return;
+    }
+    // Parse transferred count from Output (printed dict repr) for the toast.
+    var transferred = '?';
+    if (res.Output) {
+      var m = res.Output.match(/transferred['":\s]+(\d+)/);
+      if (m) transferred = m[1];
+    }
+    closeModal('m-transfer');
+    toast('transferred ' + transferred);
+    // Refresh destination world: a new revision lands on dst head.
+    loadWorlds(selectedWsId);
+    loadHistory(selectedWsId, dst, dst);
   }).catch(function(err) { toast(err.message); });
 }
 

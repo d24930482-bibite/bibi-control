@@ -43,6 +43,30 @@ func RenameWorkspace(ctx context.Context, root, id, name string) error {
 	return registry.RenameWorkspace(ctx, id, name)
 }
 
+// DeleteNode removes the persisted node row whose node_id matches id from the
+// workspace registry. id is the user-facing logical node identifier
+// (nodes.node_id), which is the same string the API exposes as the node's id
+// field and what the DELETE route carries as {nid}. It opens its own short-lived
+// registry handle consistent with the other registry_ops helpers (open -> one
+// mutation -> close). The registry error is propagated untouched so an unknown
+// id (sql.ErrNoRows) is still detectable via revisionstore.IsNotFound at the
+// handler layer.
+//
+// NOTE: this is row-only — it does NOT stop a running process. It is intended
+// for detached / stale rows where no live process handle exists.
+func DeleteNode(ctx context.Context, root, id string) error {
+	if root == "" {
+		return fmt.Errorf("workspace: root is required")
+	}
+	registry, err := revisionstore.Open(registryPath(root))
+	if err != nil {
+		return fmt.Errorf("workspace: open registry: %w", err)
+	}
+	defer registry.Close()
+
+	return registry.DeleteNodeByNodeID(ctx, id)
+}
+
 // DeleteWorkspace removes the workspace with id from the registry (via the U1
 // atomic cascade) and then removes its on-disk directory. The order is
 // load-bearing: the registry rows are deleted FIRST so a failed registry delete

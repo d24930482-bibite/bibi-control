@@ -66,6 +66,7 @@
     </div>
     <div class="add-row">
       <button class="btn" onclick="openModal('m-add-world')">+ add / upload</button>
+      <button class="btn" onclick="openTransferModal()">+ transfer</button>
     </div>
   </section>
 
@@ -173,7 +174,6 @@ then start a node. Notes:
         <div class="result-wrap" id="res-3">
           <div class="result-cap">
             result
-            <button class="btn btn-sm" style="margin-left:auto" onclick="toast('export csv (mock)')">export csv</button>
           </div>
           <table class="result">
             <thead>
@@ -379,6 +379,40 @@ then start a node. Notes:
     <div class="modal-foot">
       <button class="btn" onclick="closeModal('m-add-world')">Cancel</button>
       <button class="btn btn-accent" onclick="submitAddWorld()">Import</button>
+    </div>
+  </div>
+</div>
+
+<div class="backdrop" id="m-transfer" onclick="backdropClose(event,'m-transfer')">
+  <div class="modal">
+    <div class="modal-head">Transfer Bibites / Eggs</div>
+    <div class="modal-body">
+      <div class="field">
+        <label>Source world</label>
+        <select class="select" id="tr-src" style="width:100%; padding:8px 10px;"></select>
+      </div>
+      <div class="field">
+        <label>Destination world</label>
+        <select class="select" id="tr-dst" style="width:100%; padding:8px 10px;"></select>
+      </div>
+      <div class="field">
+        <label>Kind</label>
+        <div class="radio-row">
+          <input type="radio" name="tr-kind" id="tr-kind-bibites" value="bibites" checked>
+          <label for="tr-kind-bibites">bibites</label>
+          &nbsp;&nbsp;
+          <input type="radio" name="tr-kind" id="tr-kind-eggs" value="eggs">
+          <label for="tr-kind-eggs">eggs</label>
+        </div>
+      </div>
+      <div class="field">
+        <label>Where (optional predicate)</label>
+        <input class="input mono" id="tr-where" placeholder="e.g. s.bibites.energy &gt; 50">
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal('m-transfer')">Cancel</button>
+      <button class="btn btn-accent" onclick="transferToWorld()">Transfer</button>
     </div>
   </div>
 </div>
