@@ -105,7 +105,7 @@ func (d *Daemon) Handler() http.Handler {
 	// Stubbed endpoints — swapped one-by-one in later tickets.
 	mux.HandleFunc("GET /api/workspaces/{id}/nodes/info", notImplemented)
 	mux.HandleFunc("GET /api/workspaces/{id}/nodes/{nid}/logs", notImplemented)
-	mux.HandleFunc("POST /api/workspaces/{id}/upload", notImplemented)
+	mux.HandleFunc("POST /api/workspaces/{id}/upload", d.handleUpload)
 	mux.HandleFunc("GET /api/workspaces/{id}/notebooks", notImplemented)
 	mux.HandleFunc("GET /api/workspaces/{id}/notebooks/{name}", notImplemented)
 	mux.HandleFunc("PUT /api/workspaces/{id}/notebooks/{name}", notImplemented)
