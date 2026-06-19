@@ -9,6 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -22,8 +25,25 @@ import (
 var migrationFiles embed.FS
 
 // Open opens a DuckDB database. Pass an empty path for an in-memory database.
+//
+// It always configures a temp_directory so DuckDB can spill large operations to
+// disk instead of failing with "out of memory" — most importantly, replaying the
+// write-ahead log of a database that was not closed cleanly (e.g. the daemon was
+// killed without checkpointing). For a file-backed database the spill directory
+// is a "duck_tmp" sibling of the database file; for in-memory it lives under the
+// OS temp dir. memory_limit and threads can be overridden via the
+// BIBID_DUCKDB_MEMORY_LIMIT and BIBID_DUCKDB_THREADS environment variables.
+//
+// These options are passed as DSN query parameters (not post-open PRAGMAs)
+// because the driver applies them at database-instance creation — before the
+// file is opened and its WAL replayed — which is exactly when a bloated WAL would
+// otherwise blow past the default memory limit.
 func Open(path string) (*sql.DB, error) {
-	db, err := sql.Open("duckdb", path)
+	dsn, err := buildDSN(path)
+	if err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("duckdb", dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -32,6 +52,40 @@ func Open(path string) (*sql.DB, error) {
 		return nil, err
 	}
 	return db, nil
+}
+
+// buildDSN turns a database path into a DuckDB DSN carrying a spill directory
+// (and optional memory_limit/threads). The driver reads the database path
+// verbatim from everything before the first "?", so the path is kept unencoded;
+// only the query values are URL-encoded.
+func buildDSN(path string) (string, error) {
+	q := url.Values{}
+
+	var tmpDir string
+	if path == "" || path == ":memory:" {
+		tmpDir = filepath.Join(os.TempDir(), "bibid-duckdb-spill")
+	} else {
+		tmpDir = filepath.Join(filepath.Dir(path), "duck_tmp")
+	}
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		return "", fmt.Errorf("duckdb: create temp_directory %q: %w", tmpDir, err)
+	}
+	q.Set("temp_directory", tmpDir)
+
+	if v := strings.TrimSpace(os.Getenv("BIBID_DUCKDB_MEMORY_LIMIT")); v != "" {
+		q.Set("memory_limit", v)
+	}
+	if v := strings.TrimSpace(os.Getenv("BIBID_DUCKDB_THREADS")); v != "" {
+		q.Set("threads", v)
+	}
+
+	// "" and ":memory:" both denote an in-memory database; the driver treats a
+	// DSN that is empty or begins with "?" as in-memory.
+	base := path
+	if base == ":memory:" {
+		base = ""
+	}
+	return base + "?" + q.Encode(), nil
 }
 
 // OpenAndImport opens a DuckDB database, applies migrations, and imports save.

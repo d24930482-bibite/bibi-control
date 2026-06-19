@@ -1130,6 +1130,9 @@ function loadNotebookList(wsId) {
       opt.textContent = '(no notebooks)';
       flow.appendChild(opt);
       currentNotebook = null;
+      // no saved notebooks yet: clear any stale/placeholder cells so the area
+      // reflects real state, and invite creating one via the + New button.
+      notebookEmptyState('No notebooks in this workspace yet — click + New to create one.');
       return;
     }
     rows.forEach(function(nb) {
@@ -1157,6 +1160,36 @@ function loadNotebook(name) {
     var flow = document.getElementById('flow');
     flow.value = name;
   }).catch(function(err) { toast('load notebook: ' + err.message); });
+}
+
+/**
+ * notebookEmptyState(msg) — clear the cell area and show a muted placeholder so
+ * stale cells never linger when no workspace/notebook is active.
+ * @param {string} msg
+ */
+function notebookEmptyState(msg) {
+  var nb = document.getElementById('notebook');
+  if (!nb) return;
+  nb.innerHTML = '<div class="nb-empty" style="padding:24px;font-size:13px;color:var(--text-faint)">' +
+    escapeHtml(msg) + '</div>';
+  cellCount = 0;
+}
+
+/**
+ * newNotebook() — start a fresh, unsaved notebook: reset the current-notebook
+ * pointer, clear the cell area, seed one empty code cell, and clear the flow
+ * selection. Save then prompts for a name and creates it on the backend.
+ */
+function newNotebook() {
+  if (!selectedWsId) { toast('select a workspace first'); return; }
+  currentNotebook = null;
+  var nb = document.getElementById('notebook');
+  nb.innerHTML = '';
+  cellCount = 0;
+  var flow = document.getElementById('flow');
+  if (flow) flow.value = '';
+  addCell('code');           // seed one starter cell (also refreshes inserters)
+  toast('new notebook — edit cells, then Save to name it');
 }
 
 /**
@@ -1243,9 +1276,11 @@ function renderNotebook(doc) {
       var code = cell.querySelector('.code');
       if (code) code.textContent = c.source || '';
       // setupCodeEditor was already called inside buildCell, but it seeds from
-      // the textContent at build time. Re-seed the textarea explicitly.
+      // the textContent at build time. Re-seed the textarea explicitly and repaint
+      // the highlighted <pre> from the saved source.
       var codeEditTa = cell.querySelector('.code-edit');
       if (codeEditTa) codeEditTa.value = c.source || '';
+      if (code) renderHighlight(code, c.source || '');
       // reset to idle state (no stale mock status)
       var status = cell.querySelector('.cell-status');
       if (status) { status.className = 'cell-status idle'; status.textContent = 'idle'; }
@@ -1504,11 +1539,402 @@ function editTextCell(id) {
 // render any text cells present on load
 document.querySelectorAll('.cell.text').forEach(function(c) { renderTextCell(c.id); });
 
+/* ---------- Starlark syntax highlighting ----------
+   Hand-rolled, dependency-free tokenizer for the code editor. renderHighlight()
+   rewrites the highlighted <pre> ONLY (never the textarea), so the caret,
+   selection and undo stack are preserved for free. The output must preserve every
+   input character exactly (HTML-escaped) so the colored <pre> stays pixel-aligned
+   with the transparent textarea overlaid on top. */
+var SL_KEYWORDS = {};
+['True', 'False', 'None', 'and', 'or', 'not', 'if', 'elif', 'else', 'for', 'in',
+ 'def', 'return', 'lambda', 'load', 'pass', 'break', 'continue', 'while']
+  .forEach(function(k) { SL_KEYWORDS[k] = 1; });
+var SL_BUILTINS = {};
+['workspace', 'world', 'node', 'nodes', 'worlds', 'add_world', 'transfer',
+ 'start_node', 'query', 'poll', 'print', 'len', 'range', 'dir', 'str', 'int',
+ 'float', 'bool', 'dict', 'list']
+  .forEach(function(k) { SL_BUILTINS[k] = 1; });
+// identifiers colored as functions only when they directly follow a '.'
+var SL_METHODS = {};
+['open', 'where', 'set', 'set_expr', 'commit', 'group_by', 'count', 'mean', 'sum',
+ 'max', 'min', 'median', 'quantile', 'value', 'values', 'delete', 'clone',
+ 'append', 'query', 'history_query', 'info', 'state', 'status', 'stop', 'resume',
+ 'reload', 'kill', 'wait', 'ingest_autosave', 'load', 'unload', 'evict_history',
+ 'gene', 'genes', 'material', 'simulation', 'independent', 'zones', 'bibites',
+ 'eggs', 'pellets', 'name', 'id', 'head', 'sim_time']
+  .forEach(function(k) { SL_METHODS[k] = 1; });
+
+// highlightStarlark(src) -> HTML string. One left-to-right scan; first match wins
+// per position. Every emitted slice is escaped via escapeHtml; whitespace and
+// newlines are preserved verbatim so the <pre> lines up with the textarea.
+function highlightStarlark(src) {
+  var out = [];
+  var i = 0, n = src.length;
+  function push(text, cls) {
+    var e = escapeHtml(text);
+    out.push(cls ? '<span class="' + cls + '">' + e + '</span>' : e);
+  }
+  while (i < n) {
+    var ch = src[i];
+    // line comment — strings are consumed first, so a '#' inside a string never
+    // reaches here.
+    if (ch === '#') {
+      var nl = src.indexOf('\n', i);
+      if (nl < 0) nl = n;
+      push(src.slice(i, nl), 'com');
+      i = nl;
+      continue;
+    }
+    // triple-quoted string (may span lines)
+    if ((ch === '"' || ch === "'") && src.slice(i, i + 3) === ch + ch + ch) {
+      var q3 = ch + ch + ch;
+      var k = i + 3;
+      while (k < n) {
+        if (src[k] === '\\') { k += 2; continue; }
+        if (src.slice(k, k + 3) === q3) { k += 3; break; }
+        k++;
+      }
+      if (k > n) k = n;
+      push(src.slice(i, k), 'str');
+      i = k;
+      continue;
+    }
+    // single/double-quoted string (single line; closes at EOL if unterminated)
+    if (ch === '"' || ch === "'") {
+      var k2 = i + 1;
+      while (k2 < n && src[k2] !== ch && src[k2] !== '\n') {
+        if (src[k2] === '\\') { k2 += 2; continue; }
+        k2++;
+      }
+      if (k2 < n && src[k2] === ch) k2++;   // include the closing quote
+      push(src.slice(i, k2), 'str');
+      i = k2;
+      continue;
+    }
+    // number (int / float / hex / leading-dot float like .5)
+    if ((ch >= '0' && ch <= '9') ||
+        (ch === '.' && i + 1 < n && src[i + 1] >= '0' && src[i + 1] <= '9')) {
+      var num = /^(?:0[xX][0-9a-fA-F]+|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)/.exec(src.slice(i));
+      var ntok = num ? num[0] : ch;
+      push(ntok, 'arg');
+      i += ntok.length;
+      continue;
+    }
+    // identifier -> keyword / builtin / method / kwarg
+    if (/[A-Za-z_]/.test(ch)) {
+      var idm = /^[A-Za-z_][A-Za-z0-9_]*/.exec(src.slice(i));
+      var word = idm[0];
+      var prev = i > 0 ? src[i - 1] : '';
+      var cls = null;
+      if (prev === '.') {
+        cls = SL_METHODS[word] ? 'fn' : null;
+      } else if (SL_KEYWORDS[word]) {
+        cls = 'kw';
+      } else if (SL_BUILTINS[word]) {
+        cls = 'fn';
+      } else {
+        // kwarg: identifier immediately followed by '=' that is not '=='
+        var after = i + word.length;
+        if (src[after] === '=' && src[after + 1] !== '=') cls = 'arg';
+      }
+      push(word, cls);
+      i += word.length;
+      continue;
+    }
+    // anything else (operators, punctuation, whitespace) — one char, escaped
+    push(ch, null);
+    i++;
+  }
+  return out.join('');
+}
+
+// renderHighlight(code, src) paints highlighted HTML into the <pre>. A trailing
+// newline gets one extra newline so the <pre>'s final (empty) line matches the
+// textarea's layout (a <pre> collapses a single trailing newline). Oversized
+// cells fall back to plain text to bound per-keystroke cost.
+function renderHighlight(code, src) {
+  if (src.length > 20000) { code.textContent = src; return; }   // safety valve
+  var trail = src.charAt(src.length - 1) === '\n' ? '\n' : '';
+  code.innerHTML = highlightStarlark(src) + trail;
+}
+
+/* ---------- autocomplete popup ----------
+   A single shared popup (#ac-popup on document.body) is reused across every code
+   cell. We never touch the textarea/ <pre> overlay layout — the popup is fixed-
+   positioned over the page and the caret pixel position is measured with a hidden
+   mirror <div> that clones the textarea's text metrics. Candidates come straight
+   from the existing highlighter vocab tables (SL_*), extended with the few
+   workspace attributes / kwargs the highlighter doesn't track. */
+
+// candidate pools, built once. AC_METHODS is the "after a dot" pool; AC_TOP_LEVEL
+// is the bare-identifier pool. Both are de-duplicated and sorted lazily per query.
+var AC_METHODS = (function () {
+  var seen = {}, out = [];
+  Object.keys(SL_METHODS).forEach(function (k) { if (!seen[k]) { seen[k] = 1; out.push(k); } });
+  // workspace / world / node attributes the highlighter doesn't tag as methods
+  ['add_world', 'worlds', 'poll', 'start_node', 'transfer', 'world', 'run_id']
+    .forEach(function (k) { if (!seen[k]) { seen[k] = 1; out.push(k); } });
+  return out;
+})();
+var AC_TOP_LEVEL = (function () {
+  var seen = {}, out = [];
+  Object.keys(SL_KEYWORDS).forEach(function (k) { if (!seen[k]) { seen[k] = 1; out.push(k); } });
+  Object.keys(SL_BUILTINS).forEach(function (k) { if (!seen[k]) { seen[k] = 1; out.push(k); } });
+  // common keyword-arguments (offered with the trailing '=' kept)
+  ['world=', 'path=', 'compat_addr=', 'dst=', 'name=', 'sql=', 'connect=', 'scale=']
+    .forEach(function (k) { if (!seen[k]) { seen[k] = 1; out.push(k); } });
+  return out;
+})();
+
+/* Type-aware completion. AC_TYPE_MEMBERS is the exact member set per DSL object
+   type (mirrors the Go bindings' AttrNames), so "after a dot" offers only members
+   valid for the actual receiver instead of the union of everything. AC_RESULT maps
+   the members that return a navigable object to that object's type, so chains like
+   workspace.world("x").open().bibites. resolve step by step. Unknown receivers
+   fall back to AC_METHODS (the old union) so completion degrades, never vanishes. */
+var AC_TYPE_MEMBERS = {
+  workspace:  ['add_world', 'bibites', 'eggs', 'node', 'nodes', 'pellets', 'poll', 'query', 'start_node', 'transfer', 'world', 'worlds'],
+  world:      ['bibites', 'eggs', 'evict_history', 'head', 'history_query', 'id', 'load', 'name', 'open', 'pellets', 'query', 'sim_time', 'unload'],
+  session:    ['bibites', 'commit', 'eggs', 'pellets', 'settings', 'sql', 'zones'],
+  collection: ['count', 'delete', 'group_by', 'max', 'mean', 'median', 'min', 'quantile', 'set', 'set_expr', 'sum', 'where'],
+  node:       ['id', 'ingest_autosave', 'info', 'kill', 'reload', 'resume', 'run_id', 'state', 'status', 'stop', 'wait', 'world'],
+  settings:   ['independent', 'material', 'simulation', 'zones']
+};
+var AC_RESULT = {
+  workspace:  { world: 'world', worlds: 'world', add_world: 'world', start_node: 'node', node: 'node', nodes: 'node', bibites: 'collection', eggs: 'collection', pellets: 'collection' },
+  world:      { open: 'session', bibites: 'collection', eggs: 'collection', pellets: 'collection' },
+  session:    { bibites: 'collection', eggs: 'collection', pellets: 'collection', settings: 'settings' },
+  collection: { where: 'collection', group_by: 'collection' },
+  node:       { world: 'world' },
+  settings:   {}
+};
+
+// acStripGroups(s) removes balanced (...) and [...] spans so a receiver chain
+// like world("a").open()[0].bibites collapses to world.open.bibites.
+function acStripGroups(s) {
+  var out = '', d = 0;
+  for (var k = 0; k < s.length; k++) {
+    var c = s.charAt(k);
+    if (c === '(' || c === '[') { d++; continue; }
+    if (c === ')' || c === ']') { if (d > 0) d--; continue; }
+    if (d === 0) out += c;
+  }
+  return out;
+}
+
+// acReceiverSteps(val, dotPos) returns the identifier steps of the chain ending
+// at the '.' at dotPos (e.g. ['workspace','world','open','bibites']), or null.
+function acReceiverSteps(val, dotPos) {
+  var i = dotPos - 1, depth = 0;
+  while (i >= 0) {
+    var c = val.charAt(i);
+    if (c === ')' || c === ']') { depth++; i--; continue; }
+    if (c === '(' || c === '[') { if (depth === 0) break; depth--; i--; continue; }
+    if (depth > 0) { i--; continue; }
+    if (/[A-Za-z0-9_.]/.test(c)) { i--; continue; }  // depth-0: identifier chars + '.' only (no newline/space — those separate statements)
+    break;
+  }
+  var chain = val.slice(i + 1, dotPos);
+  var steps = acStripGroups(chain).replace(/\s+/g, '').split('.').filter(function (s) { return s.length; });
+  return steps.length ? steps : null;
+}
+
+// acTypeFromSteps walks the chain through AC_RESULT, seeding the base identifier
+// from `workspace` or a known intra-cell variable. Returns a type name or null.
+function acTypeFromSteps(steps, varTypes) {
+  if (!steps || !steps.length) return null;
+  var cur;
+  if (steps[0] === 'workspace') cur = 'workspace';
+  else if (varTypes && varTypes[steps[0]]) cur = varTypes[steps[0]];
+  else return null;
+  for (var i = 1; i < steps.length; i++) {
+    var res = AC_RESULT[cur];
+    var next = res && res[steps[i]];
+    if (!next) return null;
+    cur = next;
+  }
+  return cur;
+}
+
+// acVarTypes(val) infers a name->type map from simple `name = <chain>` lines in
+// the cell, resolved top-to-bottom so `s = w.open()` sees `w` from an earlier line.
+function acVarTypes(val) {
+  var types = {}, lines = val.split('\n');
+  for (var li = 0; li < lines.length; li++) {
+    var m = /^\s*([A-Za-z_]\w*)\s*=\s*([^=].*)$/.exec(lines[li]);
+    if (!m) continue;
+    var rhs = m[2];
+    var rm = /^[A-Za-z_][\w.]*/.exec(acStripGroups(rhs).trim());
+    var steps = rm ? rm[0].replace(/\s+/g, '').split('.').filter(function (s) { return s.length; }) : null;
+    var t = acTypeFromSteps(steps, types);
+    if (t) types[m[1]] = t;
+  }
+  return types;
+}
+
+// shared singletons across all cells
+var acPopup = null, acMirror = null, acActiveTa = null;
+var acItems = [], acSel = 0, acInsertStart = 0;
+
+// acGetContext(ta) -> {prefix, afterDot, insertStart, recvType, varNames}. Walks
+// back from the caret over identifier chars to find the word being typed and
+// whether it follows a '.'. When it does, it resolves the receiver's type so the
+// candidate list can be restricted to that type's valid members.
+function acGetContext(ta) {
+  var val = ta.value, pos = ta.selectionStart;
+  var start = pos;
+  while (start > 0 && /[A-Za-z0-9_]/.test(val.charAt(start - 1))) start--;
+  var prefix = val.slice(start, pos);
+  var afterDot = start > 0 && val.charAt(start - 1) === '.';
+  var varTypes = acVarTypes(val);
+  var recvType = afterDot ? acTypeFromSteps(acReceiverSteps(val, start - 1), varTypes) : null;
+  return { prefix: prefix, afterDot: afterDot, insertStart: start, recvType: recvType, varNames: Object.keys(varTypes) };
+}
+
+// acCandidates -> up to 8 sorted, de-duped, case-sensitive prefix matches.
+//   after a dot: the resolved receiver type's members (AC_TYPE_MEMBERS); if the
+//   type can't be resolved, fall back to AC_METHODS (the union) so it degrades.
+//   bare identifier: keywords/builtins/kwargs plus the cell's known variables.
+// No popup on a blank bare prefix (would list the whole vocab).
+function acCandidates(prefix, afterDot, recvType, varNames) {
+  if (prefix === '' && !afterDot) return [];
+  var pool;
+  if (afterDot) {
+    pool = (recvType && AC_TYPE_MEMBERS[recvType]) ? AC_TYPE_MEMBERS[recvType] : AC_METHODS;
+  } else {
+    pool = (varNames && varNames.length) ? AC_TOP_LEVEL.concat(varNames) : AC_TOP_LEVEL;
+  }
+  var seen = {}, out = [];
+  for (var i = 0; i < pool.length; i++) {
+    var item = pool[i];
+    if (item.indexOf(prefix) === 0 && !seen[item]) { seen[item] = 1; out.push(item); }
+  }
+  out.sort();
+  return out.slice(0, 8);
+}
+
+function acEnsureNodes() {
+  if (acPopup) return;
+  acPopup = document.createElement('div');
+  acPopup.id = 'ac-popup';
+  acPopup.style.display = 'none';
+  document.body.appendChild(acPopup);
+  acMirror = document.createElement('div');
+  acMirror.id = 'ac-mirror';
+  document.body.appendChild(acMirror);
+}
+
+function acHide() {
+  if (acPopup) acPopup.style.display = 'none';
+  acItems = [];
+  acActiveTa = null;
+}
+
+// acCaretRect(ta, insertStart) -> bounding rect of the caret position, measured by
+// cloning the textarea's text metrics into a hidden mirror and anchoring a span at
+// the insertion point. Returns a DOMRect-like {left, bottom}.
+function acCaretRect(ta, insertStart) {
+  acEnsureNodes();
+  var cs = getComputedStyle(ta);
+  var props = ['fontFamily', 'fontSize', 'fontWeight', 'fontStyle', 'letterSpacing',
+    'lineHeight', 'textTransform', 'wordSpacing', 'paddingTop', 'paddingRight',
+    'paddingBottom', 'paddingLeft', 'borderTopWidth', 'borderRightWidth',
+    'borderBottomWidth', 'borderLeftWidth', 'boxSizing', 'tabSize'];
+  props.forEach(function (p) { acMirror.style[p] = cs[p]; });
+  var rect = ta.getBoundingClientRect();
+  acMirror.style.width = rect.width + 'px';
+  // place the mirror exactly over the textarea so the anchor's viewport coords
+  // line up with the real caret, accounting for the textarea's own scroll.
+  acMirror.style.left = rect.left + 'px';
+  acMirror.style.top = (rect.top - ta.scrollTop) + 'px';
+  acMirror.textContent = ta.value.slice(0, insertStart);
+  var anchor = document.createElement('span');
+  anchor.textContent = '​';                // zero-width anchor at the caret
+  acMirror.appendChild(anchor);
+  var ar = anchor.getBoundingClientRect();
+  acMirror.textContent = '';                     // release the cloned text
+  return { left: ar.left, top: ar.top, bottom: ar.bottom };
+}
+
+function acRender() {
+  acEnsureNodes();
+  acPopup.innerHTML = '';
+  acItems.forEach(function (item, idx) {
+    var d = document.createElement('div');
+    d.className = 'ac-item' + (idx === acSel ? ' ac-sel' : '');
+    d.textContent = item;
+    d.addEventListener('mousedown', function (e) {
+      // mousedown (not click) + preventDefault: keep focus so blur doesn't fire
+      // and hide the popup before the selection lands.
+      e.preventDefault();
+      acSel = idx;
+      acAccept(acActiveTa);
+    });
+    acPopup.appendChild(d);
+  });
+  acPopup.style.display = 'block';
+}
+
+function acPosition(ta) {
+  var caret = acCaretRect(ta, acInsertStart);
+  // measure after display:block so width/height are real, then clamp to viewport.
+  var pw = acPopup.offsetWidth, ph = acPopup.offsetHeight;
+  var lineH = caret.bottom - caret.top;          // one text line, for flip-up
+  var left = caret.left, top = caret.bottom;
+  var vw = document.documentElement.clientWidth;
+  var vh = document.documentElement.clientHeight;
+  if (left + pw > vw - 4) left = Math.max(4, vw - pw - 4);
+  if (left < 4) left = 4;
+  // not enough room below the caret -> flip above the caret line; else clamp.
+  if (top + ph > vh - 4) {
+    var above = caret.top - lineH - ph;
+    top = above >= 4 ? above : Math.max(4, vh - ph - 4);
+  }
+  acPopup.style.left = left + 'px';
+  acPopup.style.top = top + 'px';
+}
+
+// acTrigger(ta): recompute context + candidates and show/hide the popup.
+function acTrigger(ta) {
+  var ctx = acGetContext(ta);
+  var cands = acCandidates(ctx.prefix, ctx.afterDot, ctx.recvType, ctx.varNames);
+  if (!cands.length) { acHide(); return; }
+  acActiveTa = ta;
+  acItems = cands;
+  acInsertStart = ctx.insertStart;
+  acSel = 0;
+  acRender();
+  acPosition(ta);
+}
+
+// acAccept(ta): swap the typed prefix for the selected candidate, move the caret
+// to the end of the insertion, re-highlight, hide.
+function acAccept(ta) {
+  if (!ta || !acItems.length) { acHide(); return; }
+  var item = acItems[acSel];
+  var ctx = acGetContext(ta);
+  var start = acInsertStart;
+  var val = ta.value;
+  ta.value = val.slice(0, start) + item + val.slice(ctx.insertStart + ctx.prefix.length);
+  var caret = start + item.length;
+  ta.selectionStart = ta.selectionEnd = caret;
+  acHide();
+  ta.focus();
+  ta.dispatchEvent(new Event('input'));          // re-highlight the <pre>
+}
+
+function acMoveSel(delta) {
+  if (!acItems.length) return;
+  acSel = (acSel + delta + acItems.length) % acItems.length;
+  acRender();
+}
+
 /* ---------- always-editable code cells ----------
    A code cell is editable by default but still LOOKS like the highlighted view:
    we wrap the highlighted <pre class="code"> and overlay a transparent textarea
    on top. The colored highlight shows through; the caret/selection are the
-   textarea's. Mock only — typed text isn't re-highlighted. */
+   textarea's. On input we re-run renderHighlight() against ta.value, so the <pre>
+   both reflects edits/deletes AND stays syntax-highlighted. */
 function setupCodeEditor(cell) {
   if (cell.classList.contains('text')) return;          // text cells edit differently
   const code = cell.querySelector('.code');
@@ -1525,16 +1951,129 @@ function setupCodeEditor(cell) {
   const ta = document.createElement('textarea');
   ta.className = 'code-edit';
   ta.spellcheck = false;
-  ta.value = code.textContent;
+  ta.placeholder = '# Starlark — e.g. print(workspace.query(sql="SELECT count(*) FROM bibites"))';
+  var seed = code.textContent;
+  ta.value = seed;
   wrap.appendChild(ta);
+
+  // Re-highlight the <pre> on input, coalesced to one paint per animation frame.
+  // Only the <pre> is rewritten — never the textarea — so the caret, selection
+  // and undo stack survive untouched. This both colors the code and reflects
+  // edits/deletes (the <pre> mirrors ta.value). Identical box metrics keep the
+  // caret aligned; scroll is mirrored so long content stays lined up.
+  var raf = 0, composing = false;
+  function rehighlight() { renderHighlight(code, ta.value); }
+  ta.addEventListener('input', function() {
+    if (composing || raf) return;             // one paint per frame; reads latest value
+    raf = requestAnimationFrame(function() { raf = 0; rehighlight(); });
+  });
+  ta.addEventListener('compositionstart', function() { composing = true; });
+  ta.addEventListener('compositionend', function() { composing = false; rehighlight(); });
+  ta.addEventListener('scroll', function() {
+    code.scrollTop = ta.scrollTop;
+    code.scrollLeft = ta.scrollLeft;
+  });
+
+  // ---- autocomplete wiring ----
+  // Trigger on input (skip while composing an IME sequence, like rehighlight).
+  ta.addEventListener('input', function() {
+    if (composing) return;
+    acTrigger(ta);
+  });
+  // Intercept navigation keys ONLY while the popup is visible & owned by this ta.
+  // When hidden, do nothing — Tab/Enter pass through so other features can own them.
+  ta.addEventListener('keydown', function(e) {
+    var open = acPopup && acPopup.style.display !== 'none' && acActiveTa === ta;
+    if (!open) return;
+    if (e.key === 'ArrowDown') { e.preventDefault(); acMoveSel(1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); acMoveSel(-1); }
+    else if (e.key === 'Tab' || e.key === 'Enter') { e.preventDefault(); acAccept(ta); }
+    else if (e.key === 'Escape') { e.preventDefault(); acHide(); }
+  });
+  // Hide on blur, but only if this ta currently owns the popup.
+  ta.addEventListener('blur', function() {
+    if (acActiveTa === ta) acHide();
+  });
+
+  // ---- Tab-to-indent / Shift+Tab-to-outdent ----
+  // Registered AFTER the autocomplete keydown listener so that handler runs first.
+  // Soft tabs: indent with 2 spaces (CSS tab-size:2; Starlark is whitespace-sensitive).
+  const INDENT = '  ';
+  ta.addEventListener('keydown', function(e) {
+    // Defer to autocomplete: when its popup consumed Tab (popup-accept) it already
+    // called preventDefault(); leave that alone. When the popup is hidden it does
+    // not preventDefault, so we proceed and indent.
+    if (e.defaultPrevented) return;
+    if (e.key !== 'Tab') return;                 // ignore every other key
+    e.preventDefault();                          // keep focus in the textarea
+
+    var start = ta.selectionStart, end = ta.selectionEnd;
+    var val = ta.value;
+
+    if (!e.shiftKey && start === end) {
+      // Plain Tab, no selection: insert 2 spaces at the caret.
+      // execCommand keeps the native undo stack intact and fires 'input' itself.
+      if (document.execCommand && document.execCommand('insertText', false, INDENT)) {
+        return;                                  // input already dispatched
+      }
+      // Fallback if execCommand is unavailable.
+      ta.value = val.slice(0, start) + INDENT + val.slice(end);
+      ta.selectionStart = ta.selectionEnd = start + INDENT.length;
+      ta.dispatchEvent(new Event('input'));
+      return;
+    }
+
+    // Multi-line (or Shift+Tab): operate on every line the selection touches.
+    // Note: programmatic value splicing resets the textarea's native undo stack
+    // for this multi-line path (acceptable for this tier).
+    var lineStart = val.lastIndexOf('\n', start - 1) + 1;   // start of first line
+    var lineEnd = val.indexOf('\n', end);                   // end of last line
+    if (lineEnd === -1) lineEnd = val.length;
+    var before = val.slice(0, lineStart);
+    var block = val.slice(lineStart, lineEnd);
+    var after = val.slice(lineEnd);
+    var lines = block.split('\n');
+    var newStart = start, newEnd = end;
+
+    if (e.shiftKey) {
+      // Outdent: strip up to 2 leading spaces, or a single leading tab, per line.
+      var firstRemoved = 0, totalRemoved = 0;
+      lines = lines.map(function(line, i) {
+        var removed = 0;
+        if (line.charAt(0) === '\t') {
+          removed = 1;
+        } else {
+          while (removed < INDENT.length && line.charAt(removed) === ' ') removed++;
+        }
+        if (i === 0) firstRemoved = removed;
+        totalRemoved += removed;
+        return line.slice(removed);
+      });
+      // Shift the selection left by what was removed from the first line / total.
+      newStart = Math.max(lineStart, start - firstRemoved);
+      newEnd = Math.max(newStart, end - totalRemoved);
+    } else {
+      // Indent: prefix every touched line with 2 spaces.
+      lines = lines.map(function(line) { return INDENT + line; });
+      newStart = start + INDENT.length;
+      newEnd = end + INDENT.length * lines.length;
+    }
+
+    ta.value = before + lines.join('\n') + after;
+    ta.selectionStart = newStart;
+    ta.selectionEnd = newEnd;
+    ta.dispatchEvent(new Event('input'));        // re-run rAF highlighter + autocomplete
+  });
+
+  renderHighlight(code, seed);                 // initial paint
 }
 // make every code cell shipped in the HTML editable
 document.querySelectorAll('#notebook > .cell').forEach(setupCodeEditor);
 
 /* ---------- cells: build / append / insert (Jupyter-style) ----------
-   Starts at 7 because the notebook ships with static cells [1]..[7]. New cells
-   can be appended at the end OR inserted before/after any existing cell. */
-let cellCount = 7;
+   cellCount drives unique cell ids; renderNotebook()/newNotebook() reset it to 0
+   before (re)building, so this seed only matters for the empty initial page. */
+let cellCount = 0;
 
 // buildCell(type) -> a fresh idle cell element (not yet attached).
 function buildCell(type) {
@@ -1570,8 +2109,7 @@ function buildCell(type) {
       '<span class="spacer"></span>' +
       '<button class="btn btn-sm" onclick="runCell(' + n + ')">&#9654; run</button>' +
     '</div>' +
-    '<pre class="code"># scratch cell — type Starlark here\n' +
-    'print(workspace.query(sql="SELECT count(*) FROM bibites"))</pre>';
+    '<pre class="code"></pre>';   // empty by default — placeholder hints in the editor
   setupCodeEditor(cell);        // overlay the editable textarea on the code view
   return cell;
 }

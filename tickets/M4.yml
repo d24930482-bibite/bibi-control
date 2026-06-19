@@ -1,0 +1,11 @@
+id: M4
+title: Unified child-collection surface (+ remove gene())
+deps:
+    - M3
+phase: pending
+worktree: ""
+artifacts:
+    plan: ""
+    review: ""
+source: docs/missing.md#4
+dod: []

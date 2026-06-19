@@ -126,20 +126,52 @@ func (v *workspaceValue) worldsBuiltin(_ *starlark.Thread, b *starlark.Builtin, 
 	return starlark.NewList(elems), nil
 }
 
-// workspace.world(id) → worldValue or error
+// workspace.world(id) → worldValue or error. The argument may be a world id
+// (UUID) or, for ergonomics, the world's name: the id is tried first, then a
+// unique name match within this workspace.
 func (v *workspaceValue) worldBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	var id string
-	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "id", &id); err != nil {
+	var ref string
+	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "id", &ref); err != nil {
 		return nil, err
 	}
-	w, err := v.ws.store().GetWorld(v.ctx, id)
-	if err != nil {
-		if revisionstore.IsNotFound(err) {
-			return nil, fmt.Errorf("workspace.world: world %q not found", id)
-		}
+	// Try the id first; on a miss, resolve by name so callers can pass the
+	// readable world name instead of the UUID (e.g. workspace.world("My World")).
+	w, err := v.ws.store().GetWorld(v.ctx, ref)
+	if err == nil {
+		return &worldValue{ctx: v.ctx, ws: v.ws, world: w}, nil
+	}
+	if !revisionstore.IsNotFound(err) {
 		return nil, fmt.Errorf("workspace.world: %w", err)
 	}
+	w, err = v.worldByName(ref)
+	if err != nil {
+		return nil, err
+	}
 	return &worldValue{ctx: v.ctx, ws: v.ws, world: w}, nil
+}
+
+// worldByName resolves a world by its name within this workspace — the ergonomic
+// fallback for workspace.world() when the argument is not a world id. A name that
+// matches no world, or more than one, is an error (disambiguate with the id).
+func (v *workspaceValue) worldByName(name string) (revisionstore.World, error) {
+	worlds, err := v.ws.store().ListWorlds(v.ctx, v.ws.ID())
+	if err != nil {
+		return revisionstore.World{}, fmt.Errorf("workspace.world: %w", err)
+	}
+	var match []revisionstore.World
+	for _, w := range worlds {
+		if w.Name == name {
+			match = append(match, w)
+		}
+	}
+	switch len(match) {
+	case 1:
+		return match[0], nil
+	case 0:
+		return revisionstore.World{}, fmt.Errorf("workspace.world: no world with id or name %q", name)
+	default:
+		return revisionstore.World{}, fmt.Errorf("workspace.world: name %q is ambiguous (%d worlds); use the id", name, len(match))
+	}
 }
 
 // workspace.add_world(path, name) → worldValue

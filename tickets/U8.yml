@@ -1,0 +1,16 @@
+id: U8
+title: Node info + logs endpoints
+deps:
+    - U2
+    - U7
+phase: done
+worktree: /home/asemones/Documents/personal_code/bibicontrol-wt/U8
+artifacts:
+    plan: docs/tickets/U8.plan.md
+    review: docs/tickets/U8.review.md
+source: docs/ui_daemon_plan.md#U8
+dod: []
+notes: Detached test uses KillNode (status=stopped) so a row.Status-derived liveness impl stays green; rework to a real stale-running row to pin the active-set invariant
+models:
+    exec: sonnet
+    review: opus

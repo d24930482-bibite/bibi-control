@@ -1,0 +1,15 @@
+id: U3
+title: Workspace endpoints
+deps:
+    - U2
+    - U1
+phase: done
+worktree: /home/asemones/Documents/personal_code/bibicontrol-wt/U3
+artifacts:
+    plan: docs/tickets/U3.plan.md
+    review: docs/tickets/U3.review.md
+source: docs/ui_daemon_plan.md#U3
+dod: []
+models:
+    exec: opus
+    review: opus

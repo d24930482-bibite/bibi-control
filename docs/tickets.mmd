@@ -1,0 +1,59 @@
+flowchart TD
+    M1["M1: Spanning surface: genes/brains kinds + time axis + world_id wrapper"]:::pending
+    M10["M10: Workspace memory & storage lifecycle"]:::pending
+    M2["M2: Generated cheatlist / quick-reference page"]:::pending
+    M3["M3: Case-insensitive name lookups (gene/world/species/zone/column)"]:::pending
+    M4["M4: Unified child-collection surface (+ remove gene())"]:::pending
+    M5["M5: Brain node<->synapse join navigation"]:::pending
+    M6["M6: Transfer: move semantics + body.id remap + full graft surface"]:::pending
+    M7["M7: Bulk / element / NULL / structural write gaps"]:::pending
+    M8["M8: Save-format drift capture & write-path hardening"]:::pending
+    M9["M9: Live-world supervision & observability"]:::pending
+    U1["U1: Registry mutators (rename/delete ws, delete node)"]:::done
+    U10["U10: Frontend foundation + col A"]:::done
+    U11["U11: Frontend worlds + history + add-world"]:::done
+    U12["U12: Frontend notebook"]:::done
+    U13["U13: Frontend live nodes + logs"]:::done
+    U14["U14: Transfer + polish + e2e"]:::done
+    U2["U2: Daemon skeleton + /run + /health + embed shell"]:::done
+    U3["U3: Workspace endpoints"]:::done
+    U4["U4: Worlds + history endpoints"]:::done
+    U5["U5: Upload handler"]:::done
+    U6["U6: Notebook store + endpoints"]:::done
+    U7["U7: Node log capture"]:::done
+    U8["U8: Node info + logs endpoints"]:::done
+    U9["U9: Stub sim binary"]:::done
+    M4 --> M1
+    M1 --> M2
+    M4 --> M2
+    M5 --> M2
+    M3 --> M4
+    M4 --> M5
+    M4 --> M7
+    U2 --> U10
+    U3 --> U10
+    U10 --> U11
+    U4 --> U11
+    U5 --> U11
+    U10 --> U12
+    U6 --> U12
+    U10 --> U13
+    U8 --> U13
+    U9 --> U13
+    U11 --> U14
+    U12 --> U14
+    U13 --> U14
+    U1 --> U3
+    U2 --> U3
+    U2 --> U4
+    U2 --> U5
+    U2 --> U6
+    U2 --> U8
+    U7 --> U8
+
+    classDef pending fill:#eee,stroke:#999;
+    classDef planning fill:#cfe8ff,stroke:#1a73e8;
+    classDef executing fill:#fff3c4,stroke:#e8a91a;
+    classDef reviewing fill:#ffd8c4,stroke:#e8601a;
+    classDef done fill:#c4ffd0,stroke:#1ea84a;
+    classDef blocked fill:#ffc4c4,stroke:#d11;

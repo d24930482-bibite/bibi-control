@@ -1,0 +1,14 @@
+id: U6
+title: Notebook store + endpoints
+deps:
+    - U2
+phase: done
+worktree: /home/asemones/Documents/personal_code/bibicontrol-wt/U6
+artifacts:
+    plan: docs/tickets/U6.plan.md
+    review: docs/tickets/U6.review.md
+source: docs/ui_daemon_plan.md#U6
+dod: []
+models:
+    exec: sonnet
+    review: opus

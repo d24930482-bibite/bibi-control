@@ -1,0 +1,17 @@
+id: U13
+title: Frontend live nodes + logs
+deps:
+    - U10
+    - U8
+    - U9
+phase: done
+worktree: /home/asemones/Documents/personal_code/bibicontrol-wt/U13
+artifacts:
+    plan: docs/tickets/U13.plan.md
+    review: docs/tickets/U13.review.md
+source: docs/ui_daemon_plan.md#U13
+dod: []
+notes: renderNodes builds onclick handlers via innerHTML with JSON.stringify; literal double-quotes break the onclick attribute, so stop/resume/reload/kill, view-logs, and node-world click are dead (build via setAttribute like renderWorlds). The two prior fixes (autosave field, world-ID value) are correct.
+models:
+    exec: sonnet
+    review: opus

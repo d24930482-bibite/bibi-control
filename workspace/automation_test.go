@@ -777,3 +777,48 @@ w.open()
 		t.Fatalf("CommitWorldLoaded on head-less world: want error, got nil")
 	}
 }
+
+// TestAutomation_WorldByNameOrID verifies workspace.world() accepts the readable
+// world name as well as the id (so callers need not paste UUIDs), and errors
+// clearly on an unknown name and on an ambiguous one.
+func TestAutomation_WorldByNameOrID(t *testing.T) {
+	ctx := testCtxAuto(t)
+	ws := newWorkspace(t, ctx)
+
+	w, err := ws.AddWorld(ctx, fixturePath(t, fixtureA), "alpha")
+	if err != nil {
+		t.Fatalf("AddWorld: %v", err)
+	}
+
+	// by name
+	res := mustRunAuto(t, ctx, ws, `print(workspace.world("alpha").name)`)
+	if !strings.Contains(res.Output, "alpha") {
+		t.Fatalf("world by name: Output=%q, want to contain %q", res.Output, "alpha")
+	}
+
+	// by id still works
+	res = mustRunAuto(t, ctx, ws, `print(workspace.world("`+w.ID+`").name)`)
+	if !strings.Contains(res.Output, "alpha") {
+		t.Fatalf("world by id: Output=%q, want to contain %q", res.Output, "alpha")
+	}
+
+	// unknown name/id -> error
+	if _, err := runAuto(ctx, ws, `workspace.world("nope")`); err == nil {
+		t.Fatalf("world(nope): want error, got nil")
+	}
+
+	// ambiguous name (two worlds share a name) -> error suggesting the id
+	if _, err := ws.AddWorld(ctx, fixturePath(t, fixtureA), "dup"); err != nil {
+		t.Fatalf("AddWorld dup1: %v", err)
+	}
+	if _, err := ws.AddWorld(ctx, fixturePath(t, fixtureA), "dup"); err != nil {
+		t.Fatalf("AddWorld dup2: %v", err)
+	}
+	_, ambErr := runAuto(ctx, ws, `workspace.world("dup")`)
+	if ambErr == nil {
+		t.Fatalf("world(dup): want ambiguity error, got nil")
+	}
+	if !strings.Contains(strings.ToLower(ambErr.Error()), "ambiguous") {
+		t.Fatalf("world(dup) error = %q, want it to mention 'ambiguous'", ambErr.Error())
+	}
+}

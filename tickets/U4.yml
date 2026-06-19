@@ -1,0 +1,15 @@
+id: U4
+title: Worlds + history endpoints
+deps:
+    - U2
+phase: done
+worktree: /home/asemones/Documents/personal_code/bibicontrol-wt/U4
+artifacts:
+    plan: docs/tickets/U4.plan.md
+    review: docs/tickets/U4.review.md
+source: docs/ui_daemon_plan.md#U4
+dod: []
+notes: 'gofmt: revisionDTO struct tags misaligned in api/handlers_worlds.go (run gofmt -w)'
+models:
+    exec: sonnet
+    review: opus

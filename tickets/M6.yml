@@ -1,0 +1,10 @@
+id: M6
+title: 'Transfer: move semantics + body.id remap + full graft surface'
+deps: []
+phase: pending
+worktree: ""
+artifacts:
+    plan: ""
+    review: ""
+source: docs/missing.md#6
+dod: []

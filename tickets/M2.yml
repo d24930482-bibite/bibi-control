@@ -1,0 +1,13 @@
+id: M2
+title: Generated cheatlist / quick-reference page
+deps:
+    - M1
+    - M4
+    - M5
+phase: pending
+worktree: ""
+artifacts:
+    plan: ""
+    review: ""
+source: docs/missing.md#2
+dod: []

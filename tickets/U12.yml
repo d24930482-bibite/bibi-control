@@ -1,0 +1,15 @@
+id: U12
+title: Frontend notebook
+deps:
+    - U10
+    - U6
+phase: done
+worktree: /home/asemones/Documents/personal_code/bibicontrol-wt/U12
+artifacts:
+    plan: docs/tickets/U12.plan.md
+    review: docs/tickets/U12.review.md
+source: docs/ui_daemon_plan.md#U12
+dod: []
+models:
+    exec: sonnet
+    review: opus

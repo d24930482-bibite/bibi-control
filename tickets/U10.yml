@@ -1,0 +1,15 @@
+id: U10
+title: Frontend foundation + col A
+deps:
+    - U2
+    - U3
+phase: done
+worktree: /home/asemones/Documents/personal_code/bibicontrol-wt/U10
+artifacts:
+    plan: docs/tickets/U10.plan.md
+    review: docs/tickets/U10.review.md
+source: docs/ui_daemon_plan.md#U10
+dod: []
+models:
+    exec: sonnet
+    review: opus

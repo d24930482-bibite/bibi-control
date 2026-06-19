@@ -321,6 +321,9 @@
     margin: 0; padding: 11px 13px; border: 0;
     font-family: var(--mono); font-size: 12.5px; line-height: 1.55; tab-size: 2;
     white-space: pre; overflow-wrap: normal;
+    /* keep short/empty cells usable and the overlay aligned — without a floor the
+       <pre> collapses and the height:100% textarea collapses with it */
+    min-height: 2.6em; box-sizing: border-box;
   }
   .code-wrap > .code { position: relative; z-index: 0; overflow-x: auto; }
   .code-wrap > .code-edit {
@@ -330,8 +333,32 @@
     caret-color: var(--text); outline: none;
   }
   .code-wrap > .code-edit::selection { background: rgba(111,140,255,.35); }
+  .code-wrap > .code-edit::placeholder { color: var(--text-faint); }
   /* a soft focus ring on the wrapper when the textarea is focused */
   .code-wrap:focus-within { box-shadow: inset 0 0 0 1px var(--accent-dim); }
+
+  /* ---------- autocomplete popup ----------
+     One shared #ac-popup is fixed-positioned over the page at the caret; #ac-mirror
+     is an offscreen clone of the textarea's text metrics used only to measure the
+     caret's pixel position. Colors mirror the dark editor theme. */
+  #ac-popup {
+    position: fixed; z-index: 1000; display: none;
+    background: #1a1d25; border: 1px solid #2a2f3a; border-radius: 6px;
+    padding: 3px; max-width: 260px; max-height: 220px; overflow-y: auto;
+    font-family: var(--mono); font-size: 12px; line-height: 1.4;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, .45);
+  }
+  #ac-popup .ac-item {
+    padding: 3px 8px; border-radius: 4px; cursor: pointer;
+    color: #d6dbe8; white-space: nowrap;
+  }
+  #ac-popup .ac-item:hover { background: #20242e; }
+  #ac-popup .ac-item.ac-sel { background: #2a3563; color: #e6e8ee; }
+  #ac-mirror {
+    position: fixed; visibility: hidden; overflow: hidden;
+    top: 0; left: 0; pointer-events: none; white-space: pre-wrap;
+    overflow-wrap: break-word;
+  }
 
   .cell-out {
     border-top: 1px solid var(--border-soft);

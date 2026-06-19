@@ -1,0 +1,17 @@
+id: U11
+title: Frontend worlds + history + add-world
+deps:
+    - U10
+    - U4
+    - U5
+phase: done
+worktree: /home/asemones/Documents/personal_code/bibicontrol-wt/U11
+artifacts:
+    plan: docs/tickets/U11.plan.md
+    review: docs/tickets/U11.review.md
+source: docs/ui_daemon_plan.md#U11
+dod: []
+notes: Two out-of-bounds cosmetic edits violate the col-C/telemetry-poll no-touch rule (SPINNER glyph + countdown comment); revert both lines to restore clean serial-merge surface for U12
+models:
+    exec: sonnet
+    review: sonnet

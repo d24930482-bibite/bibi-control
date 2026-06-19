@@ -1,0 +1,13 @@
+id: U1
+title: Registry mutators (rename/delete ws, delete node)
+deps: []
+phase: done
+worktree: /home/asemones/Documents/personal_code/bibicontrol-wt/U1
+artifacts:
+    plan: docs/tickets/U1.plan.md
+    review: docs/tickets/U1.review.md
+source: docs/ui_daemon_plan.md#U1
+dod: []
+models:
+    exec: opus
+    review: opus

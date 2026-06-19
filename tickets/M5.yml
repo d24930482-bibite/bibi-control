@@ -1,0 +1,11 @@
+id: M5
+title: Brain node<->synapse join navigation
+deps:
+    - M4
+phase: pending
+worktree: ""
+artifacts:
+    plan: ""
+    review: ""
+source: docs/missing.md#5
+dod: []
