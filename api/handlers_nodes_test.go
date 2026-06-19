@@ -211,8 +211,11 @@ func TestNodesInfo_AliveAndLogs(t *testing.T) {
 			t.Fatalf("n-alive not in nodes/info response; got %v", infos)
 		}
 
-		if got := found["liveness"]; got != "alive" {
-			t.Errorf("liveness = %v, want alive", got)
+		// NodeLiveness returns "running" for an active, healthy process. The
+		// HTTP liveness field must match because handleNodesInfo calls the same
+		// shared helper as Starlark node.status.
+		if got := found["liveness"]; got != "running" {
+			t.Errorf("liveness = %v, want running", got)
 		}
 		if got, ok := found["tps"].(float64); !ok || got != 60 {
 			t.Errorf("tps = %v, want 60", found["tps"])
@@ -469,6 +472,101 @@ func TestDeleteNode(t *testing.T) {
 			t.Fatal("delete unknown 404: expected non-empty error field")
 		}
 	})
+}
+
+// TestNodesInfo_Reaped verifies that after the supervisor reaps a dead node:
+//   - GET /nodes/info reports a liveness verdict that EXACTLY MATCHES what
+//     workspace.NodeLiveness returns for the same node id (proving both surfaces
+//     share the same helper and cannot disagree).
+//   - The persisted status is no longer "running".
+//
+// Strategy: start a fast-exit process on ws, seed ws into a fresh daemon, wait
+// for the reaper to fire (polls ws.Node until false), then call /nodes/info and
+// compare the HTTP liveness field against the direct NodeLiveness() return value.
+func TestNodesInfo_Reaped(t *testing.T) {
+	ctx := testCtx(t)
+	root := t.TempDir()
+
+	ws, err := workspace.Create(ctx, root, "owner", "reaped-ws")
+	if err != nil {
+		t.Fatalf("workspace.Create: %v", err)
+	}
+	id := ws.ID()
+	t.Cleanup(func() { _ = ws.Close() })
+
+	world, err := ws.AddWorld(ctx, testFixtureSave(t), "reaped-world")
+	if err != nil {
+		t.Fatalf("AddWorld: %v", err)
+	}
+
+	// Use a fast-exit process so the supervisor reaps it quickly.
+	_, _, err = ws.StartNode(ctx, workspace.StartNodeSpec{
+		WorldID:        world.ID,
+		NodeID:         "n-reaped",
+		Process:        ipc.ProcessSpec{Path: "/bin/true"},
+		ConnectOnStart: false,
+	})
+	if err != nil {
+		// /bin/true may not be available on all platforms; skip gracefully.
+		t.Skipf("StartNode with /bin/true: %v — skipping (fast-exit process not available)", err)
+	}
+
+	// Wait for the supervisor to reap the node (polls ws.Node until false).
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, active := ws.Node("n-reaped"); !active {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, stillActive := ws.Node("n-reaped"); stillActive {
+		t.Fatal("n-reaped still active after 5s — supervisor did not reap")
+	}
+
+	// Read the ground-truth verdict directly from the shared helper.
+	// This is what Starlark node.status would return for the same node.
+	wantLiveness := ws.NodeLiveness(ctx, "n-reaped")
+
+	// Wire the daemon with the workspace.
+	d := api.New(root, "owner")
+	d.SeedWorkspace(id, ws)
+	t.Cleanup(func() { _ = d.Close() })
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workspaces/"+id+"/nodes/info", nil)
+	rec := httptest.NewRecorder()
+	d.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("nodes/info (reaped): got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var infos []map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&infos); err != nil {
+		t.Fatalf("decode nodes/info: %v", err)
+	}
+
+	var found map[string]any
+	for _, obj := range infos {
+		if obj["id"] == "n-reaped" {
+			found = obj
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("n-reaped not in nodes/info response; got %v", infos)
+	}
+
+	// The HTTP liveness field MUST equal the shared helper's verdict.
+	// If handleNodesInfo used a separate inline ladder this assertion would
+	// fail (e.g. "alive" vs "running", or "detached" vs "exited").
+	if got := found["liveness"]; got != wantLiveness {
+		t.Errorf("HTTP liveness = %q, NodeLiveness() = %q — surfaces diverge (shared helper not used)", got, wantLiveness)
+	}
+
+	// The persisted status must NOT be "running" after reaping.
+	if got := found["status"]; got == "running" {
+		t.Errorf("status = %q after reap, want exited or crashed (supervisor reconcile failed)", got)
+	}
 }
 
 // TestNodesInfo_ResolveNotFound verifies that requesting nodes/info for an

@@ -13,18 +13,18 @@ import (
 // nodeInfoResponse is the JSON shape for one node returned by GET
 // /api/workspaces/{id}/nodes/info.
 //
-// Liveness is derived from the active-set membership (ws.Node), not
-// row.Status. The persisted Status is surfaced only as an informational
-// field so the frontend can distinguish "running" rows whose process
-// is gone (detached) from cleanly stopped rows.
+// Liveness is derived from workspace.NodeLiveness (the shared helper used by
+// both this handler and the Starlark node.status attribute) so the two surfaces
+// always agree. Possible values: "running", "crashed", "stopped", "exited",
+// "detached". The persisted Status is surfaced as an informational field.
 type nodeInfoResponse struct {
 	ID       string `json:"id"`
 	WorldID  string `json:"world_id"`
 	RunID    string `json:"run_id"`
-	Liveness string `json:"liveness"` // "alive", "crashed", "detached"
+	Liveness string `json:"liveness"` // "running", "crashed", "stopped", "exited", "detached"
 	Status   string `json:"status"`   // persisted, informational only
 
-	// Telemetry — present only when liveness=="alive" and INFO succeeded.
+	// Telemetry — present only when liveness=="running" and INFO succeeded.
 	TPS          *float64          `json:"tps,omitempty"`
 	RealTPS      *float64          `json:"real_tps,omitempty"`
 	Paused       *bool             `json:"paused,omitempty"`
@@ -50,8 +50,11 @@ type logLineJSON struct {
 // handleNodesInfo handles GET /api/workspaces/{id}/nodes/info.
 //
 // It returns a JSON array of every persisted node row, each annotated with a
-// liveness verdict derived from the live active set and a short non-blocking
-// INFO round-trip — never from the persisted Status column.
+// liveness verdict from workspace.NodeLiveness (the shared helper also used by
+// the Starlark node.status attribute) and a short non-blocking INFO round-trip
+// for active nodes. The liveness verdict is always derived from active-set
+// membership first; the persisted Status column is consulted only for inactive
+// nodes (to distinguish "stopped" from "exited" from "detached").
 func (d *Daemon) handleNodesInfo(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	ws, err := d.ws(r.Context(), id)
@@ -79,23 +82,22 @@ func (d *Daemon) handleNodesInfo(w http.ResponseWriter, r *http.Request) {
 			Status:  row.Status,
 		}
 
-		rt, live := ws.Node(row.NodeID)
-		if !live {
-			// No active handle — stale or cleanly-stopped row. The persisted
-			// status is surfaced via Status; the liveness verdict is detached.
-			obj.Liveness = "detached"
-		} else {
-			// Active handle exists: inspect the process state.
-			st := rt.State()
-			if st.Process.State == ipc.ProcessExited || st.Process.State == ipc.ProcessFailed {
-				obj.Liveness = "crashed"
-				obj.ExitCode = st.Process.ExitCode
-			} else {
-				// Process is running.
-				obj.Liveness = "alive"
+		// Liveness verdict from the shared helper — same logic as Starlark
+		// node.status so the two surfaces always agree.
+		obj.Liveness = ws.NodeLiveness(r.Context(), row.NodeID)
 
-				// Telemetry only when a compat session is established.
-				if rt.Connected() {
+		// Telemetry and exit-code are only meaningful for active nodes.
+		// Re-check active membership after NodeLiveness to avoid a second
+		// lock round-trip on the inactive path.
+		if obj.Liveness == "running" || obj.Liveness == "crashed" {
+			rt, live := ws.Node(row.NodeID)
+			if live {
+				st := rt.State()
+				if st.Process.State == ipc.ProcessExited || st.Process.State == ipc.ProcessFailed {
+					obj.ExitCode = st.Process.ExitCode
+				} else if rt.Connected() {
+					// Telemetry only when a compat session is established and
+					// the process is still running (liveness == "running").
 					infoCtx, cancel := context.WithTimeout(r.Context(), 750*time.Millisecond)
 					info, infoErr := ws.NodeInfo(infoCtx, row.NodeID)
 					cancel()
@@ -110,7 +112,7 @@ func (d *Daemon) handleNodesInfo(w http.ResponseWriter, r *http.Request) {
 						obj.SimTime = &simTime
 						obj.LastAutosave = info.LastAutosave
 					}
-					// On INFO error (timeout, transient): keep liveness=="alive"
+					// On INFO error (timeout, transient): keep liveness=="running"
 					// but omit telemetry — do not downgrade to crashed.
 				}
 			}

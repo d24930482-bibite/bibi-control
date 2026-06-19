@@ -5,6 +5,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/asemones/bibicontrol/ipc"
 	"github.com/asemones/bibicontrol/noderuntime"
@@ -382,6 +383,176 @@ func TestStartNode_UnknownNodeStop(t *testing.T) {
 	}
 	if err := ws.KillNode(ctx, "ghost-node"); err == nil {
 		t.Errorf("KillNode on unknown node should return error")
+	}
+}
+
+// shortLivedSpec returns a ProcessSpec for a fast-exit process (/bin/true or
+// /bin/sleep 0). Tests that exercise the supervisor reaper use this so they
+// don't need to kill the process manually.
+func shortLivedSpec(t *testing.T) ipc.ProcessSpec {
+	t.Helper()
+	if _, err := os.Stat("/bin/true"); err == nil {
+		return ipc.ProcessSpec{Path: "/bin/true"}
+	}
+	if _, err := os.Stat("/bin/sleep"); err == nil {
+		return ipc.ProcessSpec{Path: "/bin/sleep", Args: []string{"0"}}
+	}
+	t.Skip("neither /bin/true nor /bin/sleep available on this platform")
+	return ipc.ProcessSpec{}
+}
+
+// pollUntil polls condition up to maxWait with a 5ms interval. Returns true if
+// condition becomes true within maxWait.
+func pollUntil(maxWait time.Duration, condition func() bool) bool {
+	deadline := time.Now().Add(maxWait)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return false
+}
+
+// TestSupervisor_ReapEnablesRestartOfWorld is the load-bearing supervisor test:
+// start a node on world W backed by a fast-exit process; wait for the reaper to
+// remove it; assert a fresh StartNode for W SUCCEEDS (previously it would fail
+// with "already bound"). Also assert the persisted row is "exited" or "crashed",
+// not "running".
+func TestSupervisor_ReapEnablesRestartOfWorld(t *testing.T) {
+	ctx := context.Background()
+	ws, world := createTestWorkspaceAndWorld(t, ctx)
+	defer ws.Close()
+
+	proc := shortLivedSpec(t)
+
+	_, _, err := ws.StartNode(ctx, StartNodeSpec{
+		WorldID:        world.ID,
+		NodeID:         "reap-node",
+		Process:        proc,
+		ConnectOnStart: false,
+	})
+	if err != nil {
+		t.Fatalf("StartNode: %v", err)
+	}
+
+	// Wait for the reaper to remove the node from the active set.
+	if !pollUntil(5*time.Second, func() bool {
+		_, active := ws.Node("reap-node")
+		return !active
+	}) {
+		t.Fatalf("node was not reaped within 5 seconds; still in active set")
+	}
+
+	// Persisted status must be "exited" or "crashed", NOT "running".
+	after, err := ws.PersistedNodes(ctx)
+	if err != nil {
+		t.Fatalf("PersistedNodes: %v", err)
+	}
+	var found bool
+	for _, n := range after {
+		if n.NodeID == "reap-node" {
+			found = true
+			if n.Status == "running" {
+				t.Errorf("persisted status = %q after reap, want exited or crashed (not running)", n.Status)
+			}
+			if n.Status != "exited" && n.Status != "crashed" {
+				t.Errorf("persisted status = %q after reap, want exited or crashed", n.Status)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no persisted row for reap-node")
+	}
+
+	// The world is now free — a fresh StartNode MUST SUCCEED.
+	_, _, err = ws.StartNode(ctx, StartNodeSpec{
+		WorldID:        world.ID,
+		NodeID:         "reap-node-2",
+		Process:        sleepSpec(t),
+		ConnectOnStart: false,
+	})
+	if err != nil {
+		t.Fatalf("StartNode after reap: want success, got: %v", err)
+	}
+	// Clean up the second node.
+	_ = ws.KillNode(ctx, "reap-node-2")
+}
+
+// TestSupervisor_CleanStopCancelsWatcher verifies that a workspace-driven
+// StopNode cancels the supervisor watcher so the status remains "stopped" and is
+// not later clobbered to "exited" by a late-firing reaper.
+func TestSupervisor_CleanStopCancelsWatcher(t *testing.T) {
+	ctx := context.Background()
+	ws, world := createTestWorkspaceAndWorld(t, ctx)
+	defer ws.Close()
+
+	proc := sleepSpec(t)
+
+	_, _, err := ws.StartNode(ctx, StartNodeSpec{
+		WorldID:        world.ID,
+		NodeID:         "stop-cancel-node",
+		Process:        proc,
+		ConnectOnStart: false,
+	})
+	if err != nil {
+		t.Fatalf("StartNode: %v", err)
+	}
+
+	if err := ws.StopNode(ctx, "stop-cancel-node", noderuntime.StopOptions{}); err != nil {
+		t.Fatalf("StopNode: %v", err)
+	}
+
+	// Give any residual reaper goroutine time to fire (it must NOT fire).
+	time.Sleep(30 * time.Millisecond)
+
+	// Status must be "stopped" (from StopNode), not "exited" (from reaper).
+	after, err := ws.PersistedNodes(ctx)
+	if err != nil {
+		t.Fatalf("PersistedNodes: %v", err)
+	}
+	for _, n := range after {
+		if n.NodeID == "stop-cancel-node" {
+			if n.Status != "stopped" {
+				t.Errorf("persisted status = %q after clean stop, want stopped", n.Status)
+			}
+			return
+		}
+	}
+	t.Fatalf("no persisted row for stop-cancel-node")
+}
+
+// TestSupervisor_CloseJoinsWatchers verifies that Close joins all watcher
+// goroutines (via supervisor.Stop) and does not leak. Also exercises the
+// stop-before-drain ordering requirement.
+func TestSupervisor_CloseJoinsWatchers(t *testing.T) {
+	ctx := context.Background()
+	ws, world := createTestWorkspaceAndWorld(t, ctx)
+
+	proc := sleepSpec(t)
+
+	rt, _, err := ws.StartNode(ctx, StartNodeSpec{
+		WorldID:        world.ID,
+		NodeID:         "close-join-node",
+		Process:        proc,
+		ConnectOnStart: false,
+	})
+	if err != nil {
+		t.Fatalf("StartNode: %v", err)
+	}
+	_ = rt
+
+	// Close must return without hanging (supervisor.Stop joins the watcher).
+	done := make(chan error, 1)
+	go func() { done <- ws.Close() }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Logf("Close returned error (acceptable best-effort): %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close did not return within 10 seconds — watcher goroutine leaked")
 	}
 }
 

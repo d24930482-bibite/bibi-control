@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/asemones/bibicontrol/ipc"
 	"github.com/asemones/bibicontrol/revisionstore"
 	"github.com/asemones/bibicontrol/script"
 	"github.com/asemones/bibicontrol/script/thebibites"
@@ -922,5 +923,128 @@ func TestAutomation_WorldByNameCaseInsensitive(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(ambErr.Error()), "ambiguous") {
 		t.Fatalf("world(Beta) error=%q, want it to mention 'ambiguous'", ambErr.Error())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestAutomation_NodeWait_NodeExited — M9: node.wait returns node_exited=True
+// when the node's OS process dies mid-wait instead of surfacing an opaque IPC
+// error. Drive with a fast-exit process and a sim_time predicate that never
+// holds, to confirm the exit path rather than the pred-satisfied path.
+// ---------------------------------------------------------------------------
+
+func TestAutomation_NodeWait_NodeExited(t *testing.T) {
+	if _, err := os.Stat("/bin/true"); err != nil {
+		if _, err2 := os.Stat("/bin/sleep"); err2 != nil {
+			t.Skip("neither /bin/true nor /bin/sleep available")
+		}
+	}
+
+	ctx := testCtxAuto(t)
+	ws, world := createTestWorkspaceAndWorld(t, ctx)
+	defer ws.Close()
+
+	// Determine a fast-exit process.
+	proc := ipc.ProcessSpec{Path: "/bin/true"}
+	if _, err := os.Stat("/bin/true"); err != nil {
+		proc = ipc.ProcessSpec{Path: "/bin/sleep", Args: []string{"0"}}
+	}
+
+	_, _, err := ws.StartNode(ctx, StartNodeSpec{
+		WorldID:        world.ID,
+		NodeID:         "wait-exit-node",
+		Process:        proc,
+		ConnectOnStart: false,
+	})
+	if err != nil {
+		t.Fatalf("StartNode: %v", err)
+	}
+
+	// Wait for the process to be reaped so the node is no longer active.
+	// The Starlark wait below will pick this up via the membership check.
+	if !pollUntil(5*time.Second, func() bool {
+		_, active := ws.Node("wait-exit-node")
+		return !active
+	}) {
+		t.Fatalf("node was not reaped within 5 seconds")
+	}
+
+	// Now run node.wait with a never-satisfiable condition. Because the node
+	// is reaped, wait should return node_exited=True, not raise an error.
+	prog := `
+n = workspace.node("wait-exit-node")
+r = n.wait(sim_time=9999999.0, timeout="5s", poll_every="10ms")
+print(r["node_exited"])
+print(r["timed_out"])
+`
+	res, err := runAuto(ctx, ws, prog)
+	if err != nil {
+		t.Fatalf("node.wait raised an error (want clean node_exited dict): %v\nOutput: %s", err, res.Output)
+	}
+	lines := strings.Split(strings.TrimRight(res.Output, "\n"), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected >=2 output lines, got %v\nOutput:\n%s", lines, res.Output)
+	}
+	if lines[0] != "True" {
+		t.Errorf("node_exited = %q, want True", lines[0])
+	}
+	if lines[1] != "False" {
+		t.Errorf("timed_out = %q, want False", lines[1])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestAutomation_NodeStatus_LiveVerdictAfterReap — M9: node.status returns the
+// live verdict after the supervisor reaps the node (not the stale snapshot
+// captured at node handle creation).
+// ---------------------------------------------------------------------------
+
+func TestAutomation_NodeStatus_LiveVerdictAfterReap(t *testing.T) {
+	if _, err := os.Stat("/bin/true"); err != nil {
+		if _, err2 := os.Stat("/bin/sleep"); err2 != nil {
+			t.Skip("neither /bin/true nor /bin/sleep available")
+		}
+	}
+
+	ctx := testCtxAuto(t)
+	ws, world := createTestWorkspaceAndWorld(t, ctx)
+	defer ws.Close()
+
+	proc := ipc.ProcessSpec{Path: "/bin/true"}
+	if _, err := os.Stat("/bin/true"); err != nil {
+		proc = ipc.ProcessSpec{Path: "/bin/sleep", Args: []string{"0"}}
+	}
+
+	_, _, err := ws.StartNode(ctx, StartNodeSpec{
+		WorldID:        world.ID,
+		NodeID:         "status-exit-node",
+		Process:        proc,
+		ConnectOnStart: false,
+	})
+	if err != nil {
+		t.Fatalf("StartNode: %v", err)
+	}
+
+	// Wait for the node to be reaped.
+	if !pollUntil(5*time.Second, func() bool {
+		_, active := ws.Node("status-exit-node")
+		return !active
+	}) {
+		t.Fatalf("node was not reaped within 5 seconds")
+	}
+
+	// node.status must return the live verdict ("exited" or "crashed"), NOT
+	// the stale "running" snapshot that was captured at node handle creation.
+	prog := `
+n = workspace.node("status-exit-node")
+print(n.status)
+`
+	res := mustRunAuto(t, ctx, ws, prog)
+	got := strings.TrimSpace(res.Output)
+	if got == "running" {
+		t.Errorf("node.status = %q after reap, want exited or crashed (stale snapshot bug)", got)
+	}
+	if got != "exited" && got != "crashed" {
+		t.Errorf("node.status = %q after reap, want exited or crashed", got)
 	}
 }

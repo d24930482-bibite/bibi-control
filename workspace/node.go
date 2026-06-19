@@ -183,6 +183,17 @@ func (w *Workspace) StartNode(ctx context.Context, spec StartNodeSpec) (*noderun
 	w.nodes[nodeID] = rt
 	w.mu.Unlock()
 
+	// M9: Register a supervisor watcher AFTER the active-set insert so the
+	// reaper only fires for nodes that are actually in w.nodes. A process that
+	// dies between noderuntime.Start and the insert is caught by the existing
+	// post-start re-check above (if the process is already dead when we reach
+	// here the Done channel is already closed and the goroutine fires
+	// immediately, but reapNode's same-runtime guard makes it a no-op if the
+	// workspace has already been closed or the node replaced).
+	if w.supervisor != nil {
+		w.supervisor.Watch(nodeID, rt.Process().Done(), w.reapNode)
+	}
+
 	return rt, node, nil
 }
 
@@ -242,6 +253,13 @@ func (w *Workspace) StopNode(ctx context.Context, nodeID string, opts noderuntim
 	}
 	w.mu.Unlock()
 
+	// M9: Cancel the supervisor watcher BEFORE stopping the process so the
+	// reaper does not double-fire after a clean stop. Cancel is idempotent if
+	// the watcher has already fired (the process died concurrently).
+	if w.supervisor != nil {
+		w.supervisor.Cancel(nodeID)
+	}
+
 	// Stop the process (outside the lock to avoid holding it across blocking
 	// waits).
 	if _, err := rt.Stop(ctx, opts); err != nil {
@@ -274,6 +292,12 @@ func (w *Workspace) KillNode(ctx context.Context, nodeID string) error {
 		return fmt.Errorf("workspace: KillNode: unknown node %q", nodeID)
 	}
 	w.mu.Unlock()
+
+	// M9: Cancel the supervisor watcher before killing so the reaper does not
+	// double-fire. Cancel is idempotent if the watcher has already fired.
+	if w.supervisor != nil {
+		w.supervisor.Cancel(nodeID)
+	}
 
 	_ = rt.Kill()
 	_ = rt.Close()
@@ -332,4 +356,95 @@ func (w *Workspace) setNodeStatusByLogicalID(ctx context.Context, nodeID, status
 		}
 	}
 	return fmt.Errorf("workspace: setNodeStatus: no persisted row for logical node %q", nodeID)
+}
+
+// reapNode is the supervisor callback fired when a node's OS process exits
+// without a workspace-driven Stop/Kill. It:
+//  1. Under w.mu: removes the runtime from w.nodes if it is still present.
+//     The invariant against reaping a NEW node that reused the logical id is
+//     held by two complementary guards: (a) the Supervisor's sync.Once ensures
+//     onExit fires at most once per Watch registration, and (b) the watcher
+//     goroutine only deletes its own entry from s.entries when
+//     s.entries[nodeID] == e, so a superseding Watch cannot be accidentally
+//     cancelled or double-fired.
+//  2. Drops the log ring for the node.
+//  3. Writes a terminal persisted status ("crashed" for a failed exit,
+//     "exited" otherwise). The write is idempotent-safe against a concurrent
+//     StopNode/KillNode write (last-writer-wins, both write a terminal status).
+//
+// reapNode must NOT block while holding w.mu (mirrors the park-outside-lock
+// discipline in StopNode). All non-trivial operations run after the lock is
+// released.
+func (w *Workspace) reapNode(nodeID string) {
+	w.mu.Lock()
+	rt, exists := w.nodes[nodeID]
+	if exists {
+		delete(w.nodes, nodeID)
+	}
+	w.mu.Unlock()
+
+	if !exists || rt == nil {
+		// Already removed by a concurrent StopNode/KillNode or Close drain.
+		return
+	}
+
+	// Drop the log ring for the reaped node.
+	w.dropLogRing(nodeID)
+
+	// Derive the terminal status from the process exit state.
+	// ipc.ProcessFailed → "crashed"; ipc.ProcessExited → "exited".
+	status := "exited"
+	if proc := rt.Process(); proc != nil {
+		state := proc.Info().State
+		if state == "failed" {
+			status = "crashed"
+		}
+	}
+
+	// Persist the terminal status. Use background context since reapNode is
+	// called from the supervisor goroutine (no request context available).
+	ctx := context.Background()
+	_ = w.setNodeStatusByLogicalID(ctx, nodeID, status)
+}
+
+// NodeLiveness returns a live liveness verdict string for the given nodeID.
+// The verdict is derived from the active-set membership and the process state:
+//
+//   - "running"   — the node is in the active set and its process is alive.
+//   - "crashed"   — the node is in the active set but its process has failed.
+//   - "stopped"   — the node is NOT active; its persisted status is "stopped".
+//   - "exited"    — the node is NOT active; its persisted status is "exited".
+//   - "detached"  — the node is NOT active and its persisted row is still
+//     "running" (the supervisor has not yet reconciled it, or this is a fresh
+//     Open with a stale row) — or no persisted row exists at all.
+//
+// NodeLiveness is the single source of truth called by handleNodesInfo and the
+// Starlark node.status attribute so the HTTP and Starlark surfaces always agree.
+func (w *Workspace) NodeLiveness(ctx context.Context, nodeID string) string {
+	rt, live := w.Node(nodeID)
+	if live {
+		st := rt.State()
+		if st.Process.State == "exited" || st.Process.State == "failed" {
+			return "crashed"
+		}
+		return "running"
+	}
+	// Not active — consult the most-recent persisted row.
+	// A persisted "running" status with no active entry means the supervisor
+	// has not yet reconciled the row (or this is a fresh Open with a stale
+	// "running" row). Expose this as "detached" so callers can distinguish
+	// "cleanly stopped" from "process gone but row not yet updated".
+	nodes, err := w.store().ListNodes(ctx, w.id)
+	if err != nil {
+		return "detached"
+	}
+	for _, n := range nodes {
+		if n.NodeID == nodeID {
+			if n.Status == "running" {
+				return "detached"
+			}
+			return n.Status
+		}
+	}
+	return "detached"
 }
