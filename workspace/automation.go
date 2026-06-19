@@ -637,7 +637,11 @@ func (v *nodeValue) Attr(name string) (starlark.Value, error) {
 	case "world":
 		return starlark.String(v.node.WorldID), nil
 	case "status":
-		return starlark.String(v.node.Status), nil
+		// M9: Return the live verdict instead of the stale snapshot captured at
+		// node handle creation. NodeLiveness re-reads the active set and (when
+		// not active) the persisted row, so it reflects post-death reality within
+		// the same run.
+		return starlark.String(v.ws.NodeLiveness(v.ctx, v.node.NodeID)), nil
 	case "info":
 		return starlark.NewBuiltin("info", v.infoBuiltin), nil
 	case "state":
@@ -954,20 +958,35 @@ func (v *nodeValue) waitBuiltin(_ *starlark.Thread, b *starlark.Builtin, args st
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	start := time.Now()
+	var lastInfo ipc.InfoResult
 	for {
+		// M9: Check liveness first. If the supervisor has reaped the node (or
+		// the node is no longer active for any reason), return a clean
+		// node_exited=True verdict instead of surfacing an opaque IPC error.
+		if _, active := v.ws.Node(v.node.NodeID); !active {
+			return waitResultDictExited(lastInfo, time.Since(start)), nil
+		}
+
 		info, infoErr := v.ws.NodeInfo(v.ctx, v.node.NodeID)
 		if infoErr != nil {
+			// Re-check active-set: the node may have been reaped between the
+			// membership check above and the NodeInfo call.
+			if _, active := v.ws.Node(v.node.NodeID); !active {
+				return waitResultDictExited(lastInfo, time.Since(start)), nil
+			}
 			return nil, fmt.Errorf("node.wait: %w", infoErr)
 		}
+		lastInfo = info
+
 		if pred(info) {
-			return waitResultDict(info, false, time.Since(start)), nil
+			return waitResultDict(info, false, false, time.Since(start)), nil
 		}
 		select {
 		case <-v.ctx.Done():
 			// Hard cancel / run-deadline: surface the engine's "cancelled" path.
 			return nil, v.ctx.Err()
 		case <-deadline.C:
-			return waitResultDict(info, true, time.Since(start)), nil
+			return waitResultDict(info, true, false, time.Since(start)), nil
 		case <-time.After(pollEvery):
 		}
 	}
@@ -1078,10 +1097,26 @@ func buildWaitPredicate(simTimeV, pausedV, autosaveAfterV starlark.Value) (func(
 	}, nil
 }
 
-func waitResultDict(info ipc.InfoResult, timedOut bool, waited time.Duration) *starlark.Dict {
-	d := starlark.NewDict(3)
+// waitResultDict builds the standard node.wait result dict. node_exited is
+// False for normal (pred-satisfied or timed-out) exits.
+func waitResultDict(info ipc.InfoResult, timedOut bool, nodeExited bool, waited time.Duration) *starlark.Dict {
+	d := starlark.NewDict(4)
 	_ = d.SetKey(starlark.String("info"), infoResultToDict(info))
 	_ = d.SetKey(starlark.String("timed_out"), starlark.Bool(timedOut))
+	_ = d.SetKey(starlark.String("node_exited"), starlark.Bool(nodeExited))
+	_ = d.SetKey(starlark.String("waited"), starlark.Float(waited.Seconds()))
+	return d
+}
+
+// waitResultDictExited builds a node.wait result dict for the M9 node_exited
+// case: node_exited=True, timed_out=False, info=last-info-or-None.
+func waitResultDictExited(lastInfo ipc.InfoResult, waited time.Duration) *starlark.Dict {
+	d := starlark.NewDict(4)
+	// lastInfo is the zero value when the node died before the first successful
+	// NodeInfo call; use None in that case.
+	_ = d.SetKey(starlark.String("info"), infoResultToDict(lastInfo))
+	_ = d.SetKey(starlark.String("timed_out"), starlark.Bool(false))
+	_ = d.SetKey(starlark.String("node_exited"), starlark.Bool(true))
 	_ = d.SetKey(starlark.String("waited"), starlark.Float(waited.Seconds()))
 	return d
 }

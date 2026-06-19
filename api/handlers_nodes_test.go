@@ -471,6 +471,90 @@ func TestDeleteNode(t *testing.T) {
 	})
 }
 
+// TestNodesInfo_Reaped verifies that after the supervisor reaps a dead node,
+// GET /nodes/info reports liveness="crashed" (or "detached" if the reaper has
+// already removed it) and the persisted status is no longer "running".
+//
+// Strategy: start a fast-exit process on ws, seed ws into a fresh daemon, wait
+// for the reaper to fire, then poll /nodes/info. The node must NOT appear with
+// liveness="alive" or status="running" after reaping.
+func TestNodesInfo_Reaped(t *testing.T) {
+	ctx := testCtx(t)
+	root := t.TempDir()
+
+	ws, err := workspace.Create(ctx, root, "owner", "reaped-ws")
+	if err != nil {
+		t.Fatalf("workspace.Create: %v", err)
+	}
+	id := ws.ID()
+	t.Cleanup(func() { _ = ws.Close() })
+
+	world, err := ws.AddWorld(ctx, testFixtureSave(t), "reaped-world")
+	if err != nil {
+		t.Fatalf("AddWorld: %v", err)
+	}
+
+	// Use a fast-exit process so the supervisor reaps it quickly.
+	_, _, err = ws.StartNode(ctx, workspace.StartNodeSpec{
+		WorldID:        world.ID,
+		NodeID:         "n-reaped",
+		Process:        ipc.ProcessSpec{Path: "/bin/true"},
+		ConnectOnStart: false,
+	})
+	if err != nil {
+		// /bin/true may not be available on all platforms; skip gracefully.
+		t.Skipf("StartNode with /bin/true: %v — skipping (fast-exit process not available)", err)
+	}
+
+	// Wait for the supervisor to reap the node.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, active := ws.Node("n-reaped"); !active {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Wire the daemon with the workspace.
+	d := api.New(root, "owner")
+	d.SeedWorkspace(id, ws)
+	t.Cleanup(func() { _ = d.Close() })
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workspaces/"+id+"/nodes/info", nil)
+	rec := httptest.NewRecorder()
+	d.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("nodes/info (reaped): got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var infos []map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&infos); err != nil {
+		t.Fatalf("decode nodes/info: %v", err)
+	}
+
+	var found map[string]any
+	for _, obj := range infos {
+		if obj["id"] == "n-reaped" {
+			found = obj
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("n-reaped not in nodes/info response; got %v", infos)
+	}
+
+	// After reaping, the node must NOT be alive.
+	if got := found["liveness"]; got == "alive" {
+		t.Errorf("liveness = alive after reap, want crashed or detached")
+	}
+
+	// The persisted status must NOT be "running" after reaping.
+	if got := found["status"]; got == "running" {
+		t.Errorf("status = %q after reap, want exited or crashed (supervisor reconcile failed)", got)
+	}
+}
+
 // TestNodesInfo_ResolveNotFound verifies that requesting nodes/info for an
 // unknown workspace id returns 404.
 func TestNodesInfo_ResolveNotFound(t *testing.T) {

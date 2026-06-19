@@ -15,6 +15,7 @@ import (
 	"sync"
 
 	"github.com/asemones/bibicontrol/blobstore"
+	"github.com/asemones/bibicontrol/control"
 	"github.com/asemones/bibicontrol/duckdb"
 	"github.com/asemones/bibicontrol/noderuntime"
 	"github.com/asemones/bibicontrol/revisionstore"
@@ -49,6 +50,12 @@ type Workspace struct {
 	// nodes is the active-node set (nodeID -> runtime). Allocated empty here;
 	// populated by D1.
 	nodes map[string]*noderuntime.Runtime
+
+	// supervisor watches active node processes for unexpected exits and reaps
+	// them when they die without a workspace-driven Stop/Kill. It is started in
+	// Create/Open and stopped in Close BEFORE the manual node drain so no reaper
+	// goroutine races the drain (which would be a concurrent-map-write panic).
+	supervisor *control.Supervisor
 
 	// logMu guards nodeLogs. It is separate from w.mu so NodeLogs reads can
 	// proceed concurrently with heavy mutating ops without reentrancy risk.
@@ -189,6 +196,7 @@ func Create(ctx context.Context, root, owner, name string) (*Workspace, error) {
 		duckDB:     duck,
 		worlds:     make(map[string]*thebibites.LoadedSave),
 		nodes:      make(map[string]*noderuntime.Runtime),
+		supervisor: control.NewSupervisor(),
 	}, nil
 }
 
@@ -241,6 +249,7 @@ func Open(ctx context.Context, root, id string) (*Workspace, error) {
 		duckDB:     duck,
 		worlds:     make(map[string]*thebibites.LoadedSave),
 		nodes:      make(map[string]*noderuntime.Runtime),
+		supervisor: control.NewSupervisor(),
 	}, nil
 }
 
@@ -271,6 +280,13 @@ func (w *Workspace) Close() error {
 		return nil
 	}
 	var errs []error
+	// M9: stop the supervisor FIRST so no reaper goroutine fires reapNode
+	// concurrently with the manual drain below. If supervisor.Stop ran after
+	// the drain, a racing reaper could call reapNode on a partially-drained
+	// map and cause a concurrent-map-write panic.
+	if w.supervisor != nil {
+		w.supervisor.Stop()
+	}
 	// D1: drain active nodes before closing the DB handles.
 	for nodeID, rt := range w.nodes {
 		errs = append(errs, rt.Kill())
