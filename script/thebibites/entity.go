@@ -150,7 +150,10 @@ func (e *Entity) SourceLoadedSave() *LoadedSave { return e.ls }
 // EntityCollection.EntryNames.
 func (e *Entity) EntryName() string { return e.entryName }
 
-// geneBuiltin implements e.gene("Name") -> typed gene value (None if absent).
+// geneBuiltin implements e.gene("Name") -> typed gene value. Returns None if
+// absent (silent miss — this asymmetry is deliberate; b.genes["Name"] raises
+// a KeyError on miss, while b.gene("Name") returns None). The lookup is
+// case-insensitive; errors on a case-collision (≥2 canonical names fold equal).
 func (e *Entity) geneBuiltin(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var name string
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "name", &name); err != nil {
@@ -160,8 +163,12 @@ func (e *Entity) geneBuiltin(thread *starlark.Thread, b *starlark.Builtin, args 
 	if genes == nil {
 		return starlark.None, nil
 	}
-	idx, ok := genes.byName[name]
-	if !ok {
+	idx, found, err := foldLookup(genes.byName, name)
+	if err != nil {
+		// A case-collision is a real surprise, not an absent gene — surface it.
+		return nil, err
+	}
+	if !found {
 		return starlark.None, nil
 	}
 	return geneValueToStarlark(genes.backing[idx]), nil

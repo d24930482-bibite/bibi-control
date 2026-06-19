@@ -822,3 +822,105 @@ func TestAutomation_WorldByNameOrID(t *testing.T) {
 		t.Fatalf("world(dup) error = %q, want it to mention 'ambiguous'", ambErr.Error())
 	}
 }
+
+// TestAutomation_WorldByNameCaseInsensitive verifies that workspace.world()
+// resolves world names case-insensitively, and that two worlds whose names
+// differ only by case still produce a loud ambiguity error on the fold path.
+func TestAutomation_WorldByNameCaseInsensitive(t *testing.T) {
+	ctx := testCtxAuto(t)
+	ws := newWorkspace(t, ctx)
+
+	_, err := ws.AddWorld(ctx, fixturePath(t, fixtureA), "alpha")
+	if err != nil {
+		t.Fatalf("AddWorld alpha: %v", err)
+	}
+
+	// Upper-cased query should find "alpha".
+	res := mustRunAuto(t, ctx, ws, `print(workspace.world("ALPHA").name)`)
+	if !strings.Contains(res.Output, "alpha") {
+		t.Fatalf("world(ALPHA): Output=%q, want to contain %q", res.Output, "alpha")
+	}
+
+	// Mixed-case query should also find "alpha".
+	res = mustRunAuto(t, ctx, ws, `print(workspace.world("Alpha").name)`)
+	if !strings.Contains(res.Output, "alpha") {
+		t.Fatalf("world(Alpha): Output=%q, want to contain %q", res.Output, "alpha")
+	}
+
+	// Exact lowercase still works.
+	res = mustRunAuto(t, ctx, ws, `print(workspace.world("alpha").name)`)
+	if !strings.Contains(res.Output, "alpha") {
+		t.Fatalf("world(alpha): Output=%q, want to contain %q", res.Output, "alpha")
+	}
+
+	// Two worlds "m" and "M" (differ only by case): exact query "m" resolves
+	// to the world named "m"; exact query "M" resolves to "M".
+	_, err = ws.AddWorld(ctx, fixturePath(t, fixtureA), "m")
+	if err != nil {
+		t.Fatalf("AddWorld m: %v", err)
+	}
+	_, err = ws.AddWorld(ctx, fixturePath(t, fixtureA), "M")
+	if err != nil {
+		t.Fatalf("AddWorld M: %v", err)
+	}
+
+	res = mustRunAuto(t, ctx, ws, `print(workspace.world("m").name)`)
+	if !strings.Contains(res.Output, "m") {
+		t.Fatalf("world(m): Output=%q, want to contain %q", res.Output, "m")
+	}
+
+	res = mustRunAuto(t, ctx, ws, `print(workspace.world("M").name)`)
+	if !strings.Contains(res.Output, "M") {
+		t.Fatalf("world(M): Output=%q, want to contain %q", res.Output, "M")
+	}
+
+	// Case-only-distinct collision via the fold path must error with "ambiguous".
+	// A third world "n" and "N" — use the fold query "n" which would match both
+	// via fold but neither exactly, triggering the ambiguity branch.
+	_, err = ws.AddWorld(ctx, fixturePath(t, fixtureA), "n")
+	if err != nil {
+		t.Fatalf("AddWorld n: %v", err)
+	}
+	_, err = ws.AddWorld(ctx, fixturePath(t, fixtureA), "N")
+	if err != nil {
+		t.Fatalf("AddWorld N: %v", err)
+	}
+
+	// Query with a casing that is not exact for either but folds to both.
+	// Since the exact match for "n" exists, try a query that has no exact match
+	// but fold-matches two: use uppercase "N" which exact-matches "N" only — so
+	// let's use a fresh pair with no overlapping exact: worlds "p" and "P".
+	_, err = ws.AddWorld(ctx, fixturePath(t, fixtureA), "p")
+	if err != nil {
+		t.Fatalf("AddWorld p: %v", err)
+	}
+	_, err = ws.AddWorld(ctx, fixturePath(t, fixtureA), "P")
+	if err != nil {
+		t.Fatalf("AddWorld P: %v", err)
+	}
+
+	// Query "p" exact-matches "p" only (single match) — OK.
+	res = mustRunAuto(t, ctx, ws, `print(workspace.world("p").name)`)
+	if !strings.Contains(res.Output, "p") {
+		t.Fatalf("world(p) exact: Output=%q, want 'p'", res.Output)
+	}
+
+	// Query a name with no exact match but two fold matches: use "beta"/"BETA".
+	_, err = ws.AddWorld(ctx, fixturePath(t, fixtureA), "beta")
+	if err != nil {
+		t.Fatalf("AddWorld beta: %v", err)
+	}
+	_, err = ws.AddWorld(ctx, fixturePath(t, fixtureA), "BETA")
+	if err != nil {
+		t.Fatalf("AddWorld BETA: %v", err)
+	}
+
+	// "Beta" (mixed case) has no exact match, but folds to both "beta" and "BETA".
+	_, ambErr := runAuto(ctx, ws, `workspace.world("Beta")`)
+	if ambErr == nil {
+		t.Fatalf("world(Beta) with beta/BETA: want ambiguity error, got nil")
+	}
+	if !strings.Contains(strings.ToLower(ambErr.Error()), "ambiguous") {
+		t.Fatalf("world(Beta) error=%q, want it to mention 'ambiguous'", ambErr.Error())
+	}
+}

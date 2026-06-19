@@ -244,7 +244,12 @@ func resolveColumn(kind, col string, catalogCols map[string]string) (qualified, 
 			return quoteIdent(catalogTable) + "." + quoteIdent(src), catalogTable, nil
 		}
 	}
-	spec, ok := attrRegistry()[kind][col]
+	// Fold the column to lowercase before the registry read: registry keys are
+	// already lowercase snake_case (generated metadata), so this is a no-op for
+	// correctly-cased inputs and allows user-supplied mixed-case column names to
+	// resolve cleanly. No collision is possible (all registry keys are distinct
+	// lowercase), so no foldLookup is needed here.
+	spec, ok := attrRegistry()[kind][strings.ToLower(col)]
 	if !ok {
 		return "", "", fmt.Errorf("unknown column %q for %s", col, kind)
 	}

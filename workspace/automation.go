@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"strings"
 	"time"
 
 	"github.com/asemones/bibicontrol/duckdb"
@@ -151,16 +152,34 @@ func (v *workspaceValue) worldBuiltin(_ *starlark.Thread, b *starlark.Builtin, a
 }
 
 // worldByName resolves a world by its name within this workspace — the ergonomic
-// fallback for workspace.world() when the argument is not a world id. A name that
-// matches no world, or more than one, is an error (disambiguate with the id).
+// fallback for workspace.world() when the argument is not a world id. The lookup
+// is case-insensitive: "ALPHA" finds the world "alpha". An exact match wins over a
+// fold match (so worlds "m" and "M" are still individually addressable by exact
+// name). A name that matches no world, or more than one distinct canonical name,
+// is an error (disambiguate with the id).
 func (v *workspaceValue) worldByName(name string) (revisionstore.World, error) {
 	worlds, err := v.ws.store().ListWorlds(v.ctx, v.ws.ID())
 	if err != nil {
 		return revisionstore.World{}, fmt.Errorf("workspace.world: %w", err)
 	}
-	var match []revisionstore.World
+	// Exact match first (rule 3: exact case wins cheaply).
+	var exactMatch []revisionstore.World
 	for _, w := range worlds {
 		if w.Name == name {
+			exactMatch = append(exactMatch, w)
+		}
+	}
+	if len(exactMatch) == 1 {
+		return exactMatch[0], nil
+	}
+	if len(exactMatch) > 1 {
+		return revisionstore.World{}, fmt.Errorf("workspace.world: name %q is ambiguous (%d worlds); use the id", name, len(exactMatch))
+	}
+	// Case-insensitive fold scan.
+	lq := strings.ToLower(name)
+	var match []revisionstore.World
+	for _, w := range worlds {
+		if strings.ToLower(w.Name) == lq {
 			match = append(match, w)
 		}
 	}
