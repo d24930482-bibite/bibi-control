@@ -65,6 +65,13 @@ type LoadedSave struct {
 	subRowOnce sync.Once
 	subRowIdx  map[string]map[string][]reflect.Value // table -> entry_name -> rows
 
+	// nodeByIndexOnce guards the lazy build of nodeByIndexMap. nodeByIndexMap
+	// maps (nodesTable, entryName, nodeIndex) -> {row, arrayOrdinal} so
+	// syn.source / syn.target resolve in O(1) after a single O(N) build per
+	// LoadedSave, modeled on the subRowIdx / geneIdx lazy-Once pattern (M5).
+	nodeByIndexOnce sync.Once
+	nodeByIndexMap  map[nodeByIndexKey]nodeByIndexVal
+
 	// mirror buffers scalar mutations not yet mirrored into DuckDB; mirrorDirty
 	// marks it non-empty. T5 never sets these (no mutations); T6 fills the buffer
 	// on every staged set and flushMirror drains it into the open DuckDB as one
@@ -307,6 +314,70 @@ func (ls *LoadedSave) buildSubRowIndex() {
 				byEntry[name] = append(byEntry[name], row)
 			}
 			ls.subRowIdx[sc.table] = byEntry
+		}
+	}
+}
+
+// nodeByIndexKey uniquely identifies a brain node across tables and entities.
+type nodeByIndexKey struct {
+	table      string
+	entryName  string
+	nodeIndex  int64
+}
+
+// nodeByIndexVal is the resolved node row plus its array ordinal (the element's
+// `index` attr, which is the array slot, NOT the logical NodeIndex).
+type nodeByIndexVal struct {
+	row     reflect.Value
+	ordinal int64
+}
+
+// nodeByIndex resolves a logical NodeIndex to the node row + array ordinal for the
+// given nodes table and entity. Built lazily with a sync.Once (modeled on
+// subRowIdx/geneIdx) so the O(N) scan over all node rows happens exactly once per
+// LoadedSave, making repeated source/target lookups O(1). If two nodes share the
+// same NodeIndex (malformed save) first-wins; we never panic. Returns (zero, 0,
+// false) when the nodeIndex is not found.
+func (ls *LoadedSave) nodeByIndex(table, entryName string, nodeIndex int64) (reflect.Value, int64, bool) {
+	ls.nodeByIndexOnce.Do(ls.buildNodeByIndexMap)
+	key := nodeByIndexKey{table: table, entryName: entryName, nodeIndex: nodeIndex}
+	v, ok := ls.nodeByIndexMap[key]
+	if !ok {
+		return reflect.Value{}, 0, false
+	}
+	return v.row, v.ordinal, true
+}
+
+// buildNodeByIndexMap scans every nodes sub-collection spec across all entity kinds
+// and builds nodeByIndexMap: (table, entryName, nodeIndex) -> (row, arrayOrdinal).
+// It reads nodeIndex from the spec's elementAttrs["node_index"].fieldIndex so no
+// field name is hardcoded. First-wins on NodeIndex collision (malformed save).
+// Calls subRowsFor (which triggers subRowOnce if not yet built) to guarantee the
+// sub-row index exists before reading ls.subRowIdx directly for the inner loop.
+func (ls *LoadedSave) buildNodeByIndexMap() {
+	ls.nodeByIndexMap = make(map[nodeByIndexKey]nodeByIndexVal)
+	registry := subCollectionRegistry()
+	for _, subs := range registry {
+		nodeSpec, ok := subs["nodes"]
+		if !ok {
+			continue
+		}
+		niSpec, ok := nodeSpec.elementAttrs["node_index"]
+		if !ok {
+			continue
+		}
+		// Trigger subRowOnce by calling subRowsFor once (with a dummy entryName
+		// that won't exist — we only want the side-effect of populating ls.subRowIdx
+		// before the direct map read below).
+		ls.subRowsFor(nodeSpec.table, "")
+		for entryName, rows := range ls.subRowIdx[nodeSpec.table] {
+			for ordinal, row := range rows {
+				ni := row.FieldByIndex(niSpec.fieldIndex).Int()
+				key := nodeByIndexKey{table: nodeSpec.table, entryName: entryName, nodeIndex: ni}
+				if _, exists := ls.nodeByIndexMap[key]; !exists {
+					ls.nodeByIndexMap[key] = nodeByIndexVal{row: row, ordinal: int64(ordinal)}
+				}
+			}
 		}
 	}
 }
