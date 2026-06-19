@@ -87,24 +87,3 @@ func TestRun(t *testing.T) {
 		t.Fatalf("run: Output=%q, want to contain %q", res.Output, "hi")
 	}
 }
-
-// TestNotImplemented verifies that a stubbed route returns 501.
-func TestNotImplemented(t *testing.T) {
-	d := api.New(t.TempDir(), "owner")
-	defer func() { _ = d.Close() }()
-
-	req := httptest.NewRequest(http.MethodGet, "/api/workspaces/x/nodes/info", nil)
-	rec := httptest.NewRecorder()
-	d.Handler().ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusNotImplemented {
-		t.Fatalf("not-implemented: got status %d, want 501", rec.Code)
-	}
-	var body map[string]string
-	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
-		t.Fatalf("not-implemented: decode body: %v", err)
-	}
-	if body["error"] == "" {
-		t.Fatal("not-implemented: expected non-empty error field")
-	}
-}

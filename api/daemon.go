@@ -73,14 +73,6 @@ func (d *Daemon) Close() error {
 	return errors.Join(errs...)
 }
 
-// notImplemented is the shared stub handler for all routes not yet implemented.
-// Later ticket executors swap exactly one registration line each to replace it
-// with the real handler — keeping one shared value (not per-route closures)
-// means grepping for "notImplemented" finds all outstanding stubs.
-var notImplemented http.HandlerFunc = func(w http.ResponseWriter, r *http.Request) {
-	writeError(w, http.StatusNotImplemented, errors.New("not implemented"))
-}
-
 // Handler builds and returns an http.ServeMux with every route from the
 // HTTP-surface table registered. The /api/... patterns are more specific than /,
 // so the ServeMux routes API calls to their handlers and everything else falls
@@ -102,10 +94,14 @@ func (d *Daemon) Handler() http.Handler {
 	mux.HandleFunc("GET /api/workspaces/{id}/worlds", d.handleWorlds)
 	mux.HandleFunc("GET /api/workspaces/{id}/worlds/{wid}/history", d.handleWorldHistory)
 
-	// Stubbed endpoints — swapped one-by-one in later tickets.
-	mux.HandleFunc("GET /api/workspaces/{id}/nodes/info", notImplemented)
-	mux.HandleFunc("GET /api/workspaces/{id}/nodes/{nid}/logs", notImplemented)
+	// Nodes (U8).
+	mux.HandleFunc("GET /api/workspaces/{id}/nodes/info", d.handleNodesInfo)
+	mux.HandleFunc("GET /api/workspaces/{id}/nodes/{nid}/logs", d.handleNodeLogs)
+
+	// Upload (U5).
 	mux.HandleFunc("POST /api/workspaces/{id}/upload", d.handleUpload)
+
+	// Notebooks (U6).
 	mux.HandleFunc("GET /api/workspaces/{id}/notebooks", d.handleListNotebooks)
 	mux.HandleFunc("GET /api/workspaces/{id}/notebooks/{name}", d.handleGetNotebook)
 	mux.HandleFunc("PUT /api/workspaces/{id}/notebooks/{name}", d.handlePutNotebook)
