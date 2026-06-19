@@ -50,6 +50,11 @@ type Workspace struct {
 	// populated by D1.
 	nodes map[string]*noderuntime.Runtime
 
+	// logMu guards nodeLogs. It is separate from w.mu so NodeLogs reads can
+	// proceed concurrently with heavy mutating ops without reentrancy risk.
+	logMu    sync.Mutex
+	nodeLogs map[string]*logRing // nil until first node is started (lazy init)
+
 	// catalogFP / catalogBuilt cache the last successfully rebuilt mirror_saves
 	// catalog state so refreshMirrorCatalog can short-circuit the whole rebuild
 	// when the registry has not changed (C4b: kills the rebuild-on-every-query
@@ -272,6 +277,10 @@ func (w *Workspace) Close() error {
 		errs = append(errs, rt.Close())
 		delete(w.nodes, nodeID)
 	}
+	// Drop all node log buffers.
+	w.logMu.Lock()
+	w.nodeLogs = nil
+	w.logMu.Unlock()
 	if w.duckDB != nil {
 		errs = append(errs, w.duckDB.Close())
 		w.duckDB = nil
