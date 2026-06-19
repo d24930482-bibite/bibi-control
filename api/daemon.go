@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"log"
 	"net/http"
 	"sync"
 
@@ -37,11 +38,18 @@ func New(root, owner string) *Daemon {
 	return &Daemon{root: root, owner: owner, open: make(map[string]*workspace.Workspace)}
 }
 
-// ws returns the cached *Workspace for id, opening it via workspace.Open if it
-// has not been seen before. The entire check-open-store sequence is performed
-// under one d.mu hold so two concurrent requests for the same fresh id cannot
-// each call Open (opening twice allocates two DuckDB writers to one file and
-// leaks registry/blob handles).
+// ws returns the cached *Workspace for id, opening it via
+// workspace.OpenAndReconcile if it has not been seen before. The entire
+// check-open-store sequence is performed under one d.mu hold so two concurrent
+// requests for the same fresh id cannot each call Open (opening twice allocates
+// two DuckDB writers to one file and leaks registry/blob handles).
+//
+// OpenAndReconcile runs a ReconcileBlobs pass as part of the first open so
+// post-crash catalog↔blobstore drift is repaired on first touch (it runs once
+// per workspace open — the cache means it is NOT per-request). A reconcile error
+// fails the open: it means unrecoverable corruption (ErrHeadBlobMissing) the
+// operator must see, and OpenAndReconcile has already Closed the failed handle so
+// nothing is cached or leaked.
 func (d *Daemon) ws(ctx context.Context, id string) (*workspace.Workspace, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -49,9 +57,12 @@ func (d *Daemon) ws(ctx context.Context, id string) (*workspace.Workspace, error
 	if ws, ok := d.open[id]; ok {
 		return ws, nil
 	}
-	ws, err := workspace.Open(ctx, d.root, id)
+	ws, res, err := workspace.OpenAndReconcile(ctx, d.root, id)
 	if err != nil {
 		return nil, err
+	}
+	if res.Demoted != 0 || res.Promoted != 0 {
+		log.Printf("bibid: workspace %s reconcile on open: demoted=%d promoted=%d", id, res.Demoted, res.Promoted)
 	}
 	d.open[id] = ws
 	return ws, nil
