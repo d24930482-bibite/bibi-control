@@ -30,6 +30,7 @@ function selectWs(el) {
   if (selectedWsId) {
     loadWorlds(selectedWsId);
     loadNotebookList(selectedWsId);
+    pollNodes(); // U13: immediate node refresh on workspace switch
   }
 }
 
@@ -223,6 +224,9 @@ document.addEventListener('DOMContentLoaded', function() {
     // select the first workspace by default if any exist
     const first = document.querySelector('.ws-item');
     if (first) selectWs(first);
+    // pollNodes() is called inside selectWs above; if no workspace exists, poll anyway
+    // to ensure #nodesList is initialized (renders empty).
+    else pollNodes();
   }).catch(function(err) {
     toast('failed to load workspaces: ' + err.message);
   });
@@ -556,27 +560,130 @@ function toggleAddSrc() {
   document.getElementById('serverPick').style.display = upload ? 'none' : 'flex';
 }
 
-/* ---------- logs drawer (one unified, node-prefixed stream) ----------
-   Every node's lines live in one stream prefixed by node id. openLogs(node)
-   opens the drawer; if a node is passed, it pre-filters the stream to it. */
-function openLogs(node) {
-  const sel = document.getElementById('logFilter');
-  sel.value = node || '';
-  filterLogs(sel.value);
-  document.getElementById('logsDrawer').classList.add('show');
-  document.querySelector('.col-c').classList.add('logs-open');
-  // keep the tail in view
-  const body = document.getElementById('logBody');
+/* ---------- logs drawer (live per-node polling) ----------
+   openLogs(nid) opens the drawer and starts polling nodeLogs for that node.
+   closeLogs() closes it and stops the poll interval.
+   renderLogs(lines, nid) builds #logBody rows and rebuilds #logFilter options.
+   filterLogs(node) shows/hides lines by data-node. */
+
+var _logsInterval = null;
+var _logsNid = null;       // currently open node id
+
+function renderLogs(lines, nid) {
+  var body = document.getElementById('logBody');
+  body.innerHTML = '';
+
+  if (!lines || !lines.length) {
+    var empty = document.createElement('div');
+    empty.className = 'log-line info';
+    empty.dataset.node = nid || '';
+    empty.textContent = '(no log lines captured yet)';
+    body.appendChild(empty);
+  } else {
+    lines.forEach(function(ln) {
+      var div = document.createElement('div');
+      // map level to css: "error" -> "fatal", "info" -> "info"
+      var cls = ln.level === 'error' ? 'fatal' : 'info';
+      div.className = 'log-line ' + cls;
+      div.dataset.node = nid || '';
+      // format: timestamp  node  LEVEL  text
+      var ts = '';
+      if (ln.time) {
+        try {
+          var d = new Date(ln.time);
+          ts = d.toLocaleTimeString('en-US', { hour12: false }) + ' ';
+        } catch (e) { ts = ln.time + ' '; }
+      }
+      div.innerHTML =
+        '<span class="ts">' + escapeHtml(ts.trim()) + '</span> ' +
+        '<span class="node">' + escapeHtml(nid || '') + '</span> ' +
+        '<span class="lvl">' + escapeHtml((ln.level || '').toUpperCase()) + '</span> ' +
+        escapeHtml(ln.text || '');
+      body.appendChild(div);
+    });
+  }
+
+  // apply current filter
+  filterLogs(document.getElementById('logFilter').value);
+
+  // rebuild logFilter options from currently rendered node ids
+  var sel = document.getElementById('logFilter');
+  var current = sel.value;
+  sel.innerHTML = '<option value="">all nodes</option>';
+  // collect unique node ids from rendered nodes list + this nid
+  var seen = {};
+  document.querySelectorAll('#nodesList .node').forEach(function(n) {
+    var nidVal = n.dataset.id;
+    if (nidVal && !seen[nidVal]) {
+      seen[nidVal] = true;
+      var opt = document.createElement('option');
+      opt.value = nidVal;
+      opt.textContent = nidVal;
+      sel.appendChild(opt);
+    }
+  });
+  if (nid && !seen[nid]) {
+    var opt = document.createElement('option');
+    opt.value = nid;
+    opt.textContent = nid;
+    sel.appendChild(opt);
+  }
+  sel.value = current || nid || '';
+
+  // scroll to tail
   body.scrollTop = body.scrollHeight;
 }
+
+function openLogs(nid) {
+  _logsNid = nid || null;
+  var sel = document.getElementById('logFilter');
+  if (nid) sel.value = nid;
+  document.getElementById('logsDrawer').classList.add('show');
+  document.querySelector('.col-c').classList.add('logs-open');
+
+  // stop any existing poll
+  if (_logsInterval) { clearInterval(_logsInterval); _logsInterval = null; }
+
+  if (!nid || !selectedWsId) {
+    // no node selected or no workspace: render empty
+    renderLogs([], nid);
+    return;
+  }
+
+  // immediate fetch
+  _fetchLogs(nid);
+
+  // poll while drawer is open; floor to 2s, respect cadence
+  var interval = Math.max(2, cadence || 10) * 1000;
+  _logsInterval = setInterval(function() { _fetchLogs(_logsNid); }, interval);
+}
+
+function _fetchLogs(nid) {
+  if (!nid || !selectedWsId) return;
+  var wsId = selectedWsId;
+  nodeLogs(wsId, nid, true).then(function(data) {
+    if (wsId !== selectedWsId) return;   // stale
+    renderLogs(data.lines || [], nid);
+  }).catch(function(err) {
+    if (err && err.status === 404) {
+      // no buffer for this node — show placeholder without toast storm
+      renderLogs([], nid);
+    }
+    // other errors: silently ignore (poll will retry)
+  });
+}
+
 function closeLogs() {
   document.getElementById('logsDrawer').classList.remove('show');
   document.querySelector('.col-c').classList.remove('logs-open');
+  if (_logsInterval) { clearInterval(_logsInterval); _logsInterval = null; }
+  _logsNid = null;
 }
+
 /* node filter: empty string = show all; otherwise hide non-matching lines */
 function filterLogs(node) {
   document.querySelectorAll('#logBody .log-line').forEach(function(line) {
-    const match = !node || line.dataset.node === node;
+    var match = !node || line.dataset.node === node;
     line.classList.toggle('filtered', !match);
   });
 }
@@ -625,13 +732,11 @@ function toast(msg) {
   toastTimer = setTimeout(function() { t.classList.remove('show'); }, 1900);
 }
 
-/* ---------- telemetry countdown + fake poll ----------
-   Default cadence 10s. On reaching 0 we "poll": bump the ALIVE node's
-   TPS / real / sim_time / autosave to new mock values, then reset. */
+/* ---------- telemetry countdown + node poll ----------
+   Default cadence 10s. On reaching 0 we poll nodesInfo and rerender.
+   Manual mode: no automatic countdown; poll on demand only. */
 let cadence = 10;        // seconds; or 0 for manual
 let remaining = 7;       // start mid-countdown like the wireframe (↻ 0:07)
-let simTime = 1240512;
-let autosaveSecs = 42;
 
 function fmtClock(s) {
   const m = Math.floor(s / 60);
@@ -645,29 +750,147 @@ function renderCountdown() {
   cd.textContent = '↻ ' + fmtClock(remaining);
 }
 
-function fakePoll() {
-  // new mock telemetry values for the ALIVE node
-  const tps = 54 + Math.floor(Math.random() * 9);          // 54..62
-  const real = (tps - 0.1 - Math.random() * 1.2).toFixed(1);
-  simTime += tps * cadence * 1000;                          // advance sim time
-  autosaveSecs = (autosaveSecs + cadence) % 600;
+/* ---------- column B: node render ----------
+   Builds #nodesList children from the nodesInfo array. Mirrors renderWorkspaces.
+   data-world = row.world_id (for focusWorld cross-highlight at app.js:focusWorld).
+   data-id = row.id (for action dispatch). */
+function renderNodes(rows) {
+  var list = document.getElementById('nodesList');
+  list.innerHTML = '';
+  (rows || []).forEach(function(row) {
+    var div = document.createElement('div');
+    div.className = 'node ' + row.liveness;
+    div.dataset.world = row.world_id;
+    div.dataset.id = row.id;
 
-  document.getElementById('n1-tps').textContent  = tps;
-  document.getElementById('n1-real').textContent = real;
-  document.getElementById('n1-simt').textContent = simTime.toLocaleString('en-US');
-  document.getElementById('n1-autosave').textContent = fmtClock(autosaveSecs);
+    // state dot by liveness
+    var dot = row.liveness === 'alive' ? '&#9679;' :
+              row.liveness === 'crashed' ? '&#9675;' : '&#10687;';
+    var stateLabel = row.liveness.toUpperCase();
 
-  // brief flash on the countdown chip to signal a poll happened
-  const cd = document.getElementById('countdown');
-  cd.classList.add('flash');
-  setTimeout(function() { cd.classList.remove('flash'); }, 350);
+    var topHtml =
+      '<div class="node-top">' +
+        '<span class="node-dot">' + dot + '</span>' +
+        '<span class="node-name">' + escapeHtml(row.id) + '</span>' +
+        '<span class="node-state">' + stateLabel + '</span>' +
+      '</div>';
+
+    var worldHtml =
+      '<div class="node-world" onclick="focusWorld(' + JSON.stringify(row.world_id) + ')" title="bound world">' +
+        '<span class="nw-ico">&#11041;</span> world ' +
+        '<span class="nw-name">' + escapeHtml(row.world_id) + '</span>' +
+      '</div>';
+
+    // telemetry block (alive only, feature-detect each field)
+    var metricsHtml = '';
+    if (row.liveness === 'alive') {
+      var parts = [];
+      if (row.tps != null) {
+        var tpsStr = escapeHtml(String(row.tps != null ? row.tps.toFixed(1) : ''));
+        var realStr = row.real_tps != null ? escapeHtml(row.real_tps.toFixed(1)) : '—';
+        parts.push('<span class="m-val">' + tpsStr + '</span> TPS · real <span class="m-val">' + realStr + '</span>');
+      }
+      if (row.sim_time != null) {
+        parts.push('sim t = <span class="m-val">' + escapeHtml(row.sim_time.toLocaleString('en-US')) + '</span>');
+      }
+      if (row.paused != null) {
+        var pausedStr = row.paused ? 'yes' : 'no';
+        var autosaveStr = '';
+        if (row.last_autosave && row.last_autosave.age_seconds != null) {
+          autosaveStr = ' · last autosave <span class="m-val">' + fmtClock(Math.round(row.last_autosave.age_seconds)) + '</span> ago';
+        }
+        parts.push('paused: ' + pausedStr + autosaveStr);
+      }
+      if (parts.length) {
+        metricsHtml = '<div class="node-metrics">' + parts.join('<br>') + '</div>';
+      }
+    } else if (row.liveness === 'crashed') {
+      var exitStr = row.exit_code != null ? ' exit code <span class="m-val">' + escapeHtml(String(row.exit_code)) + '</span>' : '';
+      metricsHtml = '<div class="node-metrics dim">crashed' + exitStr + '</div>';
+    } else {
+      // detached
+      metricsHtml = '<div class="node-metrics dim">persisted row, no live handle</div>';
+    }
+
+    // action buttons by liveness
+    var id = row.id;
+    var actionsHtml = '<div class="node-actions">';
+    if (row.liveness === 'alive') {
+      actionsHtml +=
+        '<button class="btn btn-sm" onclick="nodeAction(' + JSON.stringify(id) + ',\'stop\')">&#9208; stop</button>' +
+        '<button class="btn btn-sm" onclick="nodeAction(' + JSON.stringify(id) + ',\'resume\')">&#9654; resume</button>' +
+        '<button class="btn btn-sm" onclick="nodeAction(' + JSON.stringify(id) + ',\'reload\')">&#10231; reload</button>' +
+        '<button class="btn btn-sm" onclick="nodeAction(' + JSON.stringify(id) + ',\'kill\')">&#10005; kill</button>';
+    } else if (row.liveness === 'crashed') {
+      actionsHtml +=
+        '<button class="btn btn-sm" onclick="openLogs(' + JSON.stringify(id) + ')">view logs</button>';
+    } else {
+      // detached
+      actionsHtml +=
+        '<button class="btn btn-sm" onclick="toast(\'reconnect not yet implemented\')">reconnect</button>' +
+        '<button class="btn btn-sm" onclick="toast(\'drop row (U14)\')">drop row</button>';
+    }
+    actionsHtml += '</div>';
+
+    div.innerHTML = topHtml + worldHtml + metricsHtml + actionsHtml;
+    list.appendChild(div);
+  });
+
+  // Rebuild #sn-world options from the current world ids visible in worlds list,
+  // so the Start Node modal world selector stays current.
+  _rebuildSnWorldOptions();
+}
+
+/* Rebuild the Start Node modal's world <select> from the current .world rows. */
+function _rebuildSnWorldOptions() {
+  var sel = document.getElementById('sn-world');
+  if (!sel) return;
+  var current = sel.value;
+  sel.innerHTML = '';
+  document.querySelectorAll('.world').forEach(function(el) {
+    var nameEl = el.querySelector('.w-name');
+    var name = nameEl ? nameEl.textContent : el.id.replace('world-', '');
+    var opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name;
+    sel.appendChild(opt);
+  });
+  // restore selection if still present
+  if (current) sel.value = current;
+}
+
+/* ---------- column B: node poll ----------
+   Single in-flight guard + stale-workspace guard (capture wsId at call time).
+   Called on boot (DOMContentLoaded), on workspace switch (selectWs), and on
+   each cadence tick boundary. In manual mode, only called explicitly. */
+var _nodesPollInFlight = false;
+
+function pollNodes() {
+  if (!selectedWsId) return;
+  if (_nodesPollInFlight) return;
+  var wsId = selectedWsId;   // capture for stale-check
+  _nodesPollInFlight = true;
+  nodesInfo(wsId).then(function(rows) {
+    _nodesPollInFlight = false;
+    // discard stale response if the workspace changed mid-flight
+    if (wsId !== selectedWsId) return;
+    renderNodes(rows || []);
+    // flash the countdown chip to signal a poll happened
+    var cd = document.getElementById('countdown');
+    cd.classList.add('flash');
+    setTimeout(function() { cd.classList.remove('flash'); }, 350);
+  }).catch(function(err) {
+    _nodesPollInFlight = false;
+    // don't toast on every poll failure — only log to console
+    console.warn('pollNodes:', err.message);
+  });
 }
 
 function tick() {
   if (cadence === 0) return;          // manual: no countdown
   remaining -= 1;
   if (remaining <= 0) {
-    fakePoll();
+    pollNodes();
     remaining = cadence;
   }
   renderCountdown();
@@ -685,6 +908,64 @@ function changeCadence(val) {
 
 setInterval(tick, 1000);
 renderCountdown();
+
+/* ---------- column B: Start Node modal ----------
+   submitStartNode() reads modal fields, builds the Starlark program, runs it
+   via /run, and refreshes on success. */
+function submitStartNode() {
+  if (!selectedWsId) { toast('select a workspace first'); return; }
+
+  var worldSel = document.getElementById('sn-world');
+  var world = worldSel ? (worldSel.value || '').trim() : '';
+  if (!world) { toast('select a world'); return; }
+
+  var path = (document.getElementById('sn-path').value || '').trim();
+  if (!path) { toast('sim bin path is required'); return; }
+
+  var drop = (document.getElementById('sn-drop').value || '').trim();
+  var compat = (document.getElementById('sn-compat').value || '').trim();
+  var connect = document.getElementById('connectChk').checked;
+
+  // build Starlark: mandatory kwargs first, then optional ones
+  var prog = 'workspace.start_node(world=' + JSON.stringify(world) +
+             ', path=' + JSON.stringify(path) +
+             ', connect=' + (connect ? 'True' : 'False');
+  if (compat) prog += ', compat_addr=' + JSON.stringify(compat);
+  if (drop && drop !== 'auto') prog += ', drop_path=' + JSON.stringify(drop);
+  prog += ')';
+
+  runProgram(selectedWsId, prog).then(function(res) {
+    if (res.Diagnostics && res.Diagnostics.length) {
+      toast(res.Diagnostics[0].Message || 'start_node failed');
+      return;   // leave modal open
+    }
+    closeModal('m-start-node');
+    toast('node started');
+    pollNodes();
+  }).catch(function(err) { toast(err.message); });
+}
+
+/* ---------- column B: node actions ----------
+   nodeAction(id, verb) builds workspace.node("<id>").<verb>(...) and runs it. */
+function nodeAction(id, verb) {
+  if (!selectedWsId) { toast('select a workspace first'); return; }
+
+  var call;
+  if (verb === 'resume') {
+    call = 'workspace.node(' + JSON.stringify(id) + ').resume(scale=1.0)';
+  } else {
+    call = 'workspace.node(' + JSON.stringify(id) + ').' + verb + '()';
+  }
+
+  runProgram(selectedWsId, call).then(function(res) {
+    if (res.Diagnostics && res.Diagnostics.length) {
+      toast(res.Diagnostics[0].Message || verb + ' failed');
+      return;
+    }
+    toast(verb + ' ok');
+    pollNodes();
+  }).catch(function(err) { toast(err.message); });
+}
 
 /* ---------- notebook col C: notebook selector ----------
    The #flow <select> is populated from listNotebooks().

@@ -10,7 +10,8 @@
   ----------------------------------------------------------------------------
   Offline, vanilla JS only. No external deps, no npm, no web font imports.
   Column A (Workspaces) is wired to the live backend via api.js.
-  Columns B and C are static scaffolding (mock data) for U11/U12/U13.
+  Column B (Worlds/history) wired via U11; Nodes (live) wired via U13.
+  Column C (Notebook) wired via U12.
 
   Assets (all siblings in api/web/, served via go:embed):
     index.html   this file
@@ -53,71 +54,10 @@
         <span class="countdown" id="countdown">&#8635; 0:07</span>
       </span>
     </div>
-    <div class="nodes">
-      <!-- ● ALIVE — holds the LIVE binding to world alpha -->
-      <div class="node alive" data-world="alpha">
-        <div class="node-top">
-          <span class="node-dot">●</span>
-          <span class="node-name">node-1</span>
-          <span class="node-state">ALIVE</span>
-        </div>
-        <div class="node-world" onclick="focusWorld('alpha')" title="bound world (world_id)">
-          <span class="nw-ico">&#11041;</span> world <span class="nw-name">alpha</span>
-        </div>
-        <div class="node-metrics">
-          <span class="m-val" id="n1-tps">58</span> TPS · real <span class="m-val" id="n1-real">57.8</span><br>
-          sim t = <span class="m-val" id="n1-simt">1,240,512</span><br>
-          paused: no · last autosave <span class="m-val" id="n1-autosave">0:42</span> ago
-        </div>
-        <div class="node-actions">
-          <button class="btn btn-sm" onclick="toast('stop node-1 (mock)')">&#9208; stop</button>
-          <button class="btn btn-sm" onclick="toast('reload node-1 (mock)')">&#10231; reload</button>
-          <button class="btn btn-sm" onclick="toast('kill node-1 (mock)')">&#10005; kill</button>
-        </div>
-      </div>
-
-      <!-- ○ CRASHED — persisted world_id remains, but no live handle -->
-      <div class="node crashed" data-world="beta">
-        <div class="node-top">
-          <span class="node-dot">○</span>
-          <span class="node-name">node-2</span>
-          <span class="node-state">CRASHED</span>
-        </div>
-        <div class="node-world" onclick="focusWorld('beta')" title="bound world (world_id) — stale, no live handle">
-          <span class="nw-ico">&#11041;</span> world <span class="nw-name">beta</span>
-        </div>
-        <div class="node-metrics dim">
-          last 0 TPS · exit code <span class="m-val">139</span><br>
-          uptime 14m → died
-        </div>
-        <div class="node-actions">
-          <button class="btn btn-sm" onclick="openLogs('node-2')">view logs</button>
-          <button class="btn btn-sm" onclick="toast('restart node-2 (mock)')">&#8635; restart</button>
-        </div>
-      </div>
-
-      <!-- ⦿ DETACHED — persisted row with world_id, daemon holds no handle -->
-      <div class="node detached" data-world="beta">
-        <div class="node-top">
-          <span class="node-dot">&#10687;</span>
-          <span class="node-name">node-3</span>
-          <span class="node-state">DETACHED</span>
-        </div>
-        <div class="node-world" onclick="focusWorld('beta')" title="bound world (world_id) — persisted, not live-bound">
-          <span class="nw-ico">&#11041;</span> world <span class="nw-name">beta</span>
-        </div>
-        <div class="node-metrics dim">
-          persisted row, but the daemon<br>holds no live handle
-        </div>
-        <div class="node-actions">
-          <button class="btn btn-sm" onclick="toast('reconnect node-3 (mock)')">reconnect</button>
-          <button class="btn btn-sm" onclick="toast('drop row node-3 (mock)')">drop row</button>
-        </div>
-      </div>
-
-      <div class="add-row" style="padding-top:0;">
-        <button class="btn" onclick="openModal('m-start-node')">+ start node</button>
-      </div>
+    <!-- populated by renderNodes() in app.js on cadence poll -->
+    <div class="nodes" id="nodesList"></div>
+    <div class="add-row" style="padding-top:0;">
+      <button class="btn" onclick="openModal('m-start-node')">+ start node</button>
     </div>
 
     <!-- WORLDS — populated by renderWorlds() in app.js on workspace selection -->
@@ -346,26 +286,15 @@ then start a node. Notes:
       <div class="drawer-head">
         <span class="dh-title">logs · <span class="muted">all nodes</span></span>
         <span class="spacer"></span>
+        <!-- options rebuilt by renderLogs() from live node ids -->
         <select class="select" id="logFilter" onchange="filterLogs(this.value)">
           <option value="">all nodes</option>
-          <option value="node-1">node-1</option>
-          <option value="node-2">node-2</option>
-          <option value="node-3">node-3</option>
         </select>
         <button class="btn btn-sm" onclick="toast('download logs (mock)')">&#8615; download</button>
         <button class="btn btn-sm btn-ghost" onclick="closeLogs()">&#10005;</button>
       </div>
-      <div class="log-body" id="logBody">
-        <div class="log-line info"  data-node="node-1"><span class="ts">12:02:55</span> <span class="node">node-1</span> <span class="lvl">INFO </span> sim started run-9 world=alpha tps=60</div>
-        <div class="log-line info"  data-node="node-2"><span class="ts">12:03:01</span> <span class="node">node-2</span> <span class="lvl">INFO </span> sim started run-7 world=beta tps=60</div>
-        <div class="log-line info"  data-node="node-2"><span class="ts">12:08:19</span> <span class="node">node-2</span> <span class="lvl">INFO </span> checkpoint ok step=482000</div>
-        <div class="log-line info"  data-node="node-1"><span class="ts">12:09:30</span> <span class="node">node-1</span> <span class="lvl">INFO </span> autosave written autosave_1209.zip</div>
-        <div class="log-line warn"  data-node="node-2"><span class="ts">12:16:44</span> <span class="node">node-2</span> <span class="lvl">WARN </span> autosave written autosave_1216.zip</div>
-        <div class="log-line warn"  data-node="node-2"><span class="ts">12:16:58</span> <span class="node">node-2</span> <span class="lvl">WARN </span> physics step lag 41ms (budget 16ms)</div>
-        <div class="log-line fatal" data-node="node-2"><span class="ts">12:17:02</span> <span class="node">node-2</span> <span class="lvl">FATAL</span> segfault in physics step  (exit 139)</div>
-        <div class="log-line info"  data-node="node-3"><span class="ts">12:18:10</span> <span class="node">node-3</span> <span class="lvl">INFO </span> daemon restarted — handle lost (detached)</div>
-        <div class="log-line info"  data-node="node-1"><span class="ts">12:20:48</span> <span class="node">node-1</span> <span class="lvl">INFO </span> tps=58 real=57.8 sim_t=1240512</div>
-      </div>
+      <!-- populated by renderLogs() -->
+      <div class="log-body" id="logBody"></div>
       <div class="drawer-foot">
         <span>&#9658;</span>
         <label><input type="checkbox" id="followChk" checked onchange="toast('follow ' + (this.checked?'on':'off') + ' (mock)')"> follow</label>
@@ -397,17 +326,20 @@ then start a node. Notes:
     <div class="modal-body">
       <div class="field">
         <label>World</label>
-        <select class="select" style="width:100%; padding:8px 10px;">
-          <option>alpha</option><option>beta</option>
-        </select>
+        <!-- options populated by renderNodes / submitStartNode reads selected value -->
+        <select class="select" id="sn-world" style="width:100%; padding:8px 10px;"></select>
       </div>
       <div class="field">
         <label>Sim bin</label>
-        <input class="input mono" value="/opt/bibites">
+        <input class="input mono" id="sn-path" placeholder="/opt/bibites">
       </div>
       <div class="field">
         <label>Drop path</label>
-        <input class="input mono" placeholder="auto" value="auto">
+        <input class="input mono" id="sn-drop" placeholder="auto">
+      </div>
+      <div class="field">
+        <label>Compat addr</label>
+        <input class="input mono" id="sn-compat" placeholder="127.0.0.1:43100">
       </div>
       <div class="check-row">
         <input type="checkbox" id="connectChk" checked>
@@ -416,7 +348,7 @@ then start a node. Notes:
     </div>
     <div class="modal-foot">
       <button class="btn" onclick="closeModal('m-start-node')">Cancel</button>
-      <button class="btn btn-accent" onclick="closeModal('m-start-node'); toast('start_node(...) (mock)')">Start &#9654;</button>
+      <button class="btn btn-accent" onclick="submitStartNode()">Start &#9654;</button>
     </div>
   </div>
 </div>
