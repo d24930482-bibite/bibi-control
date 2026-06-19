@@ -253,6 +253,39 @@ func Open(ctx context.Context, root, id string) (*Workspace, error) {
 	}, nil
 }
 
+// OpenAndReconcile is the crash-recovery open variant: it opens the workspace
+// (plain Open, unchanged) and then runs one ReconcileBlobs pass so post-crash
+// catalog↔blobstore drift is repaired on first touch instead of depending on the
+// host to remember to call ReconcileBlobs explicitly. The daemon's lazy open
+// uses it so recovery happens on the first request that touches a workspace.
+//
+// Open itself is deliberately left unchanged (this is the opt-in variant): many
+// callers and tests want plain Open, and several construct deliberately drifted
+// states then assert Open's behavior. Critically, ErrHeadBlobMissing —
+// unrecoverable head corruption ReconcileBlobs fails loud on — must surface as an
+// explicit, recoverable-by-the-operator signal, not be swallowed inside Open.
+//
+// On a reconcile error the just-opened handle is Closed before returning, so a
+// failed reconcile leaks no DuckDB/registry/blob handle (mirroring Open's own
+// partial-failure cleanup). ReconcileBlobs is safe to call on a freshly-opened
+// handle: it only reads the registry + stats blobs under w.mu and never touches
+// DuckDB or the (empty) working set.
+func OpenAndReconcile(ctx context.Context, root, id string) (*Workspace, ReconcileResult, error) {
+	w, err := Open(ctx, root, id)
+	if err != nil {
+		return nil, ReconcileResult{}, err
+	}
+	res, err := w.ReconcileBlobs(ctx)
+	if err != nil {
+		// The just-opened handle owns DuckDB/registry/blob resources; close it so a
+		// failed reconcile leaks nothing. The error (e.g. ErrHeadBlobMissing) is the
+		// caller's to see.
+		_ = w.Close()
+		return nil, ReconcileResult{}, err
+	}
+	return w, res, nil
+}
+
 // openDuck opens the per-workspace DuckDB file and applies the idempotent
 // migrations. On Create the file is fresh; on Open it already exists; in both
 // cases the CREATE ... IF NOT EXISTS migrations are correct and cheap.
