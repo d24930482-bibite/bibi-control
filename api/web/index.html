@@ -260,6 +260,17 @@
         <label>Where (optional predicate)</label>
         <input class="input mono" id="tr-where" placeholder="e.g. s.bibites.energy &gt; 50">
       </div>
+      <div class="field">
+        <label>Options</label>
+        <div class="radio-row">
+          <input type="checkbox" id="tr-move">
+          <label for="tr-move" title="Delete the grafted entries from the source after the destination commit (the entity ends up in exactly one world).">move (delete from source)</label>
+        </div>
+        <div class="radio-row">
+          <input type="checkbox" id="tr-remap-ids">
+          <label for="tr-remap-ids" title="If a grafted bibite's body.id collides with a destination bibite, mint a fresh id instead of failing.">remap ids on collision</label>
+        </div>
+      </div>
     </div>
     <div class="modal-foot">
       <button class="btn" onclick="closeModal('m-transfer')">Cancel</button>

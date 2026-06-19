@@ -1038,7 +1038,12 @@ function dropNode(id) {
      workspace.world(<id>).open()    → saveValue (world.openBuiltin)
      <save>.bibites / <save>.eggs    → EntityCollection delegated from thebibites.Save
      <coll>.where(<expr>)            → filtered EntityCollection (optional)
-     workspace.transfer(selector=<coll>, dst=<dstId>) → {transferred, committed, ...}
+     workspace.transfer(selector=<coll>, dst=<dstId>, move=<bool>, remap_ids=<bool>)
+        → {transferred, committed, revision_id, sha256, moved, source_committed,
+           source_revision_id}
+   The count + move outcome are read from a structured per-line print of the TYPED
+   result fields (print(r["transferred"]) / r["moved"]), never scraped from the
+   dict's string repr — so a result-format change can never show "transferred ?".
 */
 
 /* Rebuild a <select> element with the current world options.
@@ -1073,6 +1078,8 @@ function transferToWorld() {
   var kind = document.querySelector('input[name="tr-kind"]:checked');
   var kindVal = kind ? kind.value : 'bibites';
   var where = (document.getElementById('tr-where').value || '').trim();
+  var move = !!document.getElementById('tr-move').checked;
+  var remapIds = !!document.getElementById('tr-remap-ids').checked;
 
   if (!src) { toast('select a source world'); return; }
   if (!dst) { toast('select a destination world'); return; }
@@ -1088,25 +1095,38 @@ function transferToWorld() {
   } else {
     prog += 'sel = s.' + kindVal + '\n';
   }
-  prog += 'print(workspace.transfer(selector=sel, dst=' + dstLit + '))';
+  prog += 'r = workspace.transfer(selector=sel, dst=' + dstLit +
+    ', move=' + (move ? 'True' : 'False') +
+    ', remap_ids=' + (remapIds ? 'True' : 'False') + ')\n';
+  // Emit each TYPED field on its own line, in a fixed order, so the count and move
+  // outcome are read from deterministic, structured output — never scraped from a
+  // dict's string repr (a format change can never show "transferred ?").
+  prog += 'print(r["transferred"])\n';
+  prog += 'print(r["moved"])\n';
+  prog += 'print(r["source_committed"])';
 
   runProgram(selectedWsId, prog).then(function(res) {
     if (res.Diagnostics && res.Diagnostics.length) {
       toast(res.Diagnostics[0].Message || 'transfer failed');
       return;
     }
-    // Parse transferred count from Output (printed dict repr) for the toast.
-    var transferred = '?';
-    if (res.Output) {
-      var m = res.Output.match(/transferred['":\s]+(\d+)/);
-      if (m) transferred = m[1];
-    }
+    // Read the typed fields positionally from the structured per-line emit above.
+    // On a successful run (no Diagnostics), moved==True implies source_committed:
+    // a half-applied move raises a RunError (handled by the Diagnostics/catch
+    // branches, which surface the error naming the half-applied state) and the
+    // per-line print never runs, so this branch only sees fully-applied outcomes.
+    var lines = (res.Output || '').replace(/\n+$/, '').split('\n');
+    var transferred = lines[0];
+    var moved = lines[1] === 'True';
     closeModal('m-transfer');
-    toast('transferred ' + transferred);
+    toast((moved ? 'moved ' : 'copied ') + transferred);
     // Refresh destination world: a new revision lands on dst head.
     loadWorlds(selectedWsId);
     loadHistory(selectedWsId, dst, dst);
-  }).catch(function(err) { toast(err.message); });
+  }).catch(function(err) {
+    // A half-applied move surfaces as a run error (RunError) — never swallow it.
+    toast(err.message);
+  });
 }
 
 /* ---------- notebook col C: notebook selector ----------

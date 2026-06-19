@@ -271,20 +271,33 @@ func (v *workspaceValue) queryBuiltin(_ *starlark.Thread, b *starlark.Builtin, a
 	return mapsToStarlark(rows)
 }
 
-// workspace.transfer(selector, dst=<worldID or world handle>) → dict
-// {transferred, committed, revision_id, sha256}. selector is the object DSL — a
-// bibites/eggs collection (src.bibites.where(...)) or a single bibite/egg Entity
-// — naming WHAT to graft; the user never writes SQL/JOINs. dst names the
-// destination world (a bare id string OR a world handle). The selected entries are
-// grafted into dst via the merged F1/F3 transfer engine (identity reconcile +
-// per-world species remap) and committed as one advancing-head dst revision.
+// workspace.transfer(selector, dst=<worldID or world handle>, move=False,
+// remap_ids=False) → dict
+// {transferred, committed, revision_id, sha256, moved, source_committed,
+// source_revision_id}. selector is the object DSL — a bibites/eggs collection
+// (src.bibites.where(...)) or a single bibite/egg Entity — naming WHAT to graft;
+// the user never writes SQL/JOINs. dst names the destination world (a bare id
+// string OR a world handle). The selected entries are grafted into dst via the
+// merged F1/F3/M6 transfer engine (identity reconcile + per-world species remap)
+// and committed as one advancing-head dst revision.
+//
+//   - move=True (opt-in): after the dst commit succeeds, the grafted entries are
+//     ALSO deleted from the SOURCE world (committed as a second source revision), so
+//     the entity ends up in exactly one world. The commit ordering is dst-first /
+//     source-second; the only failure window leaves a recoverable DUPLICATE (the
+//     copy outcome), never data loss — see Workspace.Transfer. moved/source_committed
+//     report the move outcome; source_revision_id is the source commit's revision.
+//   - remap_ids=True (opt-in): a grafted bibite whose body.id collides with a dest
+//     bibite is given a FRESH non-colliding body.id instead of failing the batch.
+//     Default false keeps the loud collision guard.
 //
 // committed=False with transferred=0 when nothing was selected (a clean no-op that
 // leaves the dst head unchanged). On any graft failure the whole transfer fails
 // loudly and nothing is committed (all-or-nothing at the commit boundary).
 func (v *workspaceValue) transferBuiltin(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var selector, dst starlark.Value
-	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "selector", &selector, "dst", &dst); err != nil {
+	var move, remapIDs bool
+	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "selector", &selector, "dst", &dst, "move?", &move, "remap_ids?", &remapIDs); err != nil {
 		return nil, err
 	}
 
@@ -321,21 +334,33 @@ func (v *workspaceValue) transferBuiltin(_ *starlark.Thread, b *starlark.Builtin
 		return nil, fmt.Errorf("workspace.transfer: dst must be a world id string or a world handle, got %s", dst.Type())
 	}
 
-	rev, err := v.ws.Transfer(v.ctx, srcLS, names, dstWorldID)
+	// The source world id is the source handle's partition key (== world id). Thread
+	// it explicitly so the move's source-delete commit re-resolves the SAME cached
+	// source handle rather than reverse-deriving the world.
+	srcWorldID := srcLS.SaveID()
+
+	result, err := v.ws.Transfer(v.ctx, srcLS, srcWorldID, names, dstWorldID, TransferOptions{
+		Move:     move,
+		RemapIDs: remapIDs,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("workspace.transfer: %w", err)
 	}
 
+	rev := result.DstRevision
 	committed := rev.ID != 0
 	transferred := 0
 	if committed {
 		transferred = len(names)
 	}
-	res := starlark.NewDict(4)
+	res := starlark.NewDict(7)
 	_ = res.SetKey(starlark.String("transferred"), starlark.MakeInt(transferred))
 	_ = res.SetKey(starlark.String("committed"), starlark.Bool(committed))
 	_ = res.SetKey(starlark.String("revision_id"), starlark.MakeInt64(rev.ID))
 	_ = res.SetKey(starlark.String("sha256"), starlark.String(rev.SHA256))
+	_ = res.SetKey(starlark.String("moved"), starlark.Bool(result.Moved))
+	_ = res.SetKey(starlark.String("source_committed"), starlark.Bool(result.SourceCommitted))
+	_ = res.SetKey(starlark.String("source_revision_id"), starlark.MakeInt64(result.SourceRevision.ID))
 	return res, nil
 }
 

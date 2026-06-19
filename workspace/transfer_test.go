@@ -305,11 +305,11 @@ func TestTransferRemapsSpeciesEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("select source bibites: %v", err)
 	}
-	rev, err := ws.Transfer(ctx, srcLS, coll, worldDst.ID)
+	result, err := ws.Transfer(ctx, srcLS, worldSrc.ID, coll, worldDst.ID, TransferOptions{})
 	if err != nil {
 		t.Fatalf("Transfer: %v", err)
 	}
-	if rev.ID == 0 {
+	if result.DstRevision.ID == 0 {
 		t.Fatalf("Transfer reported no commit (rev.ID == 0)")
 	}
 
@@ -566,7 +566,7 @@ func TestTransferAllOrNothingOnBadEntry(t *testing.T) {
 	// First a valid entry that stages, then a missing one that fails the loop after
 	// a partial stage. The whole transfer must fail and commit nothing.
 	names := []string{"bibites/bibite_0.bb8", "bibites/does_not_exist.bb8"}
-	_, err = ws.Transfer(ctx, srcLS, names, worldDst.ID)
+	_, err = ws.Transfer(ctx, srcLS, worldSrc.ID, names, worldDst.ID, TransferOptions{})
 	if err == nil {
 		t.Fatalf("Transfer with a bad entry: want loud error, got nil")
 	}
@@ -589,8 +589,292 @@ func TestTransferAllOrNothingOnBadEntry(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// TestAutomation_TransferMoveDeletesFromSource — move semantics: after the dst
+// graft commits, the grafted entries are deleted from the SOURCE world too, so the
+// entity ends up in exactly one world. Both heads advance; the result reports
+// moved==True and source_committed==True.
+// ---------------------------------------------------------------------------
+
+func TestAutomation_TransferMoveDeletesFromSource(t *testing.T) {
+	ctx := testCtxAuto(t)
+	ws := newWorkspace(t, ctx)
+
+	tmp := t.TempDir()
+	srcPath := tmp + "/move_src.zip"
+	dstPath := tmp + "/move_dst.zip"
+	const srcBibites = 3
+	writeTransferSourceMulti(t, srcPath, srcBibites, 9)
+	writeTransferDest(t, dstPath)
+
+	worldA, err := ws.AddWorld(ctx, srcPath, "move-src")
+	if err != nil {
+		t.Fatalf("AddWorld(src): %v", err)
+	}
+	worldB, err := ws.AddWorld(ctx, dstPath, "move-dst")
+	if err != nil {
+		t.Fatalf("AddWorld(dst): %v", err)
+	}
+
+	headABefore := headRevision(t, ctx, ws, worldA.ID)
+	headBBefore := headRevision(t, ctx, ws, worldB.ID)
+	aBefore := countBibitesWorking(t, ctx, ws, worldA.ID)
+	bBefore := countBibitesWorking(t, ctx, ws, worldB.ID)
+
+	prog := `
+a = workspace.world("` + worldA.ID + `")
+sa = a.open()
+r = workspace.transfer(sa.bibites.where("energy >= 0"), dst="` + worldB.ID + `", move=True)
+print(r["committed"])
+print(r["transferred"])
+print(r["moved"])
+print(r["source_committed"])
+`
+	res := mustRunAuto(t, ctx, ws, prog)
+	lines := strings.Split(strings.TrimRight(res.Output, "\n"), "\n")
+	if len(lines) < 4 {
+		t.Fatalf("expected >=4 output lines, got %v\nOutput:\n%s", lines, res.Output)
+	}
+	if lines[0] != "True" {
+		t.Fatalf("committed = %q, want True\nOutput:\n%s", lines[0], res.Output)
+	}
+	if lines[1] != itoa(srcBibites) {
+		t.Fatalf("transferred = %q, want %d", lines[1], srcBibites)
+	}
+	if lines[2] != "True" {
+		t.Fatalf("moved = %q, want True", lines[2])
+	}
+	if lines[3] != "True" {
+		t.Fatalf("source_committed = %q, want True", lines[3])
+	}
+
+	// DST grew by N; SOURCE shrank by N (the entity moved, not copied).
+	bAfter := countBibitesWorking(t, ctx, ws, worldB.ID)
+	if bAfter != bBefore+int64(srcBibites) {
+		t.Fatalf("dst bibite count = %d, want %d (prior %d + moved %d)", bAfter, bBefore+int64(srcBibites), bBefore, srcBibites)
+	}
+	aAfter := countBibitesWorking(t, ctx, ws, worldA.ID)
+	if aAfter != aBefore-int64(srcBibites) {
+		t.Fatalf("src bibite count = %d, want %d (prior %d - moved %d); move did not delete from source", aAfter, aBefore-int64(srcBibites), aBefore, srcBibites)
+	}
+
+	// Both heads advanced: dst (graft commit) AND src (source-delete commit).
+	headAAfter := headRevision(t, ctx, ws, worldA.ID)
+	if headAAfter.ID == headABefore.ID {
+		t.Fatalf("src head did not advance on move: still %d (source delete not committed)", headABefore.ID)
+	}
+	headBAfter := headRevision(t, ctx, ws, worldB.ID)
+	if headBAfter.ID == headBBefore.ID {
+		t.Fatalf("dst head did not advance on move: still %d", headBBefore.ID)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestAutomation_TransferCopyLeavesSourceIntact — the default (no move) is a copy:
+// the source is unchanged and the result reports moved==False.
+// ---------------------------------------------------------------------------
+
+func TestAutomation_TransferCopyLeavesSourceIntact(t *testing.T) {
+	ctx := testCtxAuto(t)
+	ws := newWorkspace(t, ctx)
+
+	tmp := t.TempDir()
+	srcPath := tmp + "/copy_src.zip"
+	dstPath := tmp + "/copy_dst.zip"
+	const srcBibites = 3
+	writeTransferSourceMulti(t, srcPath, srcBibites, 9)
+	writeTransferDest(t, dstPath)
+
+	worldA, err := ws.AddWorld(ctx, srcPath, "copy-src")
+	if err != nil {
+		t.Fatalf("AddWorld(src): %v", err)
+	}
+	worldB, err := ws.AddWorld(ctx, dstPath, "copy-dst")
+	if err != nil {
+		t.Fatalf("AddWorld(dst): %v", err)
+	}
+
+	headABefore := headRevision(t, ctx, ws, worldA.ID)
+	aBefore := countBibitesWorking(t, ctx, ws, worldA.ID)
+
+	prog := `
+a = workspace.world("` + worldA.ID + `")
+sa = a.open()
+r = workspace.transfer(sa.bibites.where("energy >= 0"), dst="` + worldB.ID + `")
+print(r["moved"])
+print(r["source_committed"])
+`
+	res := mustRunAuto(t, ctx, ws, prog)
+	lines := strings.Split(strings.TrimRight(res.Output, "\n"), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected >=2 output lines, got %v\nOutput:\n%s", lines, res.Output)
+	}
+	if lines[0] != "False" {
+		t.Fatalf("moved = %q, want False (default copy)", lines[0])
+	}
+	if lines[1] != "False" {
+		t.Fatalf("source_committed = %q, want False (default copy)", lines[1])
+	}
+
+	// The source is unchanged: count steady AND head not advanced.
+	aAfter := countBibitesWorking(t, ctx, ws, worldA.ID)
+	if aAfter != aBefore {
+		t.Fatalf("src bibite count changed on copy: %d -> %d (copy must not delete from source)", aBefore, aAfter)
+	}
+	headAAfter := headRevision(t, ctx, ws, worldA.ID)
+	if headAAfter.ID != headABefore.ID {
+		t.Fatalf("src head advanced on a copy: %d -> %d", headABefore.ID, headAAfter.ID)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestAutomation_TransferRemapIDsAcrossPopulatedDst — a source bibite whose body.id
+// collides with a dest bibite. remap_ids=True succeeds end-to-end (dst grows);
+// the default (remap_ids=False) fails loudly.
+// ---------------------------------------------------------------------------
+
+func TestAutomation_TransferRemapIDsAcrossPopulatedDst(t *testing.T) {
+	ctx := testCtxAuto(t)
+	ws := newWorkspace(t, ctx)
+
+	tmp := t.TempDir()
+	srcPath := tmp + "/remap_src.zip"
+	dstPath := tmp + "/remap_dst.zip"
+	// A source whose single bibite carries body.id 42 — colliding with the dest
+	// fixture's bibite_0 (body 42). Species 9 with a matching record so the species
+	// axis grafts cleanly and the body.id collision is the only obstacle.
+	writeCollidingBodyIDSource(t, srcPath, 42, 9)
+	writeTransferDest(t, dstPath)
+
+	worldA, err := ws.AddWorld(ctx, srcPath, "remap-src")
+	if err != nil {
+		t.Fatalf("AddWorld(src): %v", err)
+	}
+	worldB, err := ws.AddWorld(ctx, dstPath, "remap-dst")
+	if err != nil {
+		t.Fatalf("AddWorld(dst): %v", err)
+	}
+
+	bBefore := countBibitesWorking(t, ctx, ws, worldB.ID)
+
+	// Default (remap_ids=False): the body.id collision is a loud failure.
+	loudProg := `
+a = workspace.world("` + worldA.ID + `")
+sa = a.open()
+workspace.transfer(sa.bibites.where("energy >= 0"), dst="` + worldB.ID + `")
+`
+	if _, err := runAuto(ctx, ws, loudProg); err == nil {
+		t.Fatalf("default transfer with a colliding body.id: want loud failure, got nil")
+	}
+	// The failed default must not have grown the dst.
+	if got := countBibitesWorking(t, ctx, ws, worldB.ID); got != bBefore {
+		t.Fatalf("dst bibite count = %d after failed default transfer, want %d (no partial graft)", got, bBefore)
+	}
+
+	// remap_ids=True: the colliding body.id is remapped and the graft commits.
+	remapProg := `
+a = workspace.world("` + worldA.ID + `")
+sa = a.open()
+r = workspace.transfer(sa.bibites.where("energy >= 0"), dst="` + worldB.ID + `", remap_ids=True)
+print(r["committed"])
+print(r["transferred"])
+`
+	res := mustRunAuto(t, ctx, ws, remapProg)
+	lines := strings.Split(strings.TrimRight(res.Output, "\n"), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected >=2 output lines, got %v\nOutput:\n%s", lines, res.Output)
+	}
+	if lines[0] != "True" {
+		t.Fatalf("remap_ids committed = %q, want True\nOutput:\n%s", lines[0], res.Output)
+	}
+	if lines[1] != "1" {
+		t.Fatalf("remap_ids transferred = %q, want 1", lines[1])
+	}
+	if got := countBibitesWorking(t, ctx, ws, worldB.ID); got != bBefore+1 {
+		t.Fatalf("dst bibite count = %d after remap transfer, want %d (grew by 1)", got, bBefore+1)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestAutomation_TransferMoveCommitsDstBeforeSource — the data-safety ordering
+// invariant in the happy path: the dst graft commits FIRST and the source delete
+// commits SECOND, so the only failure window leaves a recoverable duplicate (never
+// data loss). We assert the ordering via revision ids on a single workspace store:
+// RecordRevisionAdvancingHead allocates ids monotonically, so the dst move revision
+// must have a SMALLER id than the source-delete revision.
+// ---------------------------------------------------------------------------
+
+func TestAutomation_TransferMoveCommitsDstBeforeSource(t *testing.T) {
+	ctx := testCtxAuto(t)
+	ws := newWorkspace(t, ctx)
+
+	tmp := t.TempDir()
+	srcPath := tmp + "/order_src.zip"
+	dstPath := tmp + "/order_dst.zip"
+	writeTransferSourceMulti(t, srcPath, 2, 9)
+	writeTransferDest(t, dstPath)
+
+	worldA, err := ws.AddWorld(ctx, srcPath, "order-src")
+	if err != nil {
+		t.Fatalf("AddWorld(src): %v", err)
+	}
+	worldB, err := ws.AddWorld(ctx, dstPath, "order-dst")
+	if err != nil {
+		t.Fatalf("AddWorld(dst): %v", err)
+	}
+
+	srcLS, err := ws.OpenWorld(ctx, worldA.ID)
+	if err != nil {
+		t.Fatalf("OpenWorld(src): %v", err)
+	}
+	coll, err := selectAllBibites(srcLS)
+	if err != nil {
+		t.Fatalf("select source bibites: %v", err)
+	}
+
+	result, err := ws.Transfer(ctx, srcLS, worldA.ID, coll, worldB.ID, TransferOptions{Move: true})
+	if err != nil {
+		t.Fatalf("Transfer(move): %v", err)
+	}
+	if !result.Moved || !result.SourceCommitted {
+		t.Fatalf("move result moved=%t source_committed=%t, want both true", result.Moved, result.SourceCommitted)
+	}
+	// The DST commit must precede the SOURCE-delete commit: dst-first ordering means
+	// the dst revision was recorded before the source revision, so its id is smaller.
+	if result.DstRevision.ID == 0 {
+		t.Fatalf("dst revision id is 0, want a real commit")
+	}
+	if result.SourceRevision.ID == 0 {
+		t.Fatalf("source revision id is 0, want a real source-delete commit")
+	}
+	if !(result.DstRevision.ID < result.SourceRevision.ID) {
+		t.Fatalf("dst revision id %d is not < source revision id %d; the dst commit must happen BEFORE the source delete (data-safety ordering)", result.DstRevision.ID, result.SourceRevision.ID)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+// writeCollidingBodyIDSource writes a SOURCE save with a single bibite whose
+// body.id is bodyID (chosen to collide with a dest bibite) carrying species sid
+// with a matching recordedSpecies record, so the cross-world graft's only obstacle
+// is the body.id collision.
+func writeCollidingBodyIDSource(t *testing.T, path string, bodyID, sid int64) {
+	t.Helper()
+	speciesData := `{"nextSpeciesID":` + itoa(sid+1) + `,"activeSpeciesList":[` + itoa(sid) +
+		`],"recordedSpecies":[{"speciesID":` + itoa(sid) + `,"parentID":0,"name":"src-species","template":{"genes":{"SizeRatio":9.9}}}]}`
+	archive := &tb.Archive{
+		Entries: []tb.Entry{
+			{Index: 0, Name: "scene.bb8scene", Kind: tb.EntryScene, Method: zip.Deflate, Raw: withBOM(`{"nBibites":1}`)},
+			{Index: 1, Name: "settings.bb8settings", Kind: tb.EntrySettings, Method: zip.Deflate, Raw: withBOM(`{"worldLabel":{"Value":"source-world"},"zones":[],"zoneGroups":[],"bibites":[],"settingsChangers":[]}`)},
+			{Index: 2, Name: "speciesData.json", Kind: tb.EntrySpecies, Method: zip.Deflate, Raw: withBOM(speciesData)},
+			{Index: 3, Name: "bibites/bibite_0.bb8", Kind: tb.EntryBibite, Method: zip.Deflate, Raw: withBOM(`{"body":{"id":` + itoa(bodyID) + `,"energy":33.0},"genes":{"speciesID":` + itoa(sid) + `,"gen":1},"brain":{"Nodes":[],"Synapses":[]}}`)},
+		},
+	}
+	if err := tb.WriteArchive(path, archive); err != nil {
+		t.Fatalf("WriteArchive(colliding body.id source) error = %v", err)
+	}
+}
 
 // countBibitesWorking returns the working-partition (save_id == worldID) bibite
 // row count for a world, reading the shared DuckDB mirror directly.

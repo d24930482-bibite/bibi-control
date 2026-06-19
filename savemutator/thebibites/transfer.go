@@ -17,11 +17,12 @@ package thebibites
 //     contents / pellets / settings zones). Routes through StageSQLAppend, which
 //     reuses the existing append resolvers and SceneCount reconciliation.
 //   - AppendEntry      → whole bibite/egg graft. This reconciles identity
-//     (body.id collision, dangling child refs stay loud) and REMAPS any
-//     species-bearing graft across the per-world-linear speciesID space:
-//     allocate a fresh non-colliding dest species id, import the source species
-//     record, and rewrite genes.speciesID on the grafted entity (and its egg).
-//     See transfer_identity.go for the allocator and the conflation invariant.
+//     (dangling child refs stay loud; a body.id collision is loud by default but
+//     OPT-IN remapped via GraftOptions.RemapIDs) and REMAPS any species-bearing
+//     graft across the per-world-linear speciesID space: allocate a fresh
+//     non-colliding dest species id, import the source species record, and rewrite
+//     genes.speciesID on the grafted entity (and its egg). See transfer_identity.go
+//     for both allocators and the conflation invariant.
 
 import (
 	"fmt"
@@ -39,6 +40,18 @@ type transfer struct {
 
 // compile-time assertion that *transfer satisfies the Workspace seam.
 var _ Workspace = (*transfer)(nil)
+
+// GraftOptions carries the opt-in behavior toggles for a whole-entry graft. It is
+// a small carrier (rather than a bare bool list) so the AppendEntry seam stays
+// readable and future toggles add a field instead of a positional argument.
+type GraftOptions struct {
+	// RemapIDs, when true, resolves a body.id collision with the destination by
+	// minting a FRESH non-colliding dest body.id (freshDstBodyID) and rewriting
+	// body.id on the clone before staging, instead of failing loudly. It does NOT
+	// loosen the dangling-child guard (remapping body.id cannot fix a cross-world
+	// body.eggLayer.children reference). Default false preserves the fail-loud guard.
+	RemapIDs bool
+}
 
 // NewTransfer builds a cross-save coordinator over a source and a destination
 // session. Both must be non-nil and wrap a decoded archive.
@@ -189,19 +202,25 @@ func (t *transfer) AppendArray(dst SQLValueRef, element CollectedElement) error 
 }
 
 // AppendEntry grafts a collected whole bibite/egg entry into the destination
-// save. It reconciles non-species identity (body.id collision, dangling child
-// refs stay loud) and, when the entity carries a genes.speciesID, REMAPS it
-// across the per-world-linear species space: allocate a fresh non-colliding dest
-// species id, import the source species record into speciesData.json under that
-// id, and rewrite the grafted entity's genes.speciesID. It then allocates a
-// fresh entry name and stages the append.
+// save. It reconciles non-species identity (dangling child refs stay loud; a
+// body.id collision is loud by default but, when opts.RemapIDs is set, is resolved
+// by minting a fresh non-colliding dest body.id) and, when the entity carries a
+// genes.speciesID, REMAPS it across the per-world-linear species space: allocate a
+// fresh non-colliding dest species id, import the source species record into
+// speciesData.json under that id, and rewrite the grafted entity's genes.speciesID.
+// It then allocates a fresh entry name and stages the append.
+//
+// body.id remap and species remap are INDEPENDENT axes that rewrite the SAME
+// cloned JSON before staging on different paths (body.id vs genes.speciesID), so
+// their order does not matter.
 //
 // Atomicity: every check that can fail (identity guard, fresh-id allocation,
-// source-record lookup) runs BEFORE any StageAppend, so a rejected graft leaves
-// the destination with 0 staged ops by construction. All mutation is staged
-// through the dst Session (the species-table appends AND the entry append), so it
-// rides Apply()'s all-or-nothing atomicity; nothing is committed here (F2).
-func (t *transfer) AppendEntry(element CollectedElement) error {
+// source-record lookup) AND every rewrite of the clone (body.id remap, species
+// remap) runs BEFORE any StageAppend, so a rejected graft leaves the destination
+// with 0 staged ops by construction. All mutation is staged through the dst Session
+// (the species-table appends AND the entry append), so it rides Apply()'s
+// all-or-nothing atomicity; nothing is committed here (F2).
+func (t *transfer) AppendEntry(element CollectedElement, opts GraftOptions) error {
 	if element.JSON == nil {
 		return fmt.Errorf("transfer: append entry: element has no JSON")
 	}
@@ -220,9 +239,33 @@ func (t *transfer) AppendEntry(element CollectedElement) error {
 	cloned := cloneJSON(element.JSON)
 
 	// Non-species identity reconciliation is a silent-corruption surface: validate
-	// it FIRST, before staging, so a rejected graft never half-mutates the dest.
-	if err := t.reconcileGraftIdentity(kind, cloned); err != nil {
+	// it FIRST, before staging, so a rejected graft never half-mutates the dest. A
+	// body.id collision is loud unless opts.RemapIDs is set (the dangling-child
+	// guard inside is loud regardless).
+	if err := t.reconcileGraftIdentity(kind, cloned, opts.RemapIDs); err != nil {
 		return err
+	}
+
+	// body.id remap (opt-in, bibites only). When the grafted body.id collides with
+	// a dest bibite, mint a FRESH non-colliding dest body.id and rewrite it on the
+	// clone BEFORE any StageAppend (preserving the 0-staged-ops-on-rejection
+	// invariant). dstBodyIDUsage folds in body.ids already staged this session so a
+	// multi-graft loop allocates DISTINCT fresh ids. Eggs carry no body.id, so the
+	// kind gate keeps this bibite-only.
+	if opts.RemapIDs && kind == tb.EntryBibite {
+		if id, ok := bibiteBodyID(cloned); ok {
+			if _, collides := t.dstBibiteWithBodyID(id); collides {
+				fresh, has := t.freshDstBodyID()
+				if !has {
+					// Only reachable if the dest carries no observable body.id at all,
+					// in which case a collision is impossible; defend anyway.
+					fresh = 0
+				}
+				if err := setJSONPath(cloned, "body.id", fresh, SetOptions{}); err != nil {
+					return fmt.Errorf("transfer: append entry: rewrite grafted body.id: %w", err)
+				}
+			}
+		}
 	}
 
 	// Species remap (covers both bibites and eggs via genes.speciesID). A
