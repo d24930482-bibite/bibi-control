@@ -207,6 +207,26 @@ func (e *ArrayElement) Attr(name string) (starlark.Value, error) {
 		return starlark.MakeInt64(e.index), nil
 	case "delete":
 		return starlark.NewBuiltin("delete", e.deleteBuiltin), nil
+	case "source":
+		if e.spec.attr != "synapses" {
+			return nil, nil
+		}
+		return e.navSynapseEndpoint("source", "node_in")
+	case "target":
+		if e.spec.attr != "synapses" {
+			return nil, nil
+		}
+		return e.navSynapseEndpoint("target", "node_out")
+	case "inputs":
+		if e.spec.attr != "nodes" {
+			return nil, nil
+		}
+		return e.navNodeSynapses("inputs", "node_out")
+	case "outputs":
+		if e.spec.attr != "nodes" {
+			return nil, nil
+		}
+		return e.navNodeSynapses("outputs", "node_in")
 	}
 	spec, ok := e.spec.elementAttrs[name]
 	if !ok {
@@ -216,13 +236,97 @@ func (e *ArrayElement) Attr(name string) (starlark.Value, error) {
 }
 
 func (e *ArrayElement) AttrNames() []string {
-	names := make([]string, 0, len(e.spec.elementAttrs)+2)
+	names := make([]string, 0, len(e.spec.elementAttrs)+4)
 	for name := range e.spec.elementAttrs {
 		names = append(names, name)
 	}
 	names = append(names, "delete", "index")
+	switch e.spec.attr {
+	case "synapses":
+		names = append(names, "source", "target")
+	case "nodes":
+		names = append(names, "inputs", "outputs")
+	}
 	sort.Strings(names)
 	return names
+}
+
+// navSynapseEndpoint resolves syn.source or syn.target by reading the synapse's
+// node_in or node_out field (the logical NodeIndex), then looking up the node whose
+// node_index equals that value in the same entity's nodes sub-collection. Returns a
+// fresh *ArrayElement for the nodes sub-collection with the correct array ordinal.
+// A missing node_index is a loud error (§4/§5 rule — never silent None).
+func (e *ArrayElement) navSynapseEndpoint(navName, endpointCol string) (starlark.Value, error) {
+	// Read the logical NodeIndex from this synapse's node_in / node_out.
+	epSpec, ok := e.spec.elementAttrs[endpointCol]
+	if !ok {
+		return nil, fmt.Errorf("synapse.%s: no column %q in synapse spec", navName, endpointCol)
+	}
+	nodeIdx := e.row.FieldByIndex(epSpec.fieldIndex).Int()
+
+	// Resolve the nodes sub-collection spec for this entity kind.
+	nodesSpec, ok := subCollectionRegistry()[e.kind]["nodes"]
+	if !ok {
+		return nil, fmt.Errorf("synapse.%s: no nodes sub-collection registered for kind %q", navName, e.kind)
+	}
+
+	// Lookup via the memoized nodeByIndex map (O(1) after first build).
+	nodeRow, ordinal, found := e.ls.nodeByIndex(nodesSpec.table, e.entryName, nodeIdx)
+	if !found {
+		return nil, fmt.Errorf("synapse.%s: no node with node_index %d", navName, nodeIdx)
+	}
+	return &ArrayElement{
+		ls:        e.ls,
+		kind:      e.kind,
+		entryName: e.entryName,
+		spec:      nodesSpec,
+		row:       nodeRow,
+		index:     ordinal,
+	}, nil
+}
+
+// navNodeSynapses implements n.inputs (edges where node_out == n.node_index) and
+// n.outputs (edges where node_in == n.node_index). Scans the entity's synapses rows,
+// collects matches, and returns a *starlark.List of *ArrayElement synapse handles.
+// Each handle carries the synapse's correct array ordinal so .weight, .source,
+// .delete() all work on the returned elements.
+func (e *ArrayElement) navNodeSynapses(navName, matchCol string) (starlark.Value, error) {
+	// Read this node's logical NodeIndex.
+	niSpec, ok := e.spec.elementAttrs["node_index"]
+	if !ok {
+		return nil, fmt.Errorf("node.%s: no column node_index in node spec", navName)
+	}
+	myNodeIndex := e.row.FieldByIndex(niSpec.fieldIndex).Int()
+
+	// Resolve the synapses sub-collection spec for this entity kind.
+	synSpec, ok := subCollectionRegistry()[e.kind]["synapses"]
+	if !ok {
+		return nil, fmt.Errorf("node.%s: no synapses sub-collection registered for kind %q", navName, e.kind)
+	}
+	matchSpec, ok := synSpec.elementAttrs[matchCol]
+	if !ok {
+		return nil, fmt.Errorf("node.%s: no column %q in synapse spec", navName, matchCol)
+	}
+
+	// Scan all synapses for this entity and collect matching ones.
+	synRows := e.ls.subRowsFor(synSpec.table, e.entryName)
+	out := starlark.NewList(nil)
+	for ordinal, row := range synRows {
+		if row.FieldByIndex(matchSpec.fieldIndex).Int() == myNodeIndex {
+			elem := &ArrayElement{
+				ls:        e.ls,
+				kind:      e.kind,
+				entryName: e.entryName,
+				spec:      synSpec,
+				row:       row,
+				index:     int64(ordinal),
+			}
+			if err := out.Append(elem); err != nil {
+				return nil, fmt.Errorf("node.%s: %w", navName, err)
+			}
+		}
+	}
+	return out, nil
 }
 
 // deleteBuiltin implements element.delete(): stage a structural delete of this

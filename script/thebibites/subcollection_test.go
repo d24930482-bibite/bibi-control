@@ -4,8 +4,11 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"sort"
+	"sync"
 	"testing"
 
+	mutator "github.com/asemones/bibicontrol/savemutator/thebibites"
 	tb "github.com/asemones/bibicontrol/saveparser/thebibites"
 	"github.com/asemones/bibicontrol/script"
 	"go.starlark.net/starlark"
@@ -480,5 +483,410 @@ func TestSetFieldRejectsSubCollection(t *testing.T) {
 	e := &Entity{ls: ls, kind: "bibite", entryName: name}
 	if err := e.SetField("synapses", starlark.MakeInt(1)); err == nil {
 		t.Fatal("SetField(synapses) error = nil, want rejection")
+	}
+}
+
+// buildNavLS builds a minimal LoadedSave with a synthetic brain for the given
+// entryName, where NodeRowIndex and NodeIndex intentionally DIFFER for node 0:
+//
+//	node[0]: NodeRowIndex=0, NodeIndex=nodeIdx0
+//	node[1]: NodeRowIndex=1, NodeIndex=nodeIdx1
+//	synapse[0]: NodeIn=nodeIdx0, NodeOut=nodeIdx1
+//
+// This forces the test to use NodeIndex for the join; a slot-based (NodeRowIndex)
+// lookup for nodeIn=nodeIdx0 would find the wrong node or none at all when
+// nodeIdx0 != 0.
+func buildNavLS(entryName string, nodeIdx0, nodeIdx1 int64) *LoadedSave {
+	ls := &LoadedSave{
+		session:    mutator.NewSession(nil),
+		willCommit: false,
+		tables: tb.ExtractedSave{
+			Bibites: []tb.BibiteRow{
+				{EntryName: entryName},
+			},
+			BibiteBrainNodes: []tb.BrainNodeRow{
+				{EntryName: entryName, NodeRowIndex: 0, NodeIndex: nodeIdx0},
+				{EntryName: entryName, NodeRowIndex: 1, NodeIndex: nodeIdx1},
+			},
+			BibiteBrainSynapses: []tb.BrainSynapseRow{
+				{EntryName: entryName, SynapseRowIndex: 0, NodeIn: nodeIdx0, NodeOut: nodeIdx1, Weight: 0.5, Enabled: true, Innovation: 7},
+			},
+		},
+	}
+	ls.buildAccess()
+	return ls
+}
+
+// synElemAt returns the idx-th synapse ArrayElement for entryName.
+func synElemAt(t *testing.T, ls *LoadedSave, entryName string, idx int) *ArrayElement {
+	t.Helper()
+	ec := subCollection(t, ls, "bibite", entryName, "synapses")
+	return elementAt(t, ec, idx)
+}
+
+// nodeElemAt returns the idx-th node ArrayElement for entryName.
+func nodeElemAt(t *testing.T, ls *LoadedSave, entryName string, idx int) *ArrayElement {
+	t.Helper()
+	ec := subCollection(t, ls, "bibite", entryName, "nodes")
+	return elementAt(t, ec, idx)
+}
+
+// attrInt64 reads a starlark int attr as int64, failing on error.
+func attrInt64(t *testing.T, e *ArrayElement, name string) int64 {
+	t.Helper()
+	v, err := e.Attr(name)
+	if err != nil {
+		t.Fatalf("Attr(%q): %v", name, err)
+	}
+	if v == nil {
+		t.Fatalf("Attr(%q) returned nil", name)
+	}
+	n, ok := v.(starlark.Int)
+	if !ok {
+		t.Fatalf("Attr(%q) = %T, want Int", name, v)
+	}
+	i64, ok := n.Int64()
+	if !ok {
+		t.Fatalf("Attr(%q) overflows int64", name)
+	}
+	return i64
+}
+
+// TestSynapseSourceTargetByNodeIndex verifies syn.source and syn.target resolve by
+// logical NodeIndex, NOT the array slot (NodeRowIndex). The fixture is constructed
+// so NodeRowIndex=0 has NodeIndex=99 — a slot-based lookup for node_in=99 would
+// search array slot 99 (out of bounds in a 2-node brain) and fail or hit the wrong
+// element, making the test fail if the implementation uses the wrong field.
+func TestSynapseSourceTargetByNodeIndex(t *testing.T) {
+	const entry = "bibites/syntest.bb8"
+	const nodeIdx0, nodeIdx1 = int64(99), int64(200) // intentionally != NodeRowIndex (0, 1)
+	ls := buildNavLS(entry, nodeIdx0, nodeIdx1)
+
+	syn := synElemAt(t, ls, entry, 0)
+
+	// syn.source must resolve to the node whose node_index == node_in (99)
+	srcV, err := syn.Attr("source")
+	if err != nil {
+		t.Fatalf("syn.source: %v", err)
+	}
+	src, ok := srcV.(*ArrayElement)
+	if !ok {
+		t.Fatalf("syn.source returned %T, want *ArrayElement", srcV)
+	}
+	// The resolved node's node_index must equal node_in (99)
+	if got := attrInt64(t, src, "node_index"); got != nodeIdx0 {
+		t.Errorf("syn.source.node_index = %d, want %d", got, nodeIdx0)
+	}
+	// Array ordinal (index attr) must be 0 — the actual array slot of nodeIdx0
+	if got := attrInt64(t, src, "index"); got != 0 {
+		t.Errorf("syn.source.index (array ordinal) = %d, want 0", got)
+	}
+
+	// syn.target must resolve to the node whose node_index == node_out (200)
+	dstV, err := syn.Attr("target")
+	if err != nil {
+		t.Fatalf("syn.target: %v", err)
+	}
+	dst, ok := dstV.(*ArrayElement)
+	if !ok {
+		t.Fatalf("syn.target returned %T, want *ArrayElement", dstV)
+	}
+	if got := attrInt64(t, dst, "node_index"); got != nodeIdx1 {
+		t.Errorf("syn.target.node_index = %d, want %d", got, nodeIdx1)
+	}
+	if got := attrInt64(t, dst, "index"); got != 1 {
+		t.Errorf("syn.target.index (array ordinal) = %d, want 1", got)
+	}
+
+	// Slot-based confusion guard: if implementation had used array-slot lookup,
+	// node_in=99 would try slot 99 in a 2-node array — that would fail.  But we
+	// also verify explicitly: the returned node's index attr is 0, not 99.
+	if srcIdx := attrInt64(t, src, "index"); srcIdx == nodeIdx0 {
+		t.Errorf("syn.source.index == node_index (%d) — likely resolved by NodeIndex as slot, not by NodeIndex→ordinal lookup", nodeIdx0)
+	}
+}
+
+// TestNodeInputsOutputs verifies n.inputs / n.outputs return the correct synapse
+// handles with the correct ordinals and endpoint values.
+func TestNodeInputsOutputs(t *testing.T) {
+	ls := loadFixture(t)
+	name := bibiteWithSub(t, ls, "bibite_brain_synapses")
+
+	// Find a node that has at least one input or output synapse using direct scan.
+	nodeRows := ls.subRowsFor("bibite_brain_nodes", name)
+	synRows := ls.subRowsFor("bibite_brain_synapses", name)
+	if len(nodeRows) == 0 {
+		t.Skip("fixture bibite has no nodes")
+	}
+
+	// Pick node[0] and compute expected inputs/outputs by brute-force scan.
+	nodeRow := nodeRows[0]
+	niSpec := subCollectionRegistry()["bibite"]["nodes"].elementAttrs["node_index"]
+	synSpec := subCollectionRegistry()["bibite"]["synapses"]
+	nodeIndex := nodeRow.FieldByIndex(niSpec.fieldIndex).Int()
+
+	nodeInSpec := synSpec.elementAttrs["node_in"]
+	nodeOutSpec := synSpec.elementAttrs["node_out"]
+
+	var wantInputOrdinals, wantOutputOrdinals []int
+	for i, row := range synRows {
+		if row.FieldByIndex(nodeOutSpec.fieldIndex).Int() == nodeIndex {
+			wantInputOrdinals = append(wantInputOrdinals, i)
+		}
+		if row.FieldByIndex(nodeInSpec.fieldIndex).Int() == nodeIndex {
+			wantOutputOrdinals = append(wantOutputOrdinals, i)
+		}
+	}
+
+	nodeElem := nodeElemAt(t, ls, name, 0)
+
+	// --- n.inputs ---
+	inputsV, err := nodeElem.Attr("inputs")
+	if err != nil {
+		t.Fatalf("n.inputs: %v", err)
+	}
+	inputsList, ok := inputsV.(*starlark.List)
+	if !ok {
+		t.Fatalf("n.inputs returned %T, want *starlark.List", inputsV)
+	}
+	if inputsList.Len() != len(wantInputOrdinals) {
+		t.Errorf("n.inputs len = %d, want %d", inputsList.Len(), len(wantInputOrdinals))
+	}
+	gotInputOrdinals := make([]int, inputsList.Len())
+	for i := 0; i < inputsList.Len(); i++ {
+		elem := inputsList.Index(i).(*ArrayElement)
+		gotInputOrdinals[i] = int(elem.index)
+		// Each element's node_out must equal this node's node_index
+		nodeOutVal := elem.row.FieldByIndex(nodeOutSpec.fieldIndex).Int()
+		if nodeOutVal != nodeIndex {
+			t.Errorf("inputs[%d].node_out = %d, want %d", i, nodeOutVal, nodeIndex)
+		}
+	}
+	sort.Ints(gotInputOrdinals)
+	sort.Ints(wantInputOrdinals)
+	if len(gotInputOrdinals) != len(wantInputOrdinals) {
+		t.Errorf("inputs ordinals len mismatch: got %v, want %v", gotInputOrdinals, wantInputOrdinals)
+	} else {
+		for i := range gotInputOrdinals {
+			if gotInputOrdinals[i] != wantInputOrdinals[i] {
+				t.Errorf("inputs ordinals[%d] = %d, want %d", i, gotInputOrdinals[i], wantInputOrdinals[i])
+			}
+		}
+	}
+
+	// --- n.outputs ---
+	outputsV, err := nodeElem.Attr("outputs")
+	if err != nil {
+		t.Fatalf("n.outputs: %v", err)
+	}
+	outputsList, ok := outputsV.(*starlark.List)
+	if !ok {
+		t.Fatalf("n.outputs returned %T, want *starlark.List", outputsV)
+	}
+	if outputsList.Len() != len(wantOutputOrdinals) {
+		t.Errorf("n.outputs len = %d, want %d", outputsList.Len(), len(wantOutputOrdinals))
+	}
+	gotOutputOrdinals := make([]int, outputsList.Len())
+	for i := 0; i < outputsList.Len(); i++ {
+		elem := outputsList.Index(i).(*ArrayElement)
+		gotOutputOrdinals[i] = int(elem.index)
+		// Each element's node_in must equal this node's node_index
+		nodeInVal := elem.row.FieldByIndex(nodeInSpec.fieldIndex).Int()
+		if nodeInVal != nodeIndex {
+			t.Errorf("outputs[%d].node_in = %d, want %d", i, nodeInVal, nodeIndex)
+		}
+	}
+	sort.Ints(gotOutputOrdinals)
+	sort.Ints(wantOutputOrdinals)
+	if len(gotOutputOrdinals) != len(wantOutputOrdinals) {
+		t.Errorf("outputs ordinals len mismatch: got %v, want %v", gotOutputOrdinals, wantOutputOrdinals)
+	} else {
+		for i := range gotOutputOrdinals {
+			if gotOutputOrdinals[i] != wantOutputOrdinals[i] {
+				t.Errorf("outputs ordinals[%d] = %d, want %d", i, gotOutputOrdinals[i], wantOutputOrdinals[i])
+			}
+		}
+	}
+}
+
+// TestSynapseSourceMissIsLoud verifies that a synapse referencing a non-existent
+// node_index returns a non-nil error (loud), never (None, nil).
+func TestSynapseSourceMissIsLoud(t *testing.T) {
+	const entry = "bibites/misstest.bb8"
+	// nodeIdx=999 is absent from nodes (only nodeIdx 10 and 11 exist).
+	ls := buildNavLS(entry, 10, 11)
+
+	// Manually inject a dangling synapse: node_in=999 which has no matching node.
+	ls.tables.BibiteBrainSynapses = append(ls.tables.BibiteBrainSynapses, tb.BrainSynapseRow{
+		EntryName: entry, SynapseRowIndex: 1, NodeIn: 999, NodeOut: 10,
+	})
+	// Reset the sub-row index so it picks up the extra synapse.
+	ls.subRowOnce = sync.Once{}
+	ls.subRowIdx = nil
+	ls.nodeByIndexOnce = sync.Once{}
+	ls.nodeByIndexMap = nil
+
+	// The dangling synapse is at index 1.
+	syn := synElemAt(t, ls, entry, 1)
+	_, err := syn.Attr("source")
+	if err == nil {
+		t.Fatal("syn.source with missing node_index returned nil error, want loud error")
+	}
+}
+
+// TestNavigationAttrNames verifies the four nav attrs appear only on the matching
+// element kind: synapse elements have source/target; node elements have
+// inputs/outputs; stomach elements have none of the four.
+func TestNavigationAttrNames(t *testing.T) {
+	reg := subCollectionRegistry()["bibite"]
+
+	synSpec := reg["synapses"]
+	nodeSpec := reg["nodes"]
+	stomachSpec := reg["stomach"]
+
+	if synSpec == nil || nodeSpec == nil || stomachSpec == nil {
+		t.Fatal("expected bibite to have synapses, nodes, and stomach sub-collections")
+	}
+
+	// Build dummy ArrayElements just to call AttrNames (no real rows needed here —
+	// AttrNames only checks e.spec.attr).
+	synElem := &ArrayElement{spec: synSpec}
+	nodeElem := &ArrayElement{spec: nodeSpec}
+	stomachElem := &ArrayElement{spec: stomachSpec}
+
+	toSet := func(names []string) map[string]bool {
+		m := make(map[string]bool, len(names))
+		for _, n := range names {
+			m[n] = true
+		}
+		return m
+	}
+
+	synNames := toSet(synElem.AttrNames())
+	nodeNames := toSet(nodeElem.AttrNames())
+	stomachNames := toSet(stomachElem.AttrNames())
+
+	// Synapse: must have source + target, must NOT have inputs/outputs.
+	for _, want := range []string{"source", "target"} {
+		if !synNames[want] {
+			t.Errorf("synapse AttrNames missing %q", want)
+		}
+	}
+	for _, notWant := range []string{"inputs", "outputs"} {
+		if synNames[notWant] {
+			t.Errorf("synapse AttrNames unexpectedly contains %q", notWant)
+		}
+	}
+
+	// Node: must have inputs + outputs, must NOT have source/target.
+	for _, want := range []string{"inputs", "outputs"} {
+		if !nodeNames[want] {
+			t.Errorf("node AttrNames missing %q", want)
+		}
+	}
+	for _, notWant := range []string{"source", "target"} {
+		if nodeNames[notWant] {
+			t.Errorf("node AttrNames unexpectedly contains %q", notWant)
+		}
+	}
+
+	// Stomach: none of the four.
+	for _, notWant := range []string{"source", "target", "inputs", "outputs"} {
+		if stomachNames[notWant] {
+			t.Errorf("stomach AttrNames unexpectedly contains %q", notWant)
+		}
+	}
+}
+
+// TestEggBrainNavigation verifies source/target/outputs resolution works for the
+// egg kind, proving kind-generic dispatch. Skips cleanly if the fixture has no egg
+// with a brain that has both nodes and synapses.
+func TestEggBrainNavigation(t *testing.T) {
+	ls := loadFixture(t)
+	ta := ls.access["eggs"]
+	if ta == nil || len(ta.order) == 0 {
+		t.Skip("fixture has no eggs")
+	}
+	var eggName string
+	for _, n := range ta.order {
+		if len(ls.subRowsFor("egg_brain_synapses", n)) > 0 &&
+			len(ls.subRowsFor("egg_brain_nodes", n)) > 0 {
+			eggName = n
+			break
+		}
+	}
+	if eggName == "" {
+		t.Skip("fixture has no egg with both nodes and synapses")
+	}
+
+	// Get the first synapse and read its source and target nodes.
+	eggSynSpec := subCollectionRegistry()["egg"]["synapses"]
+	eggSynRows := ls.subRowsFor("egg_brain_synapses", eggName)
+	if len(eggSynRows) == 0 {
+		t.Skip("no synapse rows for egg")
+	}
+	synElem := &ArrayElement{
+		ls:        ls,
+		kind:      "egg",
+		entryName: eggName,
+		spec:      eggSynSpec,
+		row:       eggSynRows[0],
+		index:     0,
+	}
+
+	// syn.source must return a node element.
+	srcV, err := synElem.Attr("source")
+	if err != nil {
+		t.Fatalf("egg syn.source: %v", err)
+	}
+	src, ok := srcV.(*ArrayElement)
+	if !ok {
+		t.Fatalf("egg syn.source returned %T, want *ArrayElement", srcV)
+	}
+	if src.spec.attr != "nodes" {
+		t.Errorf("egg syn.source.spec.attr = %q, want nodes", src.spec.attr)
+	}
+
+	// syn.target must return a node element.
+	dstV, err := synElem.Attr("target")
+	if err != nil {
+		t.Fatalf("egg syn.target: %v", err)
+	}
+	dst, ok := dstV.(*ArrayElement)
+	if !ok {
+		t.Fatalf("egg syn.target returned %T, want *ArrayElement", dstV)
+	}
+	if dst.spec.attr != "nodes" {
+		t.Errorf("egg syn.target.spec.attr = %q, want nodes", dst.spec.attr)
+	}
+
+	// The source node's .outputs must include the original synapse (round-trip).
+	// src is the source (node_in side), so this synapse should appear in src.outputs
+	// (synapses whose node_in == src.node_index).
+	outputsV, err := src.Attr("outputs")
+	if err != nil {
+		t.Fatalf("egg src.outputs: %v", err)
+	}
+	outputsList, ok := outputsV.(*starlark.List)
+	if !ok {
+		t.Fatalf("egg src.outputs returned %T, want *starlark.List", outputsV)
+	}
+	if outputsList.Len() == 0 {
+		t.Error("egg src.outputs is empty; expected at least the original synapse")
+	}
+
+	// The target node's .inputs must include the original synapse.
+	// dst is the target (node_out side), so the synapse should appear in dst.inputs
+	// (synapses whose node_out == dst.node_index).
+	inputsV, err := dst.Attr("inputs")
+	if err != nil {
+		t.Fatalf("egg dst.inputs: %v", err)
+	}
+	inputsList, ok := inputsV.(*starlark.List)
+	if !ok {
+		t.Fatalf("egg dst.inputs returned %T, want *starlark.List", inputsV)
+	}
+	if inputsList.Len() == 0 {
+		t.Error("egg dst.inputs is empty; expected at least the original synapse")
 	}
 }
