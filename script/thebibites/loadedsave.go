@@ -554,6 +554,12 @@ func (ls *LoadedSave) ensureApplied() error {
 	return nil
 }
 
+// SaveID returns the working-partition key this save was loaded under, which the
+// workspace asserts equals the world id (commit_world.go). The transfer binding
+// uses it to thread the SOURCE world id to the move's source-delete commit without
+// reverse-deriving it from the selector.
+func (ls *LoadedSave) SaveID() string { return ls.saveID }
+
 // WriteSave applies the staged mutations to the in-memory archive and writes the
 // resulting save zip — with NO reparse (the run is over; fresh projections would
 // be unused). This is the T6 commit-to-file core (the save.commit(path) plain-file

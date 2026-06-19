@@ -34,6 +34,6 @@ type Workspace interface {
 	// AppendArray appends a collected array element to the destination cell.
 	AppendArray(dst SQLValueRef, element CollectedElement) error
 	// AppendEntry appends a collected whole entry (bibite/egg) to the
-	// destination save.
-	AppendEntry(element CollectedElement) error
+	// destination save. opts carries opt-in graft toggles (e.g. body.id remap).
+	AppendEntry(element CollectedElement, opts GraftOptions) error
 }

@@ -274,7 +274,7 @@ func TestTransferAppendEntryRoundTrip(t *testing.T) {
 		t.Fatalf("precondition: destination nBibites = %v, want 3", beforeCount)
 	}
 
-	if err := tr.AppendEntry(element); err != nil {
+	if err := tr.AppendEntry(element, GraftOptions{}); err != nil {
 		t.Fatalf("AppendEntry() error = %v", err)
 	}
 	fresh, err := dst.Commit(filepath.Join(t.TempDir(), "entry_graft.zip"))
@@ -370,7 +370,7 @@ func TestTransferAppendEntryBodyIDCollision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CollectEntry() error = %v", err)
 	}
-	if err := tr.AppendEntry(element); err == nil {
+	if err := tr.AppendEntry(element, GraftOptions{}); err == nil {
 		t.Fatalf("AppendEntry(body.id collision) error = nil, want loud failure")
 	}
 	// Destination must be unchanged: no staged op, no extra entry.
@@ -524,7 +524,7 @@ func TestTransferAppendEntryRemapsCollidingSpecies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CollectEntry() error = %v", err)
 	}
-	if err := tr.AppendEntry(element); err != nil {
+	if err := tr.AppendEntry(element, GraftOptions{}); err != nil {
 		t.Fatalf("AppendEntry(colliding species) error = %v, want successful remap", err)
 	}
 	fresh, err := dst.Commit(filepath.Join(t.TempDir(), "remap_colliding.zip"))
@@ -586,7 +586,7 @@ func TestTransferAppendEntryRemapsAbsentSpecies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CollectEntry() error = %v", err)
 	}
-	if err := tr.AppendEntry(element); err != nil {
+	if err := tr.AppendEntry(element, GraftOptions{}); err != nil {
 		t.Fatalf("AppendEntry(absent species) error = %v, want successful remap", err)
 	}
 	fresh, err := dst.Commit(filepath.Join(t.TempDir(), "remap_absent.zip"))
@@ -630,7 +630,7 @@ func TestTransferAppendEntryRemapsEggSpecies(t *testing.T) {
 	if element.Table != "eggs" {
 		t.Fatalf("collected egg table = %q, want eggs", element.Table)
 	}
-	if err := tr.AppendEntry(element); err != nil {
+	if err := tr.AppendEntry(element, GraftOptions{}); err != nil {
 		t.Fatalf("AppendEntry(egg) error = %v, want successful remap", err)
 	}
 	fresh, err := dst.Commit(filepath.Join(t.TempDir(), "remap_egg.zip"))
@@ -682,7 +682,7 @@ func TestTransferAppendEntryAllocatorBeatsStaleNextSpeciesID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CollectEntry() error = %v", err)
 	}
-	if err := tr.AppendEntry(element); err != nil {
+	if err := tr.AppendEntry(element, GraftOptions{}); err != nil {
 		t.Fatalf("AppendEntry() error = %v, want successful remap", err)
 	}
 	fresh, err := dst.Commit(filepath.Join(t.TempDir(), "remap_stale.zip"))
@@ -732,7 +732,7 @@ func TestTransferAppendEntryAllocatorBeatsLiveEntitySpeciesID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CollectEntry() error = %v", err)
 	}
-	if err := tr.AppendEntry(element); err != nil {
+	if err := tr.AppendEntry(element, GraftOptions{}); err != nil {
 		t.Fatalf("AppendEntry() error = %v, want successful remap", err)
 	}
 	fresh, err := dst.Commit(filepath.Join(t.TempDir(), "remap_live_entity.zip"))
@@ -763,7 +763,7 @@ func TestTransferAppendEntrySourceRecordAbsentLoud(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CollectEntry() error = %v", err)
 	}
-	err = tr.AppendEntry(element)
+	err = tr.AppendEntry(element, GraftOptions{})
 	if err == nil {
 		t.Fatalf("AppendEntry(no source record) error = nil, want loud failure")
 	}
@@ -793,7 +793,7 @@ func TestTransferAppendEntryNoDestSpeciesTableLoud(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CollectEntry() error = %v", err)
 	}
-	err = tr.AppendEntry(element)
+	err = tr.AppendEntry(element, GraftOptions{})
 	if err == nil {
 		t.Fatalf("AppendEntry(no dest species table) error = nil, want loud failure")
 	}
@@ -822,7 +822,7 @@ func TestTransferAppendEntrySpeciesLessGraftsCleanly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CollectEntry() error = %v", err)
 	}
-	if err := tr.AppendEntry(element); err != nil {
+	if err := tr.AppendEntry(element, GraftOptions{}); err != nil {
 		t.Fatalf("AppendEntry(species-less) error = %v, want clean graft", err)
 	}
 	fresh, err := dst.Commit(filepath.Join(t.TempDir(), "speciesless_graft.zip"))
@@ -854,7 +854,7 @@ func TestTransferAppendEntryDanglingChildRef(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CollectEntry() error = %v", err)
 	}
-	if err := tr.AppendEntry(element); err == nil {
+	if err := tr.AppendEntry(element, GraftOptions{}); err == nil {
 		t.Fatalf("AppendEntry(dangling child) error = nil, want loud failure")
 	}
 	if len(dst.StagedOperations()) != 0 {
@@ -871,7 +871,7 @@ func TestTransferCollectFailLoud(t *testing.T) {
 	if _, err := tr.CollectEntry("scene.bb8scene"); err == nil {
 		t.Fatalf("CollectEntry(non-bibite) error = nil, want failure")
 	}
-	if err := tr.AppendEntry(CollectedElement{Table: "scene", JSON: map[string]any{}}); err == nil {
+	if err := tr.AppendEntry(CollectedElement{Table: "scene", JSON: map[string]any{}}, GraftOptions{}); err == nil {
 		t.Fatalf("AppendEntry(bad table) error = nil, want failure")
 	}
 }
@@ -882,6 +882,192 @@ func entryNames(archive *tb.Archive) []string {
 		out = append(out, archive.Entries[i].Name)
 	}
 	return out
+}
+
+// bibiteBodyIDOf reads body.id off a committed bibite entry, failing the test when
+// the entry or its body.id is absent.
+func bibiteBodyIDOf(t *testing.T, archive *tb.Archive, entryName string) int64 {
+	t.Helper()
+	entry := archive.Entry(entryName)
+	if entry == nil {
+		t.Fatalf("entry %q not found in committed archive; entries = %v", entryName, entryNames(archive))
+	}
+	id, ok := bibiteBodyID(entry.JSON)
+	if !ok {
+		t.Fatalf("entry %q has no body.id", entryName)
+	}
+	return id
+}
+
+// M6 Case A: a source bibite whose body.id collides with the destination is
+// REMAPPED (not refused) when GraftOptions.RemapIDs is set. The graft succeeds and
+// the staged entry's body.id is a fresh id that beats every dest body.id (so it
+// cannot re-collide).
+func TestTransferAppendEntryRemapsCollidingBodyID(t *testing.T) {
+	// Mirror the collision setup: retag source bibite_0 to body.id 42 (== dest
+	// bibite_0). The source carries no species record for its species id, so strip
+	// the species to keep the body.id remap the single axis under test.
+	src := NewSession(parseTransferSource(t))
+	colliding := src.Archive().Entry("bibites/bibite_0.bb8")
+	if colliding == nil {
+		t.Fatalf("source bibite missing")
+	}
+	if err := setJSONPath(colliding.JSON, "body.id", int64(42), SetOptions{}); err != nil {
+		t.Fatalf("setJSONPath(body.id) error = %v", err)
+	}
+	deleteSpeciesID(t, colliding.JSON)
+
+	dst := NewSession(parseSpeciesArchive(t)) // dest body ids 42/43/44
+	tr, err := NewTransfer(src, dst)
+	if err != nil {
+		t.Fatalf("NewTransfer() error = %v", err)
+	}
+	element, err := tr.CollectEntry("bibites/bibite_0.bb8")
+	if err != nil {
+		t.Fatalf("CollectEntry() error = %v", err)
+	}
+	if err := tr.AppendEntry(element, GraftOptions{RemapIDs: true}); err != nil {
+		t.Fatalf("AppendEntry(colliding body.id, RemapIDs=true) error = %v, want successful remap", err)
+	}
+	fresh, err := dst.Commit(filepath.Join(t.TempDir(), "remap_body_id.zip"))
+	if err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+
+	graftedID := bibiteBodyIDOf(t, fresh, "bibites/bibite_3.bb8")
+	if graftedID == 42 {
+		t.Fatalf("grafted body.id = 42 (collided), want a fresh remapped id")
+	}
+	// The fresh id must beat every original dest body.id (42/43/44) so it cannot
+	// re-collide with the destination.
+	for _, used := range []int64{42, 43, 44} {
+		if graftedID == used {
+			t.Fatalf("grafted body.id = %d collides with a pre-graft dest body.id", graftedID)
+		}
+	}
+	if graftedID <= 44 {
+		t.Fatalf("grafted body.id = %d, want > 44 (max dest body.id)", graftedID)
+	}
+	// The dest's original bibites still carry their body.ids (no clobber).
+	for entry, want := range map[string]int64{
+		"bibites/bibite_0.bb8": 42, "bibites/bibite_1.bb8": 43, "bibites/bibite_2.bb8": 44,
+	} {
+		if got := bibiteBodyIDOf(t, fresh, entry); got != want {
+			t.Fatalf("dest %q body.id = %d, want %d (unchanged)", entry, got, want)
+		}
+	}
+}
+
+// M6 Case B: RemapIDs=false keeps today's loud body.id-collision failure with 0
+// staged ops — a regression guard re-asserting the existing behavior under the new
+// options struct.
+func TestTransferAppendEntryRemapDisabledStillLoud(t *testing.T) {
+	src := NewSession(parseTransferSource(t))
+	colliding := src.Archive().Entry("bibites/bibite_0.bb8")
+	if err := setJSONPath(colliding.JSON, "body.id", int64(42), SetOptions{}); err != nil {
+		t.Fatalf("setJSONPath(body.id) error = %v", err)
+	}
+	dst := NewSession(parseSpeciesArchive(t))
+	tr, err := NewTransfer(src, dst)
+	if err != nil {
+		t.Fatalf("NewTransfer() error = %v", err)
+	}
+	element, err := tr.CollectEntry("bibites/bibite_0.bb8")
+	if err != nil {
+		t.Fatalf("CollectEntry() error = %v", err)
+	}
+	if err := tr.AppendEntry(element, GraftOptions{RemapIDs: false}); err == nil {
+		t.Fatalf("AppendEntry(body.id collision, RemapIDs=false) error = nil, want loud failure")
+	}
+	if got := len(dst.StagedOperations()); got != 0 {
+		t.Fatalf("destination has %d staged ops after refused graft, want 0", got)
+	}
+	if dst.State() != StateClean {
+		t.Fatalf("destination state = %q after refused graft, want clean", dst.State())
+	}
+}
+
+// M6 Case C (the invariant a single-graft test misses): two source bibites BOTH
+// colliding with the dest in ONE transfer loop must remap to DISTINCT fresh
+// body.ids. This proves the staged-fold in dstBodyIDUsage — without it, the second
+// graft re-reads the same pre-Apply max and remaps to the SAME id as the first.
+func TestTransferMultiGraftRemapsDistinctBodyIDs(t *testing.T) {
+	// Two source bibites whose body.ids both collide with the dest (42 and 43).
+	src := NewSession(parseTwoBibiteSource(t))
+	b0 := src.Archive().Entry("bibites/bibite_0.bb8")
+	b1 := src.Archive().Entry("bibites/bibite_1.bb8")
+	if err := setJSONPath(b0.JSON, "body.id", int64(42), SetOptions{}); err != nil {
+		t.Fatalf("setJSONPath(b0 body.id) error = %v", err)
+	}
+	if err := setJSONPath(b1.JSON, "body.id", int64(43), SetOptions{}); err != nil {
+		t.Fatalf("setJSONPath(b1 body.id) error = %v", err)
+	}
+	// Strip species so body.id remap is the single axis under test.
+	deleteSpeciesID(t, b0.JSON)
+	deleteSpeciesID(t, b1.JSON)
+
+	dst := NewSession(parseSpeciesArchive(t)) // dest body ids 42/43/44
+	tr, err := NewTransfer(src, dst)
+	if err != nil {
+		t.Fatalf("NewTransfer() error = %v", err)
+	}
+	for _, name := range []string{"bibites/bibite_0.bb8", "bibites/bibite_1.bb8"} {
+		el, err := tr.CollectEntry(name)
+		if err != nil {
+			t.Fatalf("CollectEntry(%q) error = %v", name, err)
+		}
+		if err := tr.AppendEntry(el, GraftOptions{RemapIDs: true}); err != nil {
+			t.Fatalf("AppendEntry(%q, RemapIDs=true) error = %v", name, err)
+		}
+	}
+	fresh, err := dst.Commit(filepath.Join(t.TempDir(), "multi_remap_body_id.zip"))
+	if err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+
+	id3 := bibiteBodyIDOf(t, fresh, "bibites/bibite_3.bb8")
+	id4 := bibiteBodyIDOf(t, fresh, "bibites/bibite_4.bb8")
+	if id3 == id4 {
+		t.Fatalf("both grafts remapped to the SAME body.id %d, want distinct (staged-fold missing)", id3)
+	}
+	for _, id := range []int64{id3, id4} {
+		for _, used := range []int64{42, 43, 44} {
+			if id == used {
+				t.Fatalf("grafted body.id %d collides with a pre-graft dest body.id", id)
+			}
+		}
+	}
+}
+
+// M6 Case D: the dangling-child guard stays LOUD even with RemapIDs=true. Remapping
+// body.id does not fix a cross-world body.eggLayer.children reference, so a dangling
+// child is still a hard failure (remap_ids must NOT loosen it).
+func TestTransferAppendEntryRemapKeepsDanglingChildLoud(t *testing.T) {
+	src := NewSession(parseTransferSource(t))
+	b := src.Archive().Entry("bibites/bibite_0.bb8")
+	// Collide the body.id (would be remapped) AND add a dangling child ref (must
+	// still fail) so the test proves remap does not paper over the dangling guard.
+	if err := setJSONPath(b.JSON, "body.id", int64(42), SetOptions{}); err != nil {
+		t.Fatalf("setJSONPath(body.id) error = %v", err)
+	}
+	if err := setJSONPath(b.JSON, "body.eggLayer", map[string]any{"children": []any{int64(1234)}}, SetOptions{CreateMissing: true}); err != nil {
+		t.Fatalf("setup child ref error = %v", err)
+	}
+	dst := NewSession(parseSpeciesArchive(t))
+	tr, err := NewTransfer(src, dst)
+	if err != nil {
+		t.Fatalf("NewTransfer() error = %v", err)
+	}
+	element, err := tr.CollectEntry("bibites/bibite_0.bb8")
+	if err != nil {
+		t.Fatalf("CollectEntry() error = %v", err)
+	}
+	if err := tr.AppendEntry(element, GraftOptions{RemapIDs: true}); err == nil {
+		t.Fatalf("AppendEntry(dangling child, RemapIDs=true) error = nil, want loud failure")
+	}
+	if got := len(dst.StagedOperations()); got != 0 {
+		t.Fatalf("destination staged ops after rejected dangling graft = %d, want 0", got)
+	}
 }
 
 // parseTwoBibiteSource builds a source with two bibites (body 500/501, species
@@ -925,7 +1111,7 @@ func TestTransferAppendEntryMultiGraftDistinctNames(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CollectEntry(%q) error = %v", name, err)
 		}
-		if err := tr.AppendEntry(el); err != nil {
+		if err := tr.AppendEntry(el, GraftOptions{}); err != nil {
 			t.Fatalf("AppendEntry(%q) error = %v", name, err)
 		}
 	}

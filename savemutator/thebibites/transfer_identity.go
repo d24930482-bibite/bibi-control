@@ -6,9 +6,14 @@ package thebibites
 // whose genes.speciesID conflates the grafted entity into the destination's
 // coincidental same-id species.
 //
-// body.id collisions and dangling parent/child links stay FAIL-LOUD: F3 does not
-// remap entity ids or cross-world child references, so reconcileGraftIdentity still
-// refuses those cases, naming the offending id, BEFORE anything is staged.
+// body.id collisions are FAIL-LOUD by default (remapIDs=false): F3 does not remap
+// entity ids, so reconcileGraftIdentity refuses a collision, naming the offending
+// id, BEFORE anything is staged. M6 adds an OPT-IN remap path (remapIDs=true): the
+// collision is then resolved by minting a fresh non-colliding dest body.id (see
+// freshDstBodyID / dstBodyIDUsage below) and rewriting body.id on the clone before
+// staging. Dangling parent/child links stay FAIL-LOUD regardless of remapIDs:
+// remapping body.id does NOT give us a way to fix a cross-world
+// body.eggLayer.children reference, so a dangling child is still a hard failure.
 //
 // Species handling is now a cross-world REMAP (this is what F3 adds, replacing F1's
 // loud species refusal). speciesID is a per-world LINEAR id space, so a destination
@@ -39,15 +44,23 @@ import (
 //
 // The guards it enforces (species is handled separately by the remap path in
 // transfer.AppendEntry, NOT here):
-//   - body.id collision (bibites): rejected loudly (F3 does not remap entity ids).
+//   - body.id collision (bibites): when remapIDs is false (the default) this is
+//     rejected loudly; when remapIDs is true the collision is NOT an error here —
+//     AppendEntry mints a fresh body.id on the clone instead (see freshDstBodyID).
+//     reconcileGraftIdentity is a pure check and never mutates, so the actual
+//     rewrite lives in AppendEntry; this method only decides loud-vs-allowed.
 //   - parent/child links (bibites): a grafted body.eggLayer.children entry that
 //     references an id not present in the destination is a dangling cross-world
-//     link; rejected loudly (F3 does not strip or remap children).
-func (t *transfer) reconcileGraftIdentity(kind tb.EntryKind, value any) error {
+//     link; rejected loudly. This guard is INDEPENDENT of remapIDs: remapping
+//     body.id does not fix a cross-world child reference, so a dangling child stays
+//     a hard failure even when remapIDs is true.
+func (t *transfer) reconcileGraftIdentity(kind tb.EntryKind, value any, remapIDs bool) error {
 	if kind == tb.EntryBibite {
-		if id, ok := bibiteBodyID(value); ok {
-			if name, collides := t.dstBibiteWithBodyID(id); collides {
-				return fmt.Errorf("transfer: append entry: grafted body.id %d already exists in destination entry %q; cross-world id remap is not supported", id, name)
+		if !remapIDs {
+			if id, ok := bibiteBodyID(value); ok {
+				if name, collides := t.dstBibiteWithBodyID(id); collides {
+					return fmt.Errorf("transfer: append entry: grafted body.id %d already exists in destination entry %q; cross-world id remap is not supported (pass remap_ids=True to mint a fresh id)", id, name)
+				}
 			}
 		}
 		if dangling, ok := t.danglingChildRefs(value); ok {
@@ -201,6 +214,62 @@ func jsonInt64Array(root any, path string) []int64 {
 		}
 	}
 	return out
+}
+
+// freshDstBodyID allocates a body.id for the destination that collides with
+// NOTHING in use. It is the body.id analogue of freshDstSpeciesID, but body.id has
+// NO engine counter: unlike speciesID (which also reads nextSpeciesID), there is no
+// "nextBodyID" field anywhere in the save, so the allocator rests ENTIRELY on the
+// observed maximum. A reviewer or M8 should NOT "fix" this by hunting for a counter
+// — there is none, and observed-max+1 is correct and sufficient. ok is false only
+// when no body.id is observed anywhere (no dst bibite and no staged graft), in
+// which case the caller starts at 0.
+func (t *transfer) freshDstBodyID() (int64, bool) {
+	maxUsed, hasUsed := t.dstBodyIDUsage()
+	if !hasUsed {
+		return 0, false
+	}
+	return maxUsed + 1, true
+}
+
+// dstBodyIDUsage returns the max body.id observed across every live dest bibite
+// entry AND every body.id already STAGED for append this session. The staged-fold
+// is the LOAD-BEARING distinctness guard for a multi-graft loop: staged appends are
+// not yet reflected in dst.Archive().Entries until Apply, so without folding them in
+// two colliding source bibites grafted in one transfer loop would both re-read the
+// same pre-Apply max and remap to the SAME fresh id. This mirrors the species
+// staged-fold in dstSpeciesIDUsage exactly. ok is false only when no body.id is
+// observed anywhere.
+func (t *transfer) dstBodyIDUsage() (max int64, ok bool) {
+	consider := func(id int64) {
+		if !ok || id > max {
+			max, ok = id, true
+		}
+	}
+
+	entries := t.dst.Archive().Entries
+	for i := range entries {
+		entry := &entries[i]
+		if entry.Kind != tb.EntryBibite || entry.JSON == nil {
+			continue
+		}
+		if id, found := bibiteBodyID(entry.JSON); found {
+			consider(id)
+		}
+	}
+
+	// body.ids already STAGED for append this session (earlier grafts in a
+	// multi-entry transfer loop) are invisible to dst.Archive().Entries until Apply.
+	// Fold them in so each colliding graft allocates a DISTINCT fresh id.
+	for _, op := range t.dst.StagedOperations() {
+		if op.Kind != OperationAppendEntry || op.EntryPayload.Kind != tb.EntryBibite {
+			continue
+		}
+		if id, found := bibiteBodyID(op.EntryPayload.JSON); found {
+			consider(id)
+		}
+	}
+	return max, ok
 }
 
 // dstBibiteWithBodyID returns the name of a destination bibite entry whose
