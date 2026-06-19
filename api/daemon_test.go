@@ -93,7 +93,7 @@ func TestNotImplemented(t *testing.T) {
 	d := api.New(t.TempDir(), "owner")
 	defer func() { _ = d.Close() }()
 
-	req := httptest.NewRequest(http.MethodGet, "/api/workspaces", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/workspaces/x/notebooks", nil)
 	rec := httptest.NewRecorder()
 	d.Handler().ServeHTTP(rec, req)
 

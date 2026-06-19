@@ -92,13 +92,17 @@ func (d *Daemon) Handler() http.Handler {
 	mux.HandleFunc("GET /api/health", d.handleHealth)
 	mux.HandleFunc("POST /api/workspaces/{id}/run", d.handleRun)
 
-	// Stubbed endpoints — swapped one-by-one in later tickets.
-	mux.HandleFunc("GET /api/workspaces", notImplemented)
-	mux.HandleFunc("POST /api/workspaces", notImplemented)
-	mux.HandleFunc("PATCH /api/workspaces/{id}", notImplemented)
-	mux.HandleFunc("DELETE /api/workspaces/{id}", notImplemented)
+	// Workspace collection CRUD.
+	mux.HandleFunc("GET /api/workspaces", d.handleListWorkspaces)
+	mux.HandleFunc("POST /api/workspaces", d.handleCreateWorkspace)
+	mux.HandleFunc("PATCH /api/workspaces/{id}", d.handleRenameWorkspace)
+	mux.HandleFunc("DELETE /api/workspaces/{id}", d.handleDeleteWorkspace)
+
+	// Worlds + history (U4).
 	mux.HandleFunc("GET /api/workspaces/{id}/worlds", d.handleWorlds)
 	mux.HandleFunc("GET /api/workspaces/{id}/worlds/{wid}/history", d.handleWorldHistory)
+
+	// Stubbed endpoints — swapped one-by-one in later tickets.
 	mux.HandleFunc("GET /api/workspaces/{id}/nodes/info", notImplemented)
 	mux.HandleFunc("GET /api/workspaces/{id}/nodes/{nid}/logs", notImplemented)
 	mux.HandleFunc("POST /api/workspaces/{id}/upload", notImplemented)
