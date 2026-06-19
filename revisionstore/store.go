@@ -1085,6 +1085,183 @@ func (s *Store) SetNodeStatus(ctx context.Context, nodeID, status string) error 
 	return nil
 }
 
+// RenameWorkspace sets the name of the workspace with id. An unknown workspace
+// (0 rows affected) returns sql.ErrNoRows so callers can detect it with
+// IsNotFound. This is a deliberate divergence from the older mutators
+// (BindNode/SetWorldHead/SetNodeStatus), which return a plain formatted error on
+// 0 rows; do not "fix" it to match them.
+func (s *Store) RenameWorkspace(ctx context.Context, id, name string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("revisionstore: Store is nil")
+	}
+	ctx, err := usableContext(ctx)
+	if err != nil {
+		return err
+	}
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE workspaces SET name = ? WHERE id = ?
+	`, name, id)
+	if err != nil {
+		return fmt.Errorf("revisionstore: rename workspace: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("revisionstore: rename workspace rows affected: %w", err)
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// DeleteWorkspace removes the workspace with id and all of its dependent rows --
+// its worlds, those worlds' save_revisions, and its nodes -- in a single atomic
+// transaction. It leaves script_runs (shared/global) and blobstore bytes (the
+// eviction/GC layer's job) untouched. An unknown workspace (0 rows affected)
+// returns sql.ErrNoRows (IsNotFound).
+//
+// The schema's ON DELETE RESTRICT cycle (worlds.head_revision_id ->
+// save_revisions, save_revisions.world_id -> worlds, plus save_revisions'
+// parent_id self-ref) forbids a naive DELETE, so the order below is
+// load-bearing: NULL the world heads to break the cycle, then delete the
+// revisions leaves-first (modernc.org/sqlite enforces the parent_id RESTRICT
+// per row, so the revision subtree is drained in parent-before-child-safe
+// passes), then nodes, then worlds, then the workspace itself. The
+// defer-Rollback guarantees the registry is never left half-deleted on any early
+// return.
+//
+// Like RenameWorkspace, 0 rows affected returns sql.ErrNoRows rather than a
+// plain formatted error.
+func (s *Store) DeleteWorkspace(ctx context.Context, id string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("revisionstore: Store is nil")
+	}
+	ctx, err := usableContext(ctx)
+	if err != nil {
+		return err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("revisionstore: begin delete workspace tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	// 1. Break the worlds<->revisions cycle so the revisions become deletable.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE worlds SET head_revision_id = NULL WHERE workspace_id = ?
+	`, id); err != nil {
+		return fmt.Errorf("revisionstore: delete workspace clear heads: %w", err)
+	}
+
+	// 2. Delete this workspace's revisions, leaves first. modernc.org/sqlite
+	// enforces the parent_id RESTRICT per row (not at statement end), so a single
+	// set-DELETE of the closed subtree trips the constraint. Instead delete the
+	// leaves -- this workspace's revisions that no other remaining revision lists
+	// as a parent -- repeatedly until the subtree is empty. Each pass strictly
+	// shrinks the set, so it terminates; a pass that deletes nothing while rows
+	// remain would mean a cycle (impossible for the parent_id chain) and is
+	// guarded against to avoid an infinite loop.
+	for {
+		result, err := tx.ExecContext(ctx, `
+			DELETE FROM save_revisions
+			WHERE world_id IN (SELECT id FROM worlds WHERE workspace_id = ?)
+			  AND id NOT IN (
+				SELECT parent_id FROM save_revisions
+				WHERE parent_id IS NOT NULL
+				  AND world_id IN (SELECT id FROM worlds WHERE workspace_id = ?)
+			)
+		`, id, id)
+		if err != nil {
+			return fmt.Errorf("revisionstore: delete workspace revisions: %w", err)
+		}
+		deleted, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("revisionstore: delete workspace revisions rows affected: %w", err)
+		}
+		if deleted > 0 {
+			continue
+		}
+		// Nothing was deleted this pass; stop. Any rows left would indicate a
+		// parent_id cycle, which the schema's append-only lineage cannot create.
+		var remaining int64
+		if err := tx.QueryRowContext(ctx, `
+			SELECT count(*) FROM save_revisions
+			WHERE world_id IN (SELECT id FROM worlds WHERE workspace_id = ?)
+		`, id).Scan(&remaining); err != nil {
+			return fmt.Errorf("revisionstore: count remaining workspace revisions: %w", err)
+		}
+		if remaining > 0 {
+			return fmt.Errorf("revisionstore: delete workspace revisions: %d revision(s) remain (parent_id cycle?)", remaining)
+		}
+		break
+	}
+
+	// 3. Delete the workspace's nodes (their world_id is SET NULL, but the node
+	// rows themselves RESTRICT the workspace delete).
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM nodes WHERE workspace_id = ?
+	`, id); err != nil {
+		return fmt.Errorf("revisionstore: delete workspace nodes: %w", err)
+	}
+
+	// 4. Delete the worlds, now unreferenced by revisions or heads.
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM worlds WHERE workspace_id = ?
+	`, id); err != nil {
+		return fmt.Errorf("revisionstore: delete workspace worlds: %w", err)
+	}
+
+	// 5. Delete the workspace itself; this statement's rows-affected decides
+	// not-found.
+	result, err := tx.ExecContext(ctx, `
+		DELETE FROM workspaces WHERE id = ?
+	`, id)
+	if err != nil {
+		return fmt.Errorf("revisionstore: delete workspace: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("revisionstore: delete workspace rows affected: %w", err)
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("revisionstore: commit delete workspace tx: %w", err)
+	}
+	return nil
+}
+
+// DeleteNode removes the node with id. It is for dropping a DETACHED node row;
+// no FK dependents point into nodes, so no transaction is needed. An unknown
+// node (0 rows affected) returns sql.ErrNoRows (IsNotFound), the same divergence
+// from the older mutators noted on RenameWorkspace.
+func (s *Store) DeleteNode(ctx context.Context, id string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("revisionstore: Store is nil")
+	}
+	ctx, err := usableContext(ctx)
+	if err != nil {
+		return err
+	}
+	result, err := s.db.ExecContext(ctx, `
+		DELETE FROM nodes WHERE id = ?
+	`, id)
+	if err != nil {
+		return fmt.Errorf("revisionstore: delete node: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("revisionstore: delete node rows affected: %w", err)
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 // IncBlobRef increments the refcount of every revision sharing sha256 (refcount
 // is per content hash, shared across revisions/dedup). It returns the number of
 // rows affected so the caller can detect an unknown hash.
