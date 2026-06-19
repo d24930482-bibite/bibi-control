@@ -796,8 +796,17 @@ function renderNodes(rows) {
       if (row.paused != null) {
         var pausedStr = row.paused ? 'yes' : 'no';
         var autosaveStr = '';
-        if (row.last_autosave && row.last_autosave.age_seconds != null) {
-          autosaveStr = ' · last autosave <span class="m-val">' + fmtClock(Math.round(row.last_autosave.age_seconds)) + '</span> ago';
+        if (row.last_autosave) {
+          var as = row.last_autosave;
+          if (as.modified_unix) {
+            // compute age from unix epoch seconds
+            var ageSecs = Math.round(Date.now() / 1000 - as.modified_unix);
+            autosaveStr = ' · last autosave <span class="m-val">' + fmtClock(Math.max(0, ageSecs)) + '</span> ago';
+          } else if (as.time) {
+            autosaveStr = ' · last autosave <span class="m-val">' + escapeHtml(as.time) + '</span>';
+          } else if (as.name) {
+            autosaveStr = ' · last autosave <span class="m-val">' + escapeHtml(as.name) + '</span>';
+          }
         }
         parts.push('paused: ' + pausedStr + autosaveStr);
       }
@@ -848,10 +857,12 @@ function _rebuildSnWorldOptions() {
   var current = sel.value;
   sel.innerHTML = '';
   document.querySelectorAll('.world').forEach(function(el) {
+    // world elements use id="world-<uuid>" — extract the id from there
+    var worldId = el.id.replace('world-', '');
     var nameEl = el.querySelector('.w-name');
-    var name = nameEl ? nameEl.textContent : el.id.replace('world-', '');
+    var name = nameEl ? nameEl.textContent : worldId;
     var opt = document.createElement('option');
-    opt.value = name;
+    opt.value = worldId;   // must be the UUID, not the name
     opt.textContent = name;
     sel.appendChild(opt);
   });
