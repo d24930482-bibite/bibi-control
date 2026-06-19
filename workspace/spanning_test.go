@@ -142,6 +142,39 @@ func historyCount(t *testing.T, ctx context.Context, ws *Workspace, worldID, tab
 	return asInt64Col(t, rows[0]["n"])
 }
 
+// spanningCarrierTables maps a spanning kind name to the two carrier tables whose
+// rows it unions, so the integration test's ground truth (the per-world history
+// count the spanning DSL must reproduce) can sum over both carriers via HistoryQuery
+// — independent of the spanning push-down under test.
+var spanningCarrierTables = map[string][2]string{
+	"genes":    {"bibite_genes", "egg_genes"},
+	"nodes":    {"bibite_brain_nodes", "egg_brain_nodes"},
+	"synapses": {"bibite_brain_synapses", "egg_brain_synapses"},
+}
+
+// historyCountUnion returns one world's committed-history row count for a spanning
+// kind (genes/nodes/synapses) = count over carrier1 + carrier2, each scoped to this
+// world via the world_saves CTE. This is the independent ground truth the spanning
+// DSL must reproduce with NO caller JOIN. It mirrors historyCount but sums the two
+// carrier tables a spanning kind unions.
+func historyCountUnion(t *testing.T, ctx context.Context, ws *Workspace, worldID, kind string) int64 {
+	t.Helper()
+	tables, ok := spanningCarrierTables[kind]
+	if !ok {
+		t.Fatalf("unknown spanning kind %q", kind)
+	}
+	rows, err := ws.HistoryQuery(ctx, worldID,
+		"SELECT (SELECT count(*) FROM "+tables[0]+" JOIN world_saves USING (save_id)) + "+
+			"(SELECT count(*) FROM "+tables[1]+" JOIN world_saves USING (save_id)) AS n")
+	if err != nil {
+		t.Fatalf("HistoryQuery union count %s for %s: %v", kind, worldID, err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("HistoryQuery union count %s returned %d rows, want 1", kind, len(rows))
+	}
+	return asInt64Col(t, rows[0]["n"])
+}
+
 func asInt64Col(t *testing.T, v any) int64 {
 	t.Helper()
 	switch x := v.(type) {
@@ -320,6 +353,127 @@ m = wa.bibites.group_by("sim_time").mean("energy")
 		res := mustRunAuto(t, ctx, ws, `print(workspace.bibites.count() >= 0)`)
 		if strings.TrimSpace(res.Output) != "True" {
 			t.Errorf("workspace.bibites.count() sanity failed: %q", res.Output)
+		}
+	})
+
+	// M1: the same cross-world matrix for the new spanning kinds (genes/nodes/
+	// synapses). The headline invariant is the silent-leak guard: a dropped/missing
+	// scope clause would make a per-world aggregate silently SUM across ALL worlds and
+	// a count() would not notice — so each per-world spanning count is asserted against
+	// THAT world's own (carrier-union) history count, and workspace == A+B. Reuses the
+	// shared two-world workspace (no extra AddWorld imports).
+	wantUnionA := map[string]int64{}
+	wantUnionB := map[string]int64{}
+	for _, kind := range []string{"genes", "nodes", "synapses"} {
+		wantUnionA[kind] = historyCountUnion(t, ctx, ws, worldA.ID, kind)
+		wantUnionB[kind] = historyCountUnion(t, ctx, ws, worldB.ID, kind)
+	}
+
+	t.Run("spanning_kinds_isolation", func(t *testing.T) {
+		for _, kind := range []string{"genes", "nodes", "synapses"} {
+			a, b := wantUnionA[kind], wantUnionB[kind]
+			if a == 0 && b == 0 {
+				t.Fatalf("%s: both worlds empty — fixtures must carry %s rows for the leak guard", kind, kind)
+			}
+			// world A's spanning kind count == A's own carrier-union count (NOT A+B).
+			if got := spanCount(t, mustColl(t, ctx, ws, thebibites.NewWorldHistoryScope(worldA.ID), kind)); got != a {
+				t.Errorf("world A %s spanning count = %d, want %d (cross-world leak/scope bug)", kind, got, a)
+			}
+			if got := spanCount(t, mustColl(t, ctx, ws, thebibites.NewWorldHistoryScope(worldB.ID), kind)); got != b {
+				t.Errorf("world B %s spanning count = %d, want %d (cross-world leak/scope bug)", kind, got, b)
+			}
+			// workspace spanning kind count == A+B (the all-worlds aggregate).
+			if got := spanCount(t, mustColl(t, ctx, ws, thebibites.NewWorkspaceScope(), kind)); got != a+b {
+				t.Errorf("workspace %s spanning count = %d, want %d (A+B)", kind, got, a+b)
+			}
+		}
+	})
+
+	// group_by('world_id') on a spanning kind returns exactly the two worlds with
+	// per-world counts — the catalog columns are scope-level, so this is free once the
+	// kind registers.
+	t.Run("spanning_kinds_group_by_world_id", func(t *testing.T) {
+		grouped := groupByWorldCount(t, mustColl(t, ctx, ws, thebibites.NewWorkspaceScope(), "synapses"))
+		if len(grouped) != 2 {
+			t.Fatalf("synapses group_by('world_id') returned %d keys, want 2: %v", len(grouped), grouped)
+		}
+		if grouped[worldA.ID] != wantUnionA["synapses"] {
+			t.Errorf("synapses group_by world A = %d, want %d", grouped[worldA.ID], wantUnionA["synapses"])
+		}
+		if grouped[worldB.ID] != wantUnionB["synapses"] {
+			t.Errorf("synapses group_by world B = %d, want %d", grouped[worldB.ID], wantUnionB["synapses"])
+		}
+	})
+
+	// A friendly-column predicate (synapses where("enabled"), genes where("name ==
+	// ...")) scopes the all-worlds collection WITHOUT a caller JOIN. enabled-only count
+	// must be <= total and the world_id predicate narrows to one world.
+	t.Run("spanning_kinds_where_no_join", func(t *testing.T) {
+		all := mustColl(t, ctx, ws, thebibites.NewWorkspaceScope(), "synapses")
+		total := spanCount(t, all)
+		enabledColl, err := all.Attr("where")
+		if err != nil {
+			t.Fatalf("synapses Attr(where): %v", err)
+		}
+		enRes, err := callOneStr(t, enabledColl, "enabled")
+		if err != nil {
+			t.Fatalf("synapses.where(enabled): %v", err)
+		}
+		enCount := spanCount(t, enRes.(*thebibites.EntityCollection))
+		if enCount > total {
+			t.Errorf("enabled synapse count %d > total %d (predicate not applied)", enCount, total)
+		}
+		// world_id predicate narrows to world A's own union count, no caller JOIN.
+		genes := mustColl(t, ctx, ws, thebibites.NewWorkspaceScope(), "genes")
+		if got := spanCount(t, whereWorldID(t, genes, worldA.ID)); got != wantUnionA["genes"] {
+			t.Errorf("workspace.genes.where(world_id=A).count() = %d, want %d", got, wantUnionA["genes"])
+		}
+	})
+
+	// The user-facing Starlark surface for the new kinds: a no-JOIN program over
+	// world.genes / workspace.synapses / world.nodes.
+	t.Run("spanning_kinds_starlark", func(t *testing.T) {
+		prog := `
+wa = workspace.world("` + worldA.ID + `")
+print(wa.genes.count())
+print(workspace.synapses.where("enabled").count() >= 0)
+print(len(wa.nodes.group_by("world_id").count()))
+g = workspace.genes.where("type == 'number'").mean("value")
+`
+		res := mustRunAuto(t, ctx, ws, prog)
+		lines := strings.Split(strings.TrimRight(res.Output, "\n"), "\n")
+		if len(lines) != 3 {
+			t.Fatalf("want 3 output lines, got %v\nOutput:\n%s", lines, res.Output)
+		}
+		if got := parseInt64(t, lines[0]); got != wantUnionA["genes"] {
+			t.Errorf("world A genes.count() = %d, want %d", got, wantUnionA["genes"])
+		}
+		if strings.TrimSpace(lines[1]) != "True" {
+			t.Errorf("workspace.synapses.where(enabled).count() >= 0 = %q, want True", lines[1])
+		}
+		if got := parseInt64(t, lines[2]); got != 1 {
+			t.Errorf("world A nodes.group_by('world_id') key count = %d, want 1", got)
+		}
+	})
+
+	// Mutation is rejected on the spanning scope for the new kinds too (inherited
+	// read-only gate): workspace.genes.set(...) / world.synapses.delete().
+	t.Run("spanning_kinds_mutation_rejected", func(t *testing.T) {
+		for _, expr := range []string{
+			`workspace.genes.set("value", 1)`,
+			`workspace.world("` + worldA.ID + `").synapses.delete()`,
+			`workspace.world("` + worldA.ID + `").nodes.set("value", 0)`,
+		} {
+			_, err := runAuto(ctx, ws, expr)
+			if err == nil {
+				t.Errorf("expected error for spanning mutation %q", expr)
+				continue
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, "has no") && !strings.Contains(msg, "attribute") &&
+				!strings.Contains(msg, "spanning") && !strings.Contains(msg, "mutation is per-save") {
+				t.Errorf("spanning mutation %q error = %q, want an attribute/spanning rejection", expr, msg)
+			}
 		}
 	})
 }

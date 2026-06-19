@@ -1713,8 +1713,8 @@ var AC_TOP_LEVEL = (function () {
    workspace.world("x").open().bibites. resolve step by step. Unknown receivers
    fall back to AC_METHODS (the old union) so completion degrades, never vanishes. */
 var AC_TYPE_MEMBERS = {
-  workspace:  ['add_world', 'bibites', 'eggs', 'node', 'nodes', 'pellets', 'poll', 'query', 'start_node', 'transfer', 'world', 'worlds'],
-  world:      ['bibites', 'eggs', 'evict_history', 'head', 'history_query', 'id', 'load', 'name', 'open', 'pellets', 'query', 'sim_time', 'unload'],
+  workspace:  ['add_world', 'bibites', 'eggs', 'genes', 'node', 'nodes', 'pellets', 'poll', 'query', 'start_node', 'synapses', 'transfer', 'world', 'worlds'],
+  world:      ['bibites', 'eggs', 'evict_history', 'genes', 'head', 'history_query', 'id', 'load', 'name', 'nodes', 'open', 'pellets', 'query', 'sim_time', 'synapses', 'unload'],
   session:    ['bibites', 'commit', 'eggs', 'pellets', 'settings', 'sql', 'zones'],
   collection: ['count', 'delete', 'group_by', 'max', 'mean', 'median', 'min', 'quantile', 'set', 'set_expr', 'sum', 'where'],
   node:       ['id', 'ingest_autosave', 'info', 'kill', 'reload', 'resume', 'run_id', 'state', 'status', 'stop', 'wait', 'world'],
@@ -1724,8 +1724,8 @@ var AC_TYPE_MEMBERS = {
   setting_scope: ['get']
 };
 var AC_RESULT = {
-  workspace:  { world: 'world', worlds: 'world', add_world: 'world', start_node: 'node', node: 'node', nodes: 'node', bibites: 'collection', eggs: 'collection', pellets: 'collection' },
-  world:      { open: 'session', bibites: 'collection', eggs: 'collection', pellets: 'collection' },
+  workspace:  { world: 'world', worlds: 'world', add_world: 'world', start_node: 'node', node: 'node', nodes: 'node', bibites: 'collection', eggs: 'collection', pellets: 'collection', genes: 'collection', synapses: 'collection' },
+  world:      { open: 'session', bibites: 'collection', eggs: 'collection', pellets: 'collection', genes: 'collection', nodes: 'collection', synapses: 'collection' },
   session:    { bibites: 'collection', eggs: 'collection', pellets: 'collection', settings: 'settings' },
   collection: { where: 'collection', group_by: 'collection' },
   node:       { world: 'world' },

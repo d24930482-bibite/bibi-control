@@ -80,6 +80,146 @@ var entityTables = map[string][]string{
 	},
 }
 
+// spanningEntityTables lists, per SPANNING-ONLY analytics kind, the source tables
+// whose genes/brain rows the cross-world aggregate push-down unions over (M1 §1).
+// These kinds are read-only, aggregate-only spanning collections (world.genes /
+// workspace.synapses etc.); they exist ONLY for the spanning push-down and are
+// DELIBERATELY KEPT OUT of entityTables so the single-save working path
+// (buildAccess in loadedsave.go iterates entityTables alone) stays byte-identical —
+// ls.access never gains a gene/brain table, and the single-save attr-registry kind
+// set (bibite/egg/pellet) is unchanged.
+//
+// Each kind unions its two carriers (bibites' + eggs') so a spanning `genes`/`nodes`/
+// `synapses` collection spans genes/brain rows regardless of carrier (matches §1's
+// single-`genes` target). The union members are 1:many sub-tables (entitySubCollections
+// for nodes/synapses; the gene tables resolve through gene.go's geneTable). For the
+// spanning path they ARE the identity (the union is the FROM), never scalar-joined, so
+// the oneToManyTables() inflate-guard never trips — fromClause routes spanning kinds
+// down spanningFromExpr BEFORE the 1:1 sub-table LEFT-JOIN loop.
+var spanningEntityTables = map[string][]string{
+	"gene":    {"bibite_genes", "egg_genes"},
+	"node":    {"bibite_brain_nodes", "egg_brain_nodes"},
+	"synapse": {"bibite_brain_synapses", "egg_brain_synapses"},
+}
+
+// tablesForKind resolves a kind's source tables, preferring the working-path
+// entityTables (bibite/egg/pellet) and falling back to the spanning-only
+// spanningEntityTables (gene/node/synapse). Routing identityTable / fromClause /
+// EntityCollection.identityAccess through this is what makes the push-down generic
+// over the new spanning kinds WITHOUT teaching buildAccess (the working path) about
+// them — the isolation guarantee.
+func tablesForKind(kind string) []string {
+	if tables, ok := entityTables[kind]; ok {
+		return tables
+	}
+	return spanningEntityTables[kind]
+}
+
+// isSpanningKind reports whether kind is a spanning-only analytics kind whose
+// identity is a UNION over its source tables (so fromClause must emit the derived
+// union identity, not a bare FROM <table> + sub-table joins).
+func isSpanningKind(kind string) bool {
+	_, ok := spanningEntityTables[kind]
+	return ok
+}
+
+// spanningAlias is the synthesized identity-table alias a spanning kind's UNION-ALL
+// FROM is exposed under. Every friendly column for the kind is qualified against
+// this alias (in the registry) and the scope clause + catalog join key on
+// "<alias>".save_id, so the union projection MUST carry save_id (spanningFromExpr).
+// It is the plural of the kind ("gene" -> "genes"), matching the user-facing name.
+func spanningAlias(kind string) string {
+	return kind + "s"
+}
+
+// spanningProjection returns the columns the UNION-ALL identity projects for a
+// spanning kind: save_id (load-bearing — the scope clause + catalog join bind to
+// "<alias>".save_id, so a dropped save_id would silently SUM across ALL worlds) plus
+// every distinct generated source column the kind's friendly surface resolves to
+// (spec.sourceColumn for every registry attr). Derived from the registry + generated
+// metadata, so no hand-listed column set: a friendly `value` (-> number_value)
+// guarantees number_value is projected. Ordered deterministically by the first
+// carrier table's generated field order so the UNION-ALL members align column-by-column.
+func spanningProjection(kind string) []string {
+	// The exact source columns the friendly surface needs (from the registry specs).
+	needed := map[string]bool{"save_id": true}
+	for _, spec := range attrRegistry()[kind] {
+		needed[spec.sourceColumn] = true
+	}
+	cols := []string{"save_id"}
+	emitted := map[string]bool{"save_id": true}
+	// Deterministic order: the first carrier table's generated field order.
+	if src := spanningEntityTables[kind]; len(src) > 0 {
+		for _, spec := range tb.NormalizedTables {
+			if spec.Table != src[0] {
+				continue
+			}
+			for _, field := range spec.Fields {
+				if needed[field.Column] && !emitted[field.Column] {
+					emitted[field.Column] = true
+					cols = append(cols, field.Column)
+				}
+			}
+			break
+		}
+	}
+	return cols
+}
+
+// geneOverrides aliases the gene tables' generated columns to the friendly surface
+// the per-entity Gene handle exposes (gene.go:31-44): name -> gene_name, type ->
+// value_type, value -> number_value. The §1 open question is resolved as "value
+// defaults to number_value", so .mean()/.sum() over `value` are numeric-only by
+// default (bool/string genes have NULL number_value and are silently ignored by the
+// aggregate); a where("type == 'number'") is the explicit numeric guard. The raw
+// typed *_value source columns are dropped from the direct friendly surface
+// (geneHiddenColumns) so the gene surface is name/type/value, not the internal
+// triple.
+var geneOverrides = map[string]string{
+	"name":  "gene_name",
+	"type":  "value_type",
+	"value": "number_value",
+}
+
+// geneHiddenColumns are gene source columns hidden from the friendly spanning
+// surface: the raw typed value triple (folded into the single virtual `value` ->
+// number_value alias) and the locator columns that carry no analytic signal.
+var geneHiddenColumns = map[string]bool{
+	"gene_name":    true, // re-exposed as the friendly `name`
+	"value_type":   true, // re-exposed as the friendly `type`
+	"number_value": true, // re-exposed as the friendly `value`
+	"bool_value":   true,
+	"string_value": true,
+	"owner_kind":   true,
+	"owner_id":     true,
+	"entry_name":   true,
+	"path":         true,
+}
+
+// brainHiddenColumns are node/synapse source columns hidden from the friendly
+// spanning surface: the locators + the array-ordinal row index (analytic noise).
+// The data columns (weight/enabled/node_in/node_out/innovation/node_index/
+// node_desc/type_name/value/…) fall through to the friendly surface straight from
+// generated metadata — no hand-listed allowlist.
+var brainHiddenColumns = map[string]bool{
+	"owner_kind":        true,
+	"owner_id":          true,
+	"entry_name":        true,
+	"node_row_index":    true,
+	"synapse_row_index": true,
+}
+
+// spanningHiddenColumns returns the source columns hidden from a spanning kind's
+// friendly surface (locators / re-aliased typed columns), keyed by kind.
+func spanningHiddenColumns(kind string) map[string]bool {
+	switch kind {
+	case "gene":
+		return geneHiddenColumns
+	default: // node, synapse
+		return brainHiddenColumns
+	}
+}
+
 // transformAliases is the shared friendly alias -> source column mapping for the
 // generated transform_* position/rotation columns. It lives once here and is merged
 // into every entity's overrides (and the pellet overrides, which adds transform_scale),
@@ -135,7 +275,7 @@ func attrRegistry() map[string]map[string]attrSpec {
 }
 
 func buildRegistry() {
-	registry = make(map[string]map[string]attrSpec, len(entityTables))
+	registry = make(map[string]map[string]attrSpec, len(entityTables)+len(spanningEntityTables))
 	for kind, tables := range entityTables {
 		attrs := make(map[string]attrSpec)
 		for _, table := range tables {
@@ -147,6 +287,50 @@ func buildRegistry() {
 			}
 		}
 		applyOverrides(attrs, overrides[kind])
+		registry[kind] = attrs
+	}
+	// Also register the spanning-only kinds' friendly columns (gene/node/synapse) so
+	// resolveColumn / rewritePredicate resolve value/name/type (gene) and
+	// weight/enabled/node_in/… (synapse/node) for the cross-world aggregate push-down.
+	// This walks spanningEntityTables, NOT entityTables, so the working path's
+	// buildAccess (which iterates entityTables alone) never sees these tables — the
+	// byte-identity guarantee. The two carrier tables per kind are column-identical
+	// (bibite_genes ≡ egg_genes etc.), so first-table precedence is well-defined.
+	for kind, tables := range spanningEntityTables {
+		hidden := spanningHiddenColumns(kind)
+		alias := spanningAlias(kind)
+		// raw is the full per-column spec set (all source columns, both carriers);
+		// it backs the alias overrides whose source column is itself hidden from the
+		// direct surface (e.g. gene `value` -> the hidden number_value).
+		raw := make(map[string]attrSpec)
+		attrs := make(map[string]attrSpec)
+		for _, table := range tables {
+			for col, spec := range tableScalarSpecs(table) {
+				// Every spanning-kind column is qualified against the synthesized
+				// UNION-ALL identity alias (spanningFromExpr), NOT the physical source
+				// table, so resolveColumn/rewritePredicate emit "<alias>"."<col>" which
+				// binds to the union projection.
+				spec.table = alias
+				if _, exists := raw[col]; exists {
+					continue // first table wins (carrier-identity precedence)
+				}
+				raw[col] = spec
+				if hidden[col] {
+					continue // locator / re-aliased typed column — kept off the direct surface
+				}
+				attrs[col] = spec
+			}
+		}
+		// Gene aliases (name/type/value) resolve against raw (their source columns
+		// are hidden) so the alias spec keeps the real generated sourceColumn.
+		if kind == "gene" {
+			for friendly, source := range geneOverrides {
+				if spec, ok := raw[source]; ok {
+					spec.column = friendly
+					attrs[friendly] = spec
+				}
+			}
+		}
 		registry[kind] = attrs
 	}
 }

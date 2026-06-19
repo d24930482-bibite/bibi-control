@@ -85,7 +85,7 @@ func TestWorkspaceScopeClause(t *testing.T) {
 // from AttrNames.
 func TestSpanningCollectionAttrHidesMutation(t *testing.T) {
 	ls := loadFixture(t)
-	for _, kind := range []string{"bibite", "egg", "pellet"} {
+	for _, kind := range []string{"bibite", "egg", "pellet", "gene", "node", "synapse"} {
 		c := &EntityCollection{ls: ls, kind: kind, scope: NewWorkspaceScope()}
 
 		for _, mut := range []string{"set", "set_expr", "delete"} {
@@ -240,7 +240,7 @@ func TestSpanningReaderConstruction(t *testing.T) {
 	if r.ls.archive != nil {
 		t.Errorf("spanning reader ls must carry no parsed archive")
 	}
-	for _, name := range []string{"bibites", "eggs", "pellets"} {
+	for _, name := range []string{"bibites", "eggs", "pellets", "genes", "nodes", "synapses"} {
 		coll, err := r.Collection(name)
 		if err != nil {
 			t.Fatalf("Collection(%q): %v", name, err)
@@ -251,6 +251,94 @@ func TestSpanningReaderConstruction(t *testing.T) {
 	}
 	if _, err := r.Collection("zones"); err == nil {
 		t.Errorf("Collection(unknown) did not error")
+	}
+}
+
+// TestSpanningKindRegistration asserts the spanning-only kinds (gene/node/synapse)
+// register through tablesForKind + the friendly-column registry WITHOUT leaking into
+// the single-save working path: buildAccess (loadedsave.go) iterates entityTables
+// alone, so ls.access must NOT gain the gene/brain tables. That ls.access nil check is
+// the byte-identity tripwire for the working path.
+func TestSpanningKindRegistration(t *testing.T) {
+	ls := loadFixture(t)
+
+	// tablesForKind resolves the spanning kinds to their two carrier source tables.
+	for kind, want := range map[string][]string{
+		"gene":    {"bibite_genes", "egg_genes"},
+		"node":    {"bibite_brain_nodes", "egg_brain_nodes"},
+		"synapse": {"bibite_brain_synapses", "egg_brain_synapses"},
+	} {
+		got := tablesForKind(kind)
+		if len(got) != len(want) {
+			t.Fatalf("tablesForKind(%q) = %v, want %v", kind, got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("tablesForKind(%q)[%d] = %q, want %q", kind, i, got[i], want[i])
+			}
+		}
+	}
+
+	// The friendly registry exposes the gene name/type/value surface and the
+	// brain weight/enabled/node_in data columns — derived, not hand-listed.
+	reg := attrRegistry()
+	for _, col := range []string{"name", "type", "value"} {
+		if _, ok := reg["gene"][col]; !ok {
+			t.Errorf("gene registry missing friendly column %q", col)
+		}
+	}
+	// The gene `value` alias must resolve to the real generated number_value column.
+	if spec := reg["gene"]["value"]; spec.sourceColumn != "number_value" {
+		t.Errorf("gene.value sourceColumn = %q, want number_value", spec.sourceColumn)
+	}
+	// The raw typed value columns are folded into value/type and hidden from the
+	// direct surface.
+	for _, hidden := range []string{"number_value", "value_type", "gene_name", "bool_value", "string_value"} {
+		if _, ok := reg["gene"][hidden]; ok {
+			t.Errorf("gene registry should hide raw column %q (folded into name/type/value)", hidden)
+		}
+	}
+	for _, col := range []string{"weight", "enabled", "node_in", "node_out", "innovation"} {
+		if _, ok := reg["synapse"][col]; !ok {
+			t.Errorf("synapse registry missing friendly column %q", col)
+		}
+	}
+	for _, col := range []string{"node_index", "node_desc", "type_name", "innovation"} {
+		if _, ok := reg["node"][col]; !ok {
+			t.Errorf("node registry missing friendly column %q", col)
+		}
+	}
+
+	// Every spanning-kind friendly column is qualified against the synthesized union
+	// alias (genes/nodes/synapses), NOT the physical source table, so resolveColumn
+	// emits "<alias>"."<col>" which binds to the UNION-ALL projection.
+	for kind, alias := range map[string]string{"gene": "genes", "node": "nodes", "synapse": "synapses"} {
+		for col, spec := range reg[kind] {
+			if spec.table != alias {
+				t.Errorf("%s.%s table = %q, want union alias %q", kind, col, spec.table, alias)
+			}
+		}
+	}
+
+	// THE WORKING-PATH ISOLATION GUARD: buildAccess must not have indexed the
+	// gene/brain tables into ls.access (it iterates entityTables alone). A non-nil
+	// entry here would mean a spanning kind leaked into the single-save working path.
+	for _, table := range []string{
+		"bibite_genes", "egg_genes",
+		"bibite_brain_nodes", "egg_brain_nodes",
+		"bibite_brain_synapses", "egg_brain_synapses",
+	} {
+		if ls.access[table] != nil {
+			t.Errorf("ls.access[%q] is non-nil: a spanning table leaked into the working path", table)
+		}
+	}
+
+	// The single-save attr-registry kind set still exposes the working kinds; the
+	// spanning kinds are ADDITIVE (they do not perturb bibite/egg/pellet surfaces).
+	for _, col := range []string{"energy"} {
+		if _, ok := reg["bibite"][col]; !ok {
+			t.Errorf("working bibite registry lost column %q after adding spanning kinds", col)
+		}
 	}
 }
 

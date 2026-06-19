@@ -187,9 +187,30 @@ func (r *SpanningReader) Pellets() *EntityCollection {
 	return &EntityCollection{ls: r.ls, kind: "pellet", scope: r.scope}
 }
 
-// Collection returns the spanning collection for one of "bibites"/"eggs"/
-// "pellets", or an error for any other name. It is the single dispatch the
-// workspace binding uses so the three accessors stay in one place.
+// Genes returns the spanning, aggregate-only gene collection (M1): genes of BOTH
+// bibites and eggs, unioned. Read-only and aggregate-only like the other spanning
+// kinds — value/name/type are friendly columns; value defaults to number_value.
+func (r *SpanningReader) Genes() *EntityCollection {
+	return &EntityCollection{ls: r.ls, kind: "gene", scope: r.scope}
+}
+
+// Nodes returns the spanning, aggregate-only brain-node collection (M1): nodes of
+// BOTH bibites and eggs, unioned (the FLAT node aggregate — node_in/node_out are bare
+// ids; graph navigation is deferred to M5).
+func (r *SpanningReader) Nodes() *EntityCollection {
+	return &EntityCollection{ls: r.ls, kind: "node", scope: r.scope}
+}
+
+// Synapses returns the spanning, aggregate-only brain-synapse collection (M1):
+// synapses of BOTH bibites and eggs, unioned (FLAT — weight/enabled/node_in/node_out;
+// no source/target graph join).
+func (r *SpanningReader) Synapses() *EntityCollection {
+	return &EntityCollection{ls: r.ls, kind: "synapse", scope: r.scope}
+}
+
+// Collection returns the spanning collection for one of "bibites"/"eggs"/"pellets"/
+// "genes"/"nodes"/"synapses", or an error for any other name. It is the single
+// dispatch the workspace binding uses so the accessors stay in one place.
 func (r *SpanningReader) Collection(name string) (*EntityCollection, error) {
 	switch name {
 	case "bibites":
@@ -198,6 +219,12 @@ func (r *SpanningReader) Collection(name string) (*EntityCollection, error) {
 		return r.Eggs(), nil
 	case "pellets":
 		return r.Pellets(), nil
+	case "genes":
+		return r.Genes(), nil
+	case "nodes":
+		return r.Nodes(), nil
+	case "synapses":
+		return r.Synapses(), nil
 	default:
 		return nil, fmt.Errorf("spanning reader: unknown collection %q", name)
 	}
