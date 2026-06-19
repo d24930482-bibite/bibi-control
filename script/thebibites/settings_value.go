@@ -97,15 +97,19 @@ func (sc *SettingScope) Hash() (uint32, error) {
 	return 0, fmt.Errorf("unhashable type: %s", sc.Type())
 }
 
-// Get implements scope["setting_name"] -> Setting handle. A missing setting
-// reports found=false (Starlark raises a KeyError).
+// Get implements scope["setting_name"] -> Setting handle. The lookup is
+// case-insensitive; a missing setting reports found=false (Starlark raises a
+// KeyError); a case-collision (≥2 canonical names fold equal) returns a loud error.
 func (sc *SettingScope) Get(k starlark.Value) (starlark.Value, bool, error) {
 	name, ok := starlark.AsString(k)
 	if !ok {
 		return nil, false, fmt.Errorf("setting name must be a string, got %s", k.Type())
 	}
-	row, ok := sc.ls.settingRow(sc.table, sc.ownerID, name)
-	if !ok {
+	row, found, err := sc.ls.settingRow(sc.table, sc.ownerID, name)
+	if err != nil {
+		return nil, false, err
+	}
+	if !found {
 		return nil, false, nil
 	}
 	return &Setting{ls: sc.ls, table: sc.table, row: row}, true, nil

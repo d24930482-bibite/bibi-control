@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"sort"
+	"strings"
 	"sync"
 
 	"github.com/asemones/bibicontrol/blobstore"
@@ -324,6 +326,58 @@ func indexGenes(rows []tb.GeneRow) map[string]*geneSet {
 	return out
 }
 
+// foldLookup resolves a user-typed name against a map[string]int index using
+// case-insensitive comparison. The contract (inherited by all callers):
+//   - Exact match (query == candidate key) wins immediately; the fold scan is
+//     skipped, so two keys "m"/"M" with an exact query "m" always resolve "m".
+//   - If no exact match, all keys whose lowercase equals lowercase(query) are
+//     collected. Distinct canonical keys are deduplicated before counting.
+//   - 0 matches → found=false (caller surfaces a miss, policy unchanged).
+//   - 1 distinct match → return its index.
+//   - ≥2 distinct matches → ambiguity error naming the colliding canonical keys
+//     (sorted for determinism); never silently pick one.
+//
+// Keep it generic over map[string]int so geneSet.byName and the per-owner
+// settings byName both reuse one implementation.
+func foldLookup(byName map[string]int, query string) (idx int, found bool, err error) {
+	// Fast path: exact match.
+	if i, ok := byName[query]; ok {
+		return i, true, nil
+	}
+	// Case-insensitive scan.
+	lq := strings.ToLower(query)
+	// seen deduplicates canonical keys that happen to map to the same backing
+	// index (shouldn't occur, but be defensive).
+	type match struct {
+		key string
+		idx int
+	}
+	var matches []match
+	seenKey := make(map[string]bool)
+	for k, i := range byName {
+		if strings.ToLower(k) == lq {
+			if !seenKey[k] {
+				seenKey[k] = true
+				matches = append(matches, match{k, i})
+			}
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return 0, false, nil
+	case 1:
+		return matches[0].idx, true, nil
+	default:
+		// Sort for deterministic error messages regardless of map iteration order.
+		sort.Slice(matches, func(i, j int) bool { return matches[i].key < matches[j].key })
+		keys := make([]string, len(matches))
+		for i, m := range matches {
+			keys[i] = fmt.Sprintf("%q", m.key)
+		}
+		return 0, false, fmt.Errorf("ambiguous name %q: matches canonical keys %s", query, strings.Join(keys, ", "))
+	}
+}
+
 // settingsBacking returns the live row slice backing one settings-value table, so
 // settingRow can hand out a pointer that writes through to ls.tables.
 func (ls *LoadedSave) settingsBacking(table string) []tb.SettingValueRow {
@@ -344,18 +398,70 @@ func (ls *LoadedSave) settingsBacking(table string) []tb.SettingValueRow {
 // settingRow returns a pointer to the SettingValueRow for one (table, owner_id,
 // setting_name), building the per-table index lazily. The pointer is into the
 // backing slice, so a caller's write-through is observed by later reads and the
-// DuckDB import. Returns nil when the setting is absent.
-func (ls *LoadedSave) settingRow(table, ownerID, name string) (*tb.SettingValueRow, bool) {
+// DuckDB import. Returns (nil, false, nil) when the setting is absent, and
+// (nil, false, err) when an ambiguous case-insensitive match is detected.
+//
+// The owner_id lookup is case-folded for the material scope (where the owner id
+// is a user-typed material name). The sentinel owner ids ("settings",
+// "independents") for simulation and independent scopes are always exact
+// (never user-typed) and do not need folding.
+func (ls *LoadedSave) settingRow(table, ownerID, name string) (*tb.SettingValueRow, bool, error) {
 	ls.settingsOnce.Do(ls.buildSettingsIndex)
-	idx, ok := ls.settingsIdx[table][ownerID][name]
-	if !ok {
-		return nil, false
+
+	tableIdx := ls.settingsIdx[table]
+	if tableIdx == nil {
+		return nil, false, nil
+	}
+
+	// Resolve ownerID: for sentinel owners use exact lookup; for material (a
+	// user-typed name) use case-insensitive fold over the first-level map keys.
+	resolvedOwner := ownerID
+	if ownerID != simulationOwnerID && ownerID != independentOwnerID {
+		lq := strings.ToLower(ownerID)
+		if _, ok := tableIdx[ownerID]; !ok {
+			// Exact miss — try case-insensitive.
+			var ownerMatches []string
+			seenOwner := make(map[string]bool)
+			for k := range tableIdx {
+				if strings.ToLower(k) == lq && !seenOwner[k] {
+					seenOwner[k] = true
+					ownerMatches = append(ownerMatches, k)
+				}
+			}
+			switch len(ownerMatches) {
+			case 0:
+				return nil, false, nil
+			case 1:
+				resolvedOwner = ownerMatches[0]
+			default:
+				sort.Strings(ownerMatches)
+				keys := make([]string, len(ownerMatches))
+				for i, k := range ownerMatches {
+					keys[i] = fmt.Sprintf("%q", k)
+				}
+				return nil, false, fmt.Errorf("ambiguous owner name %q: matches canonical keys %s", ownerID, strings.Join(keys, ", "))
+			}
+		}
+	}
+
+	byName := tableIdx[resolvedOwner]
+	if byName == nil {
+		return nil, false, nil
+	}
+
+	// Case-insensitive setting-name lookup via the shared helper.
+	idx, found, err := foldLookup(byName, name)
+	if err != nil {
+		return nil, false, err
+	}
+	if !found {
+		return nil, false, nil
 	}
 	backing := ls.settingsBacking(table)
 	if idx < 0 || idx >= len(backing) {
-		return nil, false
+		return nil, false, nil
 	}
-	return &backing[idx], true
+	return &backing[idx], true, nil
 }
 
 func (ls *LoadedSave) buildSettingsIndex() {

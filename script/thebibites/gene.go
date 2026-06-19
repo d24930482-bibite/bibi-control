@@ -81,9 +81,13 @@ func (c *GeneCollection) rows() []tb.GeneRow {
 	return out
 }
 
-// Get implements b.genes["Name"] -> typed gene value (number/bool/string). A
-// missing gene reports found=false (Starlark raises a KeyError), matching mapping
-// subscript semantics; b.gene("Name") is the None-returning point read.
+// Get implements b.genes["Name"] -> typed gene value (number/bool/string).
+// The lookup is case-insensitive: "diet" finds the gene "Diet". An exact match
+// wins over a fold match (so "m" and "M" coexisting is still addressable by
+// exact name). A missing gene reports found=false (Starlark raises a KeyError),
+// matching mapping subscript semantics; b.gene("Name") is the None-returning
+// point read. A case-collision (≥2 canonical names fold to the same lowercase
+// as the query) returns a loud error naming the colliding keys.
 func (c *GeneCollection) Get(k starlark.Value) (starlark.Value, bool, error) {
 	name, ok := starlark.AsString(k)
 	if !ok {
@@ -93,8 +97,11 @@ func (c *GeneCollection) Get(k starlark.Value) (starlark.Value, bool, error) {
 	if set == nil {
 		return nil, false, nil
 	}
-	idx, ok := set.byName[name]
-	if !ok {
+	idx, found, err := foldLookup(set.byName, name)
+	if err != nil {
+		return nil, false, err
+	}
+	if !found {
 		return nil, false, nil
 	}
 	return geneValueToStarlark(set.backing[idx]), true, nil
@@ -118,8 +125,11 @@ func (c *GeneCollection) SetKey(k, v starlark.Value) error {
 	if set == nil {
 		return fmt.Errorf("%s %s has no genes", c.kind, c.entryName)
 	}
-	idx, ok := set.byName[name]
-	if !ok {
+	idx, found, err := foldLookup(set.byName, name)
+	if err != nil {
+		return err
+	}
+	if !found {
 		return fmt.Errorf("unknown gene %q on %s %s", name, c.kind, c.entryName)
 	}
 	return c.ls.setGeneValue(c.kind, &set.backing[idx], v)
