@@ -19,12 +19,18 @@
 // U11/U12/U13 read this to scope their fetch calls.
 let selectedWsId = null;
 
+// The name of the currently loaded notebook (null if none loaded yet).
+let currentNotebook = null;
+
 function selectWs(el) {
   document.querySelectorAll('.ws-item').forEach(n => n.classList.remove('active'));
   el.classList.add('active');
   document.getElementById('wbName').textContent = el.dataset.ws;
   selectedWsId = el.dataset.id || null;
-  if (selectedWsId) loadWorlds(selectedWsId);
+  if (selectedWsId) {
+    loadWorlds(selectedWsId);
+    loadNotebookList(selectedWsId);
+  }
 }
 
 /* ---------- column A: render workspace list ----------
@@ -441,7 +447,7 @@ function cellMenuRun() {
   const runBtn = cell.querySelector('.cell-head .btn:not(.btn-ghost)');
   // text cells have no run; code cells carry runCell(n) in the run button
   if (runBtn && /runCell/.test(runBtn.getAttribute('onclick') || '')) runBtn.click();
-  else toast('text cell — nothing to run (mock)');
+  else toast('text cell — nothing to run');
 }
 
 function cellMenuInsert(position, type) {
@@ -680,44 +686,349 @@ function changeCadence(val) {
 setInterval(tick, 1000);
 renderCountdown();
 
-/* ---------- fake cell run ----------
-   run -> show "running... spinner" briefly -> flip to "check <time>".
-   For query cell 2 the table/output is revealed on completion. */
-const SPINNER = '<span class="spinner">⠿</span>';
+/* ---------- notebook col C: notebook selector ----------
+   The #flow <select> is populated from listNotebooks().
+   Selecting a notebook loads it via loadNotebook(name).
+   loadNotebookList() is called from selectWs() whenever a workspace is chosen. */
 
-function runCell(n) {
-  const cell = document.getElementById('cell-' + n);
-  const status = cell.querySelector('.cell-status');
-  const meta = cell.querySelector('.cell-meta');
+/**
+ * loadNotebookList(wsId) — fetch the notebook list and rebuild the #flow <select>.
+ * If there are notebooks, auto-loads the first one.
+ * @param {string} wsId
+ */
+function loadNotebookList(wsId) {
+  listNotebooks(wsId).then(function(rows) {
+    rows = rows || [];
+    var flow = document.getElementById('flow');
+    flow.innerHTML = '';
+    if (rows.length === 0) {
+      var opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = '(no notebooks)';
+      flow.appendChild(opt);
+      currentNotebook = null;
+      return;
+    }
+    rows.forEach(function(nb) {
+      var opt = document.createElement('option');
+      opt.value = nb.name;
+      opt.textContent = nb.name;
+      flow.appendChild(opt);
+    });
+    // auto-load the first notebook
+    loadNotebook(rows[0].name);
+  }).catch(function(err) { toast('notebooks: ' + err.message); });
+}
 
-  // set running state
-  status.className = 'cell-status running';
-  status.innerHTML = '▶ running… ' + SPINNER;
+/**
+ * loadNotebook(name) — fetch and render a notebook by name.
+ * Guards on selectedWsId being set.
+ * @param {string} name
+ */
+function loadNotebook(name) {
+  if (!selectedWsId) { toast('select a workspace first'); return; }
+  getNotebook(selectedWsId, name).then(function(doc) {
+    renderNotebook(doc);
+    currentNotebook = name;
+    // ensure the selector reflects the loaded notebook
+    var flow = document.getElementById('flow');
+    flow.value = name;
+  }).catch(function(err) { toast('load notebook: ' + err.message); });
+}
+
+/**
+ * saveNotebook() — serialize the current cells and PUT them to the backend.
+ * Prompts for a name if no notebook is currently loaded.
+ */
+function saveNotebook() {
+  if (!selectedWsId) { toast('select a workspace first'); return; }
+  var name = currentNotebook;
+  if (!name) {
+    name = (prompt('Notebook name:') || '').trim();
+    if (!name) return;
+  }
+  var cells = notebookCells();
+  putNotebook(selectedWsId, name, cells).then(function() {
+    currentNotebook = name;
+    toast('notebook saved');
+    // rebuild the dropdown without auto-loading (to preserve current cells)
+    listNotebooks(selectedWsId).then(function(rows) {
+      rows = rows || [];
+      var flow = document.getElementById('flow');
+      flow.innerHTML = '';
+      rows.forEach(function(nb) {
+        var opt = document.createElement('option');
+        opt.value = nb.name;
+        opt.textContent = nb.name;
+        flow.appendChild(opt);
+      });
+      flow.value = name;
+    }).catch(function() {});
+  }).catch(function(err) { toast(err.message); });
+}
+
+/**
+ * notebookCells() — serialize the current #notebook cells to [{type, source}].
+ * source for code: .code-edit textarea value (fallback .code textContent).
+ * source for text: .md-edit textarea value.
+ * @returns {Array<{type: string, source: string}>}
+ */
+function notebookCells() {
+  var cells = [];
+  document.querySelectorAll('#notebook > .cell').forEach(function(cell) {
+    var type = cell.classList.contains('text') ? 'text' : 'code';
+    var source;
+    if (type === 'text') {
+      var ta = cell.querySelector('.md-edit');
+      source = ta ? ta.value : '';
+    } else {
+      var codeEdit = cell.querySelector('.code-edit');
+      if (codeEdit) {
+        source = codeEdit.value;
+      } else {
+        var code = cell.querySelector('.code');
+        source = code ? code.textContent : '';
+      }
+    }
+    cells.push({ type: type, source: source });
+  });
+  return cells;
+}
+
+/**
+ * renderNotebook(doc) — clear #notebook and rebuild cells from doc.cells.
+ * Reuses buildCell(type) for each cell, sets source, then calls refreshInserters().
+ * @param {{name: string, cells: Array<{type: string, source: string}>, updated_at: string}} doc
+ */
+function renderNotebook(doc) {
+  var nb = document.getElementById('notebook');
+  nb.innerHTML = '';
+  // Reset cellCount so ids are predictable from the new set of cells.
+  cellCount = 0;
+  (doc.cells || []).forEach(function(c) {
+    var type = c.type === 'text' ? 'text' : 'code';
+    var cell = buildCell(type);
+    if (type === 'text') {
+      var ta = cell.querySelector('.md-edit');
+      if (ta) ta.value = c.source || '';
+      // render the markdown immediately (not just on blur)
+      renderTextCell(cell.id);
+      cell.classList.remove('editing');
+    } else {
+      // Set the highlighted .code textContent before setupCodeEditor runs so
+      // the textarea is seeded correctly (setupCodeEditor seeds ta from code.textContent).
+      var code = cell.querySelector('.code');
+      if (code) code.textContent = c.source || '';
+      // setupCodeEditor was already called inside buildCell, but it seeds from
+      // the textContent at build time. Re-seed the textarea explicitly.
+      var codeEditTa = cell.querySelector('.code-edit');
+      if (codeEditTa) codeEditTa.value = c.source || '';
+      // reset to idle state (no stale mock status)
+      var status = cell.querySelector('.cell-status');
+      if (status) { status.className = 'cell-status idle'; status.textContent = 'idle'; }
+      var meta = cell.querySelector('.cell-meta');
+      if (meta) meta.textContent = '';
+      // clear any prior output
+      cell.querySelectorAll('.cell-out, .result-wrap').forEach(function(el) { el.remove(); });
+    }
+    nb.appendChild(cell);
+  });
+  refreshInserters();
+}
+
+/* ---------- notebook col C: tryParseTable ----------
+   Returns a non-empty array-of-plain-objects iff str is valid JSON of that
+   shape; null otherwise. Used by renderResult to decide table vs text.
+   Strict check: must be a non-empty array whose FIRST element is a plain object
+   (not null, not an Array). Arrays of scalars, plain strings, empty arrays, and
+   parse errors all return null. */
+function tryParseTable(str) {
+  if (!str || !str.trim()) return null;
+  try {
+    var parsed = JSON.parse(str.trim());
+    if (!Array.isArray(parsed) || parsed.length === 0) return null;
+    var first = parsed[0];
+    if (typeof first !== 'object' || first === null || Array.isArray(first)) return null;
+    return parsed;
+  } catch (e) {
+    return null;
+  }
+}
+
+/* ---------- notebook col C: renderResult ----------
+   Renders a script.Result (capitalized keys) into a cell's output area.
+   res = { Output: string, Diagnostics: [{Severity, Code, Message, Detail,
+           Filename, Line, Column}], StagedOps: number, RevisionRef: string,
+           DryRun: boolean }
+   NOTE: /run returns HTTP 200 even on program failure — check Diagnostics.
+   Commit chip comes from res.RevisionRef + res.StagedOps (structured fields),
+   NOT by text-scraping the printed s.commit() output. */
+function renderResult(cell, res) {
+  var status = cell.querySelector('.cell-status');
+  var meta = cell.querySelector('.cell-meta');
+
+  // clear previous output blocks
+  cell.querySelectorAll('.cell-out, .result-wrap').forEach(function(el) { el.remove(); });
   if (meta) meta.textContent = '';
 
-  const dur = (0.1 + Math.random() * 0.6).toFixed(1);
-  setTimeout(function() {
+  // --- Diagnostics (errors / warnings) ---
+  if (res.Diagnostics && res.Diagnostics.length) {
+    status.className = 'cell-status error';
+    status.innerHTML = '&#10005; error';
+    var diagBlock = document.createElement('div');
+    diagBlock.className = 'cell-out';
+    res.Diagnostics.forEach(function(d) {
+      var line = document.createElement('div');
+      var loc = '';
+      if (d.Line) loc += ' line ' + d.Line;
+      if (d.Column) loc += ':' + d.Column;
+      line.textContent = (d.Severity ? d.Severity + ': ' : '') + (d.Message || '') + loc;
+      diagBlock.appendChild(line);
+    });
+    cell.appendChild(diagBlock);
+  } else {
     status.className = 'cell-status ok';
-    status.innerHTML = '✓ ' + dur + 's';
+    status.innerHTML = '&#10003; ok';
+  }
 
-    // reveal per-cell outputs
-    if (n === 2) {
-      const out = document.getElementById('out-2');
-      out.classList.remove('hidden');
-      if (meta) meta.textContent = '· 7 rows';
-    }
-    if (n === 3) {
-      document.getElementById('res-3').classList.remove('hidden');
-      if (meta) meta.textContent = '· 7 rows';
-    }
-    if (n === 1 && meta) meta.textContent = '· rev1';
-    // mutation cells: restore their commit chip (rev + staged_ops)
-    if (n === 4 && meta) meta.textContent = '· rev2 · staged_ops: 1';
-    if (n === 5 && meta) meta.textContent = '· rev3 · staged_ops: 18';
-    if (n === 6 && meta) meta.textContent = '· rev4 · staged_ops: 3';
-    // node-control cell: restore its node chip (process control, no rev)
-    if (n === 7 && meta) meta.textContent = '· node-1';
-  }, 850);
+  // --- Output: table or preformatted text ---
+  var rows = tryParseTable(res.Output);
+  if (rows) {
+    var keys = Object.keys(rows[0]);
+    var wrap = document.createElement('div');
+    wrap.className = 'result-wrap';
+
+    var cap = document.createElement('div');
+    cap.className = 'result-cap';
+    cap.appendChild(document.createTextNode('result'));
+
+    var csvBtn = document.createElement('button');
+    csvBtn.className = 'btn btn-sm';
+    csvBtn.style.marginLeft = 'auto';
+    // client-side CSV export over the rendered rows
+    csvBtn.onclick = (function(capturedRows, capturedKeys) {
+      return function() {
+        var lines = [capturedKeys.join(',')];
+        capturedRows.forEach(function(r) {
+          lines.push(capturedKeys.map(function(k) {
+            var v = r[k] == null ? '' : String(r[k]);
+            // quote fields that contain comma, double-quote, or newline
+            if (v.indexOf(',') >= 0 || v.indexOf('"') >= 0 || v.indexOf('\n') >= 0) {
+              v = '"' + v.replace(/"/g, '""') + '"';
+            }
+            return v;
+          }).join(','));
+        });
+        var blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+        var a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = (currentNotebook || 'result') + '.csv';
+        a.click();
+      };
+    })(rows, keys);
+    csvBtn.textContent = 'export csv';
+    cap.appendChild(csvBtn);
+    wrap.appendChild(cap);
+
+    var table = document.createElement('table');
+    table.className = 'result';
+    var thead = document.createElement('thead');
+    var headerRow = document.createElement('tr');
+    keys.forEach(function(k) {
+      var th = document.createElement('th');
+      th.textContent = k;
+      headerRow.appendChild(th);
+    });
+    thead.appendChild(headerRow);
+    table.appendChild(thead);
+
+    var tbody = document.createElement('tbody');
+    rows.forEach(function(r) {
+      var tr = document.createElement('tr');
+      keys.forEach(function(k) {
+        var td = document.createElement('td');
+        var val = r[k];
+        td.textContent = val == null ? '' : String(val);
+        if (typeof val === 'number') td.className = 'num';
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    cell.appendChild(wrap);
+
+    if (meta) meta.textContent = '· ' + rows.length + ' rows';
+  } else if (res.Output && res.Output.length) {
+    var out = document.createElement('div');
+    out.className = 'cell-out';
+    var pre = document.createElement('pre');
+    pre.textContent = res.Output;
+    out.appendChild(pre);
+    cell.appendChild(out);
+  }
+
+  // --- Commit chip: read from structured RevisionRef + StagedOps fields ---
+  // NOT from regex-scraping the printed s.commit() dict text.
+  if (res.RevisionRef && res.RevisionRef.length) {
+    var existing = (meta && meta.textContent) ? meta.textContent : '';
+    var chip = (existing ? existing + ' ' : '') + '· ' + res.RevisionRef + ' · staged_ops: ' + res.StagedOps;
+    if (meta) meta.textContent = chip;
+  }
+}
+
+/* ---------- notebook col C: runCell (real) ----------
+   Accepts either the numeric cell-N id suffix or a cell element.
+   Skips text cells. Posts {program} to /run, renders the script.Result.
+   Guards selectedWsId. */
+const SPINNER = '<span class="spinner">&#10047;</span>';
+
+function runCell(n) {
+  // resolve to the cell element (accept numeric id or element)
+  var cell;
+  if (typeof n === 'object' && n && n.classList) {
+    cell = n;
+  } else {
+    cell = document.getElementById('cell-' + n);
+  }
+  if (!cell) return;
+  // skip text cells — they have no Starlark program to run
+  if (cell.classList.contains('text')) { toast('text cell — nothing to run'); return; }
+
+  if (!selectedWsId) { toast('select a workspace first'); return; }
+
+  // read the source: live textarea value, fallback to .code textContent
+  var codeEdit = cell.querySelector('.code-edit');
+  var source;
+  if (codeEdit) {
+    source = codeEdit.value;
+  } else {
+    var code = cell.querySelector('.code');
+    source = code ? code.textContent : '';
+  }
+
+  // set running state
+  var status = cell.querySelector('.cell-status');
+  var meta = cell.querySelector('.cell-meta');
+  status.className = 'cell-status running';
+  status.innerHTML = '&#9654; running… ' + SPINNER;
+  if (meta) meta.textContent = '';
+
+  runProgram(selectedWsId, source).then(function(res) {
+    renderResult(cell, res);
+  }).catch(function(err) {
+    // network / 4xx / 5xx (req() throws with an {error} message)
+    var errStatus = cell.querySelector('.cell-status');
+    var errMeta = cell.querySelector('.cell-meta');
+    errStatus.className = 'cell-status error';
+    errStatus.innerHTML = '&#10005; error';
+    if (errMeta) errMeta.textContent = '';
+    cell.querySelectorAll('.cell-out, .result-wrap').forEach(function(el) { el.remove(); });
+    var out = document.createElement('div');
+    out.className = 'cell-out';
+    out.textContent = err.message;
+    cell.appendChild(out);
+  });
 }
 
 /* ---------- text / markdown cells ----------

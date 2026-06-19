@@ -133,6 +133,45 @@ async function runProgram(wsId, program) {
   return req('POST', '/api/workspaces/' + wsId + '/run', { program });
 }
 
+/* ---------- notebooks ---------- */
+
+/**
+ * GET /api/workspaces/{id}/notebooks
+ * Returns all notebooks for the workspace, sorted by name. Empty array when none.
+ * Backend shape: notebookMeta {name: string, updated_at: string} (notebookstore.go:27).
+ * @param {string} wsId  Workspace id.
+ * @returns {Promise<Array<{name: string, updated_at: string}>>}
+ */
+async function listNotebooks(wsId) {
+  return req('GET', '/api/workspaces/' + wsId + '/notebooks');
+}
+
+/**
+ * GET /api/workspaces/{id}/notebooks/{name}
+ * Returns a single notebook by name.
+ * Backend shape: notebookDoc {name: string, cells: [{type: string, source: string}], updated_at: string}
+ * (notebookstore.go:19).
+ * @param {string} wsId  Workspace id.
+ * @param {string} name  Notebook name (will be encodeURIComponent-encoded in URL).
+ * @returns {Promise<{name: string, cells: Array<{type: string, source: string}>, updated_at: string}>}
+ */
+async function getNotebook(wsId, name) {
+  return req('GET', '/api/workspaces/' + wsId + '/notebooks/' + encodeURIComponent(name));
+}
+
+/**
+ * PUT /api/workspaces/{id}/notebooks/{name}
+ * Creates or updates a notebook. Body is {cells} only (handlers_notebooks.go:45).
+ * Backend shape for response: notebookDoc {name, cells, updated_at}.
+ * @param {string} wsId   Workspace id.
+ * @param {string} name   Notebook name (will be encodeURIComponent-encoded in URL).
+ * @param {Array<{type: string, source: string}>} cells  Cell array to persist.
+ * @returns {Promise<{name: string, cells: Array<{type: string, source: string}>, updated_at: string}>}
+ */
+async function putNotebook(wsId, name, cells) {
+  return req('PUT', '/api/workspaces/' + wsId + '/notebooks/' + encodeURIComponent(name), { cells });
+}
+
 /**
  * POST /api/workspaces/{id}/upload
  * Uploads a save file (.zip) via multipart/form-data. Uses FormData/fetch directly
