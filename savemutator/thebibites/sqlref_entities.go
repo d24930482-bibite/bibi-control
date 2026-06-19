@@ -45,10 +45,14 @@ func resolveBibiteStomachColumn(ref SQLValueRef, columns map[string]string) (Tar
 }
 
 func resolveGeneColumn(ref SQLValueRef, kind tb.EntryKind, columns map[string]string) (Target, string, error) {
-	if _, err := sqlRefColumnValue(ref, columns); err != nil {
+	wantType, err := sqlRefColumnValue(ref, columns)
+	if err != nil {
 		return Target{}, "", err
 	}
 	if err := requireSQLRefString(ref, ref.Path, "path"); err != nil {
+		return Target{}, "", err
+	}
+	if err := requireSQLRefValueType(ref, wantType); err != nil {
 		return Target{}, "", err
 	}
 

@@ -377,6 +377,7 @@ func scanBibiteGeneRefs(t *testing.T, ctx context.Context, db queryer, saveID, g
 		       owner_kind,
 		       owner_id,
 		       path,
+		       value_type,
 		       number_value
 		FROM bibite_genes
 		WHERE save_id = ?
