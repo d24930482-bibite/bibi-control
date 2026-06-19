@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/asemones/bibicontrol/ipc"
@@ -94,12 +95,29 @@ func (w *Workspace) StartNode(ctx context.Context, spec StartNodeSpec) (*noderun
 	w.mu.Unlock()
 	// --- end pre-start checks ---
 
+	// Obtain (or lazily create) the log ring for this node. Done outside w.mu
+	// to avoid nesting logMu under w.mu.
+	ring := w.logRingFor(nodeID)
+
 	// Build the noderuntime spec and launch the process. This may block if
 	// ConnectOnStart is true, so we do it outside the lock.
+	proc := spec.Process // local copy; we may replace Stdout/Stderr below
+	stdoutWriter := ipc.Writer(&logBufferWriter{ring: ring, level: "info"})
+	if proc.Stdout != nil {
+		proc.Stdout = io.MultiWriter(proc.Stdout, stdoutWriter)
+	} else {
+		proc.Stdout = stdoutWriter
+	}
+	stderrWriter := ipc.Writer(&logBufferWriter{ring: ring, level: "error"})
+	if proc.Stderr != nil {
+		proc.Stderr = io.MultiWriter(proc.Stderr, stderrWriter)
+	} else {
+		proc.Stderr = stderrWriter
+	}
 	ns := noderuntime.Spec{
 		NodeID:         nodeID,
 		RunID:          spec.RunID,
-		Process:        spec.Process,
+		Process:        proc,
 		CompatAddr:     spec.CompatAddr,
 		ConnectOnStart: spec.ConnectOnStart,
 		DialTimeout:    spec.DialTimeout,
@@ -236,6 +254,7 @@ func (w *Workspace) StopNode(ctx context.Context, nodeID string, opts noderuntim
 	w.mu.Lock()
 	delete(w.nodes, nodeID)
 	w.mu.Unlock()
+	w.dropLogRing(nodeID)
 
 	return w.setNodeStatusByLogicalID(ctx, nodeID, "stopped")
 }
@@ -262,6 +281,7 @@ func (w *Workspace) KillNode(ctx context.Context, nodeID string) error {
 	w.mu.Lock()
 	delete(w.nodes, nodeID)
 	w.mu.Unlock()
+	w.dropLogRing(nodeID)
 
 	return w.setNodeStatusByLogicalID(ctx, nodeID, "stopped")
 }
