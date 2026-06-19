@@ -417,13 +417,6 @@ func (ls *LoadedSave) settingRow(table, ownerID, name string) (*tb.SettingValueR
 	// user-typed name) use case-insensitive fold over the first-level map keys.
 	resolvedOwner := ownerID
 	if ownerID != simulationOwnerID && ownerID != independentOwnerID {
-		// Build a string->string map for foldLookup (we need map[string]int).
-		// Re-use foldLookup by building a small index of owner key -> dummy int.
-		ownerKeys := make(map[string]int, len(tableIdx))
-		for k := range tableIdx {
-			ownerKeys[k] = 0 // value unused
-		}
-		// We only need the matched key, not the int; use a key-recording variant.
 		lq := strings.ToLower(ownerID)
 		if _, ok := tableIdx[ownerID]; !ok {
 			// Exact miss — try case-insensitive.
@@ -449,7 +442,6 @@ func (ls *LoadedSave) settingRow(table, ownerID, name string) (*tb.SettingValueR
 				return nil, false, fmt.Errorf("ambiguous owner name %q: matches canonical keys %s", ownerID, strings.Join(keys, ", "))
 			}
 		}
-		_ = ownerKeys // used only for structure clarity above
 	}
 
 	byName := tableIdx[resolvedOwner]
