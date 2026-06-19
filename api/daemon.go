@@ -106,10 +106,10 @@ func (d *Daemon) Handler() http.Handler {
 	mux.HandleFunc("GET /api/workspaces/{id}/nodes/info", notImplemented)
 	mux.HandleFunc("GET /api/workspaces/{id}/nodes/{nid}/logs", notImplemented)
 	mux.HandleFunc("POST /api/workspaces/{id}/upload", notImplemented)
-	mux.HandleFunc("GET /api/workspaces/{id}/notebooks", notImplemented)
-	mux.HandleFunc("GET /api/workspaces/{id}/notebooks/{name}", notImplemented)
-	mux.HandleFunc("PUT /api/workspaces/{id}/notebooks/{name}", notImplemented)
-	mux.HandleFunc("DELETE /api/workspaces/{id}/notebooks/{name}", notImplemented)
+	mux.HandleFunc("GET /api/workspaces/{id}/notebooks", d.handleListNotebooks)
+	mux.HandleFunc("GET /api/workspaces/{id}/notebooks/{name}", d.handleGetNotebook)
+	mux.HandleFunc("PUT /api/workspaces/{id}/notebooks/{name}", d.handlePutNotebook)
+	mux.HandleFunc("DELETE /api/workspaces/{id}/notebooks/{name}", d.handleDeleteNotebook)
 
 	// Embedded SPA at /. /api/... patterns are more specific and win.
 	sub, _ := fs.Sub(webFS, "web")
