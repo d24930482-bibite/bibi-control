@@ -623,7 +623,7 @@ function toast(msg) {
    Default cadence 10s. On reaching 0 we "poll": bump the ALIVE node's
    TPS / real / sim_time / autosave to new mock values, then reset. */
 let cadence = 10;        // seconds; or 0 for manual
-let remaining = 7;       // start mid-countdown like the wireframe (&#8635; 0:07)
+let remaining = 7;       // start mid-countdown like the wireframe (↻ 0:07)
 let simTime = 1240512;
 let autosaveSecs = 42;
 
@@ -683,7 +683,7 @@ renderCountdown();
 /* ---------- fake cell run ----------
    run -> show "running... spinner" briefly -> flip to "check <time>".
    For query cell 2 the table/output is revealed on completion. */
-const SPINNER = '<span class="spinner">⠇</span>';
+const SPINNER = '<span class="spinner">⠿</span>';
 
 function runCell(n) {
   const cell = document.getElementById('cell-' + n);
