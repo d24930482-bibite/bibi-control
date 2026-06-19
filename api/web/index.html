@@ -1,1 +1,501 @@
-<!doctype html><title>bibicontrol</title><h1>bibid running</h1>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>bibicontrol</title>
+<!--
+  ============================================================================
+  bibicontrol — SPA
+  ----------------------------------------------------------------------------
+  Offline, vanilla JS only. No external deps, no npm, no web font imports.
+  Column A (Workspaces) is wired to the live backend via api.js.
+  Columns B and C are static scaffolding (mock data) for U11/U12/U13.
+
+  Assets (all siblings in api/web/, served via go:embed):
+    index.html   this file
+    app.css      styles (ported from docs/ui_mockup.css)
+    api.js       fetch layer — load BEFORE app.js
+    app.js       interactions
+  ============================================================================
+-->
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="app">
+
+  <!-- ===================== COLUMN A: WORKSPACES ===================== -->
+  <aside class="col col-a">
+    <div class="a-head">
+      <span class="a-title">Workspaces</span>
+      <button class="btn btn-sm" onclick="openModal('m-new-ws')">+ New</button>
+    </div>
+    <!-- populated on load by renderWorkspaces() in app.js -->
+    <div class="ws-list" id="wsList"></div>
+    <div class="a-foot">
+      <div class="settings-item" onclick="toast('Settings — mock only')">
+        <span>&#9432;</span><span>settings</span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ===================== COLUMN B: LIVE STATE ===================== -->
+  <section class="col col-b">
+    <div class="ws-banner">
+      <div class="wb-name" id="wbName">—</div>
+    </div>
+
+    <!-- NODES -->
+    <div class="section-head">
+      <span class="sh-title">Nodes</span>
+      <span class="sh-right">
+        <button class="btn btn-sm btn-ghost" onclick="openLogs('')" title="all node logs">&#8803; logs</button>
+        <span class="countdown" id="countdown">&#8635; 0:07</span>
+      </span>
+    </div>
+    <div class="nodes">
+      <!-- ● ALIVE — holds the LIVE binding to world alpha -->
+      <div class="node alive" data-world="alpha">
+        <div class="node-top">
+          <span class="node-dot">●</span>
+          <span class="node-name">node-1</span>
+          <span class="node-state">ALIVE</span>
+        </div>
+        <div class="node-world" onclick="focusWorld('alpha')" title="bound world (world_id)">
+          <span class="nw-ico">&#11041;</span> world <span class="nw-name">alpha</span>
+        </div>
+        <div class="node-metrics">
+          <span class="m-val" id="n1-tps">58</span> TPS · real <span class="m-val" id="n1-real">57.8</span><br>
+          sim t = <span class="m-val" id="n1-simt">1,240,512</span><br>
+          paused: no · last autosave <span class="m-val" id="n1-autosave">0:42</span> ago
+        </div>
+        <div class="node-actions">
+          <button class="btn btn-sm" onclick="toast('stop node-1 (mock)')">&#9208; stop</button>
+          <button class="btn btn-sm" onclick="toast('reload node-1 (mock)')">&#10231; reload</button>
+          <button class="btn btn-sm" onclick="toast('kill node-1 (mock)')">&#10005; kill</button>
+        </div>
+      </div>
+
+      <!-- ○ CRASHED — persisted world_id remains, but no live handle -->
+      <div class="node crashed" data-world="beta">
+        <div class="node-top">
+          <span class="node-dot">○</span>
+          <span class="node-name">node-2</span>
+          <span class="node-state">CRASHED</span>
+        </div>
+        <div class="node-world" onclick="focusWorld('beta')" title="bound world (world_id) — stale, no live handle">
+          <span class="nw-ico">&#11041;</span> world <span class="nw-name">beta</span>
+        </div>
+        <div class="node-metrics dim">
+          last 0 TPS · exit code <span class="m-val">139</span><br>
+          uptime 14m → died
+        </div>
+        <div class="node-actions">
+          <button class="btn btn-sm" onclick="openLogs('node-2')">view logs</button>
+          <button class="btn btn-sm" onclick="toast('restart node-2 (mock)')">&#8635; restart</button>
+        </div>
+      </div>
+
+      <!-- ⦿ DETACHED — persisted row with world_id, daemon holds no handle -->
+      <div class="node detached" data-world="beta">
+        <div class="node-top">
+          <span class="node-dot">&#10687;</span>
+          <span class="node-name">node-3</span>
+          <span class="node-state">DETACHED</span>
+        </div>
+        <div class="node-world" onclick="focusWorld('beta')" title="bound world (world_id) — persisted, not live-bound">
+          <span class="nw-ico">&#11041;</span> world <span class="nw-name">beta</span>
+        </div>
+        <div class="node-metrics dim">
+          persisted row, but the daemon<br>holds no live handle
+        </div>
+        <div class="node-actions">
+          <button class="btn btn-sm" onclick="toast('reconnect node-3 (mock)')">reconnect</button>
+          <button class="btn btn-sm" onclick="toast('drop row node-3 (mock)')">drop row</button>
+        </div>
+      </div>
+
+      <div class="add-row" style="padding-top:0;">
+        <button class="btn" onclick="openModal('m-start-node')">+ start node</button>
+      </div>
+    </div>
+
+    <!-- WORLDS — w-node shows the live-binding state (one live node per world) -->
+    <div class="section-head"><span class="sh-title">Worlds</span></div>
+    <div class="worlds">
+      <div class="world" id="world-alpha" onclick="focusWorld('alpha')">
+        <span class="w-bullet">•</span><span class="w-name">alpha</span>
+        <span class="w-node live" title="live node bound">● node-1</span>
+        <span class="w-rev">head rev3</span>
+      </div>
+      <div class="world" id="world-beta" onclick="focusWorld('beta')">
+        <span class="w-bullet">•</span><span class="w-name">beta</span>
+        <span class="w-node" title="stale node rows, no live handle">○ node-2</span>
+        <span class="w-rev">head rev1</span>
+      </div>
+    </div>
+    <div class="add-row">
+      <button class="btn" onclick="openModal('m-add-world')">+ add / upload</button>
+    </div>
+  </section>
+
+  <!-- draggable divider: resizes live-state vs notebook -->
+  <div class="divider" id="divider" title="drag to resize"></div>
+
+  <!-- ===================== COLUMN C: NOTEBOOK ===================== -->
+  <main class="col col-c">
+    <!-- top bar -->
+    <div class="c-topbar">
+      <span class="tb-gear">&#9881;</span>
+      <span class="tele-chip">
+        telemetry:
+        <select class="select" id="cadence" onchange="changeCadence(this.value)">
+          <option value="5">every 5s</option>
+          <option value="10" selected>every 10s</option>
+          <option value="30">every 30s</option>
+          <option value="manual">manual</option>
+        </select>
+      </span>
+      <span class="daemon-up">
+        <span class="dot" id="daemonDot">●</span>
+        <span id="daemonText">daemon up</span>
+      </span>
+    </div>
+
+    <!-- notebook toolbar -->
+    <div class="nb-toolbar">
+      <span class="nb-label">Notebook</span>
+      <select class="select" id="flow">
+        <option>flow: "seed+run"</option>
+        <option>flow: "transfer predators"</option>
+        <option>flow: "scratch"</option>
+      </select>
+      <div class="spacer"></div>
+      <button class="btn btn-sm" onclick="toast('notebook saved (mock)')">Save</button>
+      <span class="add-split">
+        <button class="btn btn-sm btn-accent" onclick="addCell('code')">+ Code</button>
+        <button class="btn btn-sm btn-accent" onclick="addCell('text')">+ Text</button>
+      </span>
+    </div>
+
+    <!-- cells -->
+    <div class="notebook" id="notebook">
+
+      <!-- CELL 0: TEXT / MARKDOWN cell (click to edit, blur to render) -->
+      <div class="cell text" id="cell-md0">
+        <div class="cell-head">
+          <span class="cell-idx">md</span>
+          <span class="cell-kind">text</span>
+          <span class="spacer"></span>
+          <button class="btn btn-sm" onclick="editTextCell('cell-md0')">edit</button>
+        </div>
+        <textarea class="md-edit" spellcheck="false"
+          onblur="renderTextCell('cell-md0')"># Predator study — seed &amp; run
+
+Import `dasdasd.zip` as **alpha**, sanity-check species counts,
+then start a node. Notes:
+
+- query is a *read escape-hatch* — writes go through the object DSL
+- each cell is one `/run` against the shared workspace</textarea>
+        <div class="md-render" onclick="editTextCell('cell-md0')"></div>
+      </div>
+
+      <!-- CELL 1: OK + add_world output -->
+      <div class="cell" id="cell-1">
+        <div class="cell-head">
+          <span class="cell-idx">[1]</span>
+          <span class="cell-status ok">&#10003; 0.4s</span>
+          <span class="cell-meta">· rev1</span>
+          <span class="spacer"></span>
+          <button class="btn btn-sm" onclick="runCell(1)">&#9654; run</button>
+        </div>
+        <pre class="code"><span class="kw">w</span> = <span class="fn">workspace.add_world</span>(
+    <span class="arg">path</span>=<span class="str">"uploads/dasdasd.zip"</span>,
+    <span class="arg">name</span>=<span class="str">"alpha"</span>)</pre>
+        <div class="cell-out" id="out-1">→ world alpha  (head rev1)</div>
+      </div>
+
+      <!-- CELL 2: RUNNING query (will flip to ok on run) -->
+      <div class="cell" id="cell-2">
+        <div class="cell-head">
+          <span class="cell-idx">[2]</span>
+          <span class="cell-status running" id="st-2">&#9654; running… <span class="spinner">&#10047;</span></span>
+          <span class="spacer"></span>
+          <button class="btn btn-sm" id="run-2" onclick="runCell(2)">&#9632; stop</button>
+        </div>
+        <pre class="code"><span class="fn">workspace.query</span>(<span class="arg">sql</span>=<span class="str">"""
+    SELECT species_id, count(*) n
+    FROM bibites GROUP BY 1 ORDER BY n DESC"""</span>)</pre>
+        <div class="cell-out hidden" id="out-2">→ 7 rows</div>
+      </div>
+
+      <!-- CELL 3: OK query with RESULTS TABLE -->
+      <div class="cell" id="cell-3">
+        <div class="cell-head">
+          <span class="cell-idx">[3]</span>
+          <span class="cell-status ok" id="st-3">&#10003; 0.1s</span>
+          <span class="cell-meta">· 7 rows</span>
+          <span class="spacer"></span>
+          <button class="btn btn-sm" onclick="runCell(3)">&#9654; run</button>
+        </div>
+        <pre class="code"><span class="fn">workspace.query</span>(<span class="arg">sql</span>=<span class="str">"""
+    SELECT species_id, count(*) n, avg(energy) avg_energy
+    FROM bibites GROUP BY 1 ORDER BY n DESC"""</span>)</pre>
+        <div class="result-wrap" id="res-3">
+          <div class="result-cap">
+            result
+            <button class="btn btn-sm" style="margin-left:auto" onclick="toast('export csv (mock)')">export csv</button>
+          </div>
+          <table class="result">
+            <thead>
+              <tr><th>species_id</th><th class="num">n</th><th class="num">avg_energy</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>12</td><td class="num">410</td><td class="num">88.3</td></tr>
+              <tr><td>7</td><td class="num">191</td><td class="num">61.0</td></tr>
+              <tr><td>3</td><td class="num">88</td><td class="num">74.5</td></tr>
+              <tr><td>21</td><td class="num">52</td><td class="num">39.2</td></tr>
+              <tr><td>9</td><td class="num">31</td><td class="num">95.8</td></tr>
+              <tr><td>15</td><td class="num">14</td><td class="num">22.1</td></tr>
+              <tr><td>2</td><td class="num">6</td><td class="num">50.0</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- CELL 4: per-world MUTATION via the object DSL (.where / .set) -->
+      <div class="cell" id="cell-4">
+        <div class="cell-head">
+          <span class="cell-idx">[4]</span>
+          <span class="cell-status ok" id="st-4">&#10003; 0.3s</span>
+          <span class="cell-meta">· rev2 · staged_ops: 1</span>
+          <span class="spacer"></span>
+          <button class="btn btn-sm" onclick="runCell(4)">&#9654; run</button>
+        </div>
+        <pre class="code"><span class="com"># object DSL — bulk where().set(), the canonical write path</span>
+<span class="kw">s</span> = <span class="fn">workspace.world</span>(<span class="str">"alpha"</span>).<span class="fn">open</span>()
+<span class="kw">s</span>.bibites.<span class="fn">where</span>(s.bibites.energy &lt; <span class="arg">10</span>).<span class="fn">set</span>(<span class="arg">energy</span>=<span class="arg">50</span>)
+<span class="kw">rev</span> = <span class="kw">s</span>.<span class="fn">commit</span>()</pre>
+        <div class="cell-out" id="out-4">→ set 73 bibites · committed rev2 (head)</div>
+      </div>
+
+      <!-- CELL 5: per-world MUTATION via plain Starlark (row-by-row loop) -->
+      <div class="cell" id="cell-5">
+        <div class="cell-head">
+          <span class="cell-idx">[5]</span>
+          <span class="cell-status ok" id="st-5">&#10003; 0.6s</span>
+          <span class="cell-meta">· rev3 · staged_ops: 18</span>
+          <span class="spacer"></span>
+          <button class="btn btn-sm" onclick="runCell(5)">&#9654; run</button>
+        </div>
+        <pre class="code"><span class="com"># plain Starlark — iterate + mutate per row when logic is custom</span>
+<span class="kw">s</span> = <span class="fn">workspace.world</span>(<span class="str">"alpha"</span>).<span class="fn">open</span>()
+<span class="kw">for</span> b <span class="kw">in</span> s.bibites.<span class="fn">where</span>(s.bibites.species_id == <span class="arg">12</span>):
+    <span class="kw">if</span> b.energy &gt; <span class="arg">80</span>:
+        b.energy = b.energy * <span class="arg">0.5</span>
+        b.tag = <span class="str">"culled"</span>
+<span class="kw">rev</span> = <span class="kw">s</span>.<span class="fn">commit</span>()</pre>
+        <div class="cell-out" id="out-5">→ edited 18 bibites · committed rev3 (head)</div>
+      </div>
+
+      <!-- CELL 6: world SETTINGS mutation (save.settings scopes) -->
+      <div class="cell" id="cell-6">
+        <div class="cell-head">
+          <span class="cell-idx">[6]</span>
+          <span class="cell-status ok" id="st-6">&#10003; 0.2s</span>
+          <span class="cell-meta">· rev4 · staged_ops: 3</span>
+          <span class="spacer"></span>
+          <button class="btn btn-sm" onclick="runCell(6)">&#9654; run</button>
+        </div>
+        <pre class="code"><span class="com"># world settings — scalar set() across the three scopes</span>
+<span class="kw">s</span> = <span class="fn">workspace.world</span>(<span class="str">"alpha"</span>).<span class="fn">open</span>()
+<span class="kw">s</span>.settings.simulation[<span class="str">"maxBibiteCount"</span>].<span class="fn">set</span>(<span class="arg">200</span>)
+<span class="kw">s</span>.settings.independent[<span class="str">"mutationRate"</span>].<span class="fn">set</span>(<span class="arg">0.04</span>)
+<span class="kw">s</span>.settings.<span class="fn">material</span>(<span class="str">"Plant"</span>)[<span class="str">"energy"</span>].<span class="fn">set</span>(<span class="arg">120</span>)
+<span class="kw">rev</span> = <span class="kw">s</span>.<span class="fn">commit</span>()</pre>
+        <div class="cell-out" id="out-6">→ set 3 settings · committed rev4 (head)</div>
+      </div>
+
+      <!-- CELL 7: node-control DSL (start_node / info / resume / reload) -->
+      <div class="cell" id="cell-7">
+        <div class="cell-head">
+          <span class="cell-idx">[7]</span>
+          <span class="cell-status ok" id="st-7">&#10003; 1.2s</span>
+          <span class="cell-meta">· node-1</span>
+          <span class="spacer"></span>
+          <button class="btn btn-sm" onclick="runCell(7)">&#9654; run</button>
+        </div>
+        <pre class="code"><span class="com"># node control — live process bindings (no commit; returns dicts)</span>
+<span class="kw">n</span> = <span class="fn">workspace.start_node</span>(<span class="arg">world</span>=<span class="str">"alpha"</span>, <span class="arg">path</span>=<span class="str">"/opt/bibites"</span>, <span class="arg">connect</span>=<span class="kw">True</span>)
+<span class="fn">print</span>(n.<span class="fn">info</span>()[<span class="str">"tps"</span>], n.<span class="fn">info</span>()[<span class="str">"paused"</span>])
+<span class="kw">n</span>.<span class="fn">resume</span>(<span class="arg">2.0</span>)        <span class="com"># set time scale</span>
+<span class="kw">n</span>.<span class="fn">reload</span>()           <span class="com"># hot-reload head revision</span></pre>
+        <div class="cell-out" id="out-7">→ node-1 alive · 58.0 TPS · paused False · reloaded head rev4</div>
+      </div>
+
+    </div>
+
+    <!-- HISTORY strip -->
+    <div class="history">
+      <div class="h-title">History · <b>alpha</b></div>
+      <div class="rev-line-wrap">
+        <div class="rev-line">
+          <span class="rev head"><span class="rev-dot">●</span>rev3</span>
+          <span class="rev-link">──</span>
+          <span class="rev"><span class="rev-dot">○</span>rev2</span>
+          <span class="rev-link">──</span>
+          <span class="rev"><span class="rev-dot">○</span>rev1 <span class="rev-tag">(import)</span></span>
+        </div>
+        <div class="h-actions">
+          <button class="btn btn-sm" onclick="toast('diff rev2..rev3 (mock)')">diff</button>
+          <button class="btn btn-sm" onclick="toast('open rev3 (mock)')">open</button>
+        </div>
+      </div>
+      <div class="h-caption">
+        <q>set energy</q> <q>transfer in</q> &nbsp;by you · 2m ago
+      </div>
+    </div>
+
+    <!-- LOGS DRAWER (slides over column C) -->
+    <!-- one unified log stream for all nodes; each line is node-prefixed -->
+    <div class="drawer" id="logsDrawer">
+      <div class="drawer-grip" id="drawerGrip" title="drag to resize"></div>
+      <div class="drawer-head">
+        <span class="dh-title">logs · <span class="muted">all nodes</span></span>
+        <span class="spacer"></span>
+        <select class="select" id="logFilter" onchange="filterLogs(this.value)">
+          <option value="">all nodes</option>
+          <option value="node-1">node-1</option>
+          <option value="node-2">node-2</option>
+          <option value="node-3">node-3</option>
+        </select>
+        <button class="btn btn-sm" onclick="toast('download logs (mock)')">&#8615; download</button>
+        <button class="btn btn-sm btn-ghost" onclick="closeLogs()">&#10005;</button>
+      </div>
+      <div class="log-body" id="logBody">
+        <div class="log-line info"  data-node="node-1"><span class="ts">12:02:55</span> <span class="node">node-1</span> <span class="lvl">INFO </span> sim started run-9 world=alpha tps=60</div>
+        <div class="log-line info"  data-node="node-2"><span class="ts">12:03:01</span> <span class="node">node-2</span> <span class="lvl">INFO </span> sim started run-7 world=beta tps=60</div>
+        <div class="log-line info"  data-node="node-2"><span class="ts">12:08:19</span> <span class="node">node-2</span> <span class="lvl">INFO </span> checkpoint ok step=482000</div>
+        <div class="log-line info"  data-node="node-1"><span class="ts">12:09:30</span> <span class="node">node-1</span> <span class="lvl">INFO </span> autosave written autosave_1209.zip</div>
+        <div class="log-line warn"  data-node="node-2"><span class="ts">12:16:44</span> <span class="node">node-2</span> <span class="lvl">WARN </span> autosave written autosave_1216.zip</div>
+        <div class="log-line warn"  data-node="node-2"><span class="ts">12:16:58</span> <span class="node">node-2</span> <span class="lvl">WARN </span> physics step lag 41ms (budget 16ms)</div>
+        <div class="log-line fatal" data-node="node-2"><span class="ts">12:17:02</span> <span class="node">node-2</span> <span class="lvl">FATAL</span> segfault in physics step  (exit 139)</div>
+        <div class="log-line info"  data-node="node-3"><span class="ts">12:18:10</span> <span class="node">node-3</span> <span class="lvl">INFO </span> daemon restarted — handle lost (detached)</div>
+        <div class="log-line info"  data-node="node-1"><span class="ts">12:20:48</span> <span class="node">node-1</span> <span class="lvl">INFO </span> tps=58 real=57.8 sim_t=1240512</div>
+      </div>
+      <div class="drawer-foot">
+        <span>&#9658;</span>
+        <label><input type="checkbox" id="followChk" checked onchange="toast('follow ' + (this.checked?'on':'off') + ' (mock)')"> follow</label>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- ===================== MODALS ===================== -->
+<div class="backdrop" id="m-new-ws" onclick="backdropClose(event,'m-new-ws')">
+  <div class="modal">
+    <div class="modal-head">New Workspace</div>
+    <div class="modal-body">
+      <div class="field">
+        <label>Name</label>
+        <input class="input" id="m-new-ws-name" placeholder="my-workspace">
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal('m-new-ws')">Cancel</button>
+      <button class="btn btn-accent" onclick="submitNewWorkspace()">Create</button>
+    </div>
+  </div>
+</div>
+
+<div class="backdrop" id="m-start-node" onclick="backdropClose(event,'m-start-node')">
+  <div class="modal">
+    <div class="modal-head">Start Node</div>
+    <div class="modal-body">
+      <div class="field">
+        <label>World</label>
+        <select class="select" style="width:100%; padding:8px 10px;">
+          <option>alpha</option><option>beta</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Sim bin</label>
+        <input class="input mono" value="/opt/bibites">
+      </div>
+      <div class="field">
+        <label>Drop path</label>
+        <input class="input mono" placeholder="auto" value="auto">
+      </div>
+      <div class="check-row">
+        <input type="checkbox" id="connectChk" checked>
+        <label for="connectChk">connect on start</label>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal('m-start-node')">Cancel</button>
+      <button class="btn btn-accent" onclick="closeModal('m-start-node'); toast('start_node(...) (mock)')">Start &#9654;</button>
+    </div>
+  </div>
+</div>
+
+<div class="backdrop" id="m-add-world" onclick="backdropClose(event,'m-add-world')">
+  <div class="modal">
+    <div class="modal-head">Add World</div>
+    <div class="modal-body">
+      <div class="radio-row">
+        <input type="radio" name="addsrc" id="srcUpload" checked onchange="toggleAddSrc()">
+        <label for="srcUpload">Upload save (.zip)</label>
+      </div>
+      <div class="file-pick" id="uploadPick">
+        <button class="btn btn-sm" onclick="toast('file chooser (mock)')">choose file…</button>
+        <span>dasdasd.zip</span>
+      </div>
+      <div class="radio-row">
+        <input type="radio" name="addsrc" id="srcServer" onchange="toggleAddSrc()">
+        <label for="srcServer">Server path</label>
+      </div>
+      <div class="field" id="serverPick" style="display:none; padding-left:24px;">
+        <input class="input mono" placeholder="/srv/bibites/saves/world.zip">
+      </div>
+      <div class="field">
+        <label>Name</label>
+        <input class="input" placeholder="alpha">
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal('m-add-world')">Cancel</button>
+      <button class="btn btn-accent" onclick="closeModal('m-add-world'); toast('add_world(...) (mock)')">Import</button>
+    </div>
+  </div>
+</div>
+
+<!-- right-click context menu for workspace items -->
+<div class="ctx-menu" id="wsCtx">
+  <div class="ctx-item" onclick="ctxRename()"><span class="ctx-ico">&#9998;</span> Rename</div>
+  <div class="ctx-item" onclick="ctxDuplicate()"><span class="ctx-ico">&#10697;</span> Duplicate</div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item danger" onclick="ctxDelete()"><span class="ctx-ico">&#10005;</span> Delete</div>
+</div>
+
+<!-- notebook cell right-click menu -->
+<div class="ctx-menu" id="cellMenu">
+  <div class="ctx-item" onclick="cellMenuRun()"><span class="ctx-ico">&#9654;</span> Run cell</div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item" onclick="cellMenuInsert('before','code')"><span class="ctx-ico">&#8607;</span> Insert code above</div>
+  <div class="ctx-item" onclick="cellMenuInsert('after','code')"><span class="ctx-ico">&#8609;</span> Insert code below</div>
+  <div class="ctx-item" onclick="cellMenuInsert('after','text')"><span class="ctx-ico">&#182;</span> Insert text below</div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item" onclick="cellMenuMove(-1)"><span class="ctx-ico">&#8593;</span> Move up</div>
+  <div class="ctx-item" onclick="cellMenuMove(1)"><span class="ctx-ico">&#8595;</span> Move down</div>
+  <div class="ctx-item" onclick="cellMenuDuplicate()"><span class="ctx-ico">&#10697;</span> Duplicate</div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item danger" onclick="cellMenuDelete()"><span class="ctx-ico">&#128465;</span> Delete</div>
+</div>
+
+<!-- toast -->
+<div class="toast" id="toast"></div>
+
+<script src="api.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
