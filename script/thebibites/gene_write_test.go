@@ -62,7 +62,7 @@ func geneNumberSQL(t *testing.T, ls *LoadedSave, entry, gene string) float64 {
 }
 
 // TestGeneWritePersists: b.genes["x"] = v stages and persists through reparse; the
-// new value reads back via both b.gene("x") and b.genes["x"] (write-through).
+// new value reads back via both b.genes.get("x") and b.genes["x"] (write-through).
 func TestGeneWritePersists(t *testing.T) {
 	ls := loadFixture(t)
 	entry, gene := firstNumberGene(t, ls)
@@ -73,14 +73,13 @@ func TestGeneWritePersists(t *testing.T) {
 		t.Fatalf("SetKey: %v", err)
 	}
 
-	// Read-back via b.gene("x") and b.genes["x"] (in-memory write-through).
-	e := &Entity{ls: ls, kind: "bibite", entryName: entry}
-	pt, err := callMethod(t, e, "gene", starlark.String(gene))
+	// Read-back via b.genes.get("x") and b.genes["x"] (in-memory write-through).
+	pt, err := callMethod(t, c, "get", starlark.String(gene))
 	if err != nil {
-		t.Fatalf("gene(): %v", err)
+		t.Fatalf("genes.get(): %v", err)
 	}
 	if got := mustFloat(t, pt); got != want {
-		t.Errorf("b.gene(%q) = %v, want %v", gene, got, want)
+		t.Errorf("b.genes.get(%q) = %v, want %v", gene, got, want)
 	}
 	mv, found, err := c.Get(starlark.String(gene))
 	if err != nil || !found {

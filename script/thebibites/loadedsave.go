@@ -464,6 +464,72 @@ func (ls *LoadedSave) settingRow(table, ownerID, name string) (*tb.SettingValueR
 	return &backing[idx], true, nil
 }
 
+// settingRows enumerates every SettingValueRow for one (table, owner_id) scope,
+// in a deterministic order (sorted by setting name — settings have no stored
+// save order index per scope, and Go map iteration is unordered, so iteration
+// and len() must not depend on it). Pointers are into the backing slice, so a
+// later write-through is observed; ownership resolution (case-folded material
+// owner) mirrors settingRow's. A loud ambiguous-owner error propagates; an
+// absent scope returns (nil, nil).
+func (ls *LoadedSave) settingRows(table, ownerID string) ([]*tb.SettingValueRow, error) {
+	ls.settingsOnce.Do(ls.buildSettingsIndex)
+
+	tableIdx := ls.settingsIdx[table]
+	if tableIdx == nil {
+		return nil, nil
+	}
+
+	resolvedOwner := ownerID
+	if ownerID != simulationOwnerID && ownerID != independentOwnerID {
+		lq := strings.ToLower(ownerID)
+		if _, ok := tableIdx[ownerID]; !ok {
+			var ownerMatches []string
+			seenOwner := make(map[string]bool)
+			for k := range tableIdx {
+				if strings.ToLower(k) == lq && !seenOwner[k] {
+					seenOwner[k] = true
+					ownerMatches = append(ownerMatches, k)
+				}
+			}
+			switch len(ownerMatches) {
+			case 0:
+				return nil, nil
+			case 1:
+				resolvedOwner = ownerMatches[0]
+			default:
+				sort.Strings(ownerMatches)
+				keys := make([]string, len(ownerMatches))
+				for i, k := range ownerMatches {
+					keys[i] = fmt.Sprintf("%q", k)
+				}
+				return nil, fmt.Errorf("ambiguous owner name %q: matches canonical keys %s", ownerID, strings.Join(keys, ", "))
+			}
+		}
+	}
+
+	byName := tableIdx[resolvedOwner]
+	if byName == nil {
+		return nil, nil
+	}
+
+	names := make([]string, 0, len(byName))
+	for name := range byName {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	backing := ls.settingsBacking(table)
+	out := make([]*tb.SettingValueRow, 0, len(names))
+	for _, name := range names {
+		idx := byName[name]
+		if idx < 0 || idx >= len(backing) {
+			continue
+		}
+		out = append(out, &backing[idx])
+	}
+	return out, nil
+}
+
 func (ls *LoadedSave) buildSettingsIndex() {
 	ls.settingsIdx = map[string]map[string]map[string]int{
 		"settings_simulation_values":  indexSettings(ls.tables.SettingsSimulationValues),

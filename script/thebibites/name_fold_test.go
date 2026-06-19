@@ -15,9 +15,9 @@ import (
 // ---------------------------------------------------------------------------
 
 // TestGeneLookupCaseInsensitive verifies that GeneCollection.Get and
-// geneBuiltin both resolve the upper/lower-cased spelling of a canonical gene
-// name to the same value, and that a genuinely absent name still returns
-// found=false (Get) / None (builtin).
+// GeneCollection.get both resolve the upper/lower-cased spelling of a canonical
+// gene name to the same value, and that a genuinely absent name still returns
+// found=false (Get) / None (.get default).
 func TestGeneLookupCaseInsensitive(t *testing.T) {
 	ls := loadFixture(t)
 	entry, gene := firstNumberGene(t, ls)
@@ -56,17 +56,17 @@ func TestGeneLookupCaseInsensitive(t *testing.T) {
 		t.Errorf("Get(%q)=%v, Get(%q)=%v, want same value", gene, exact, lower, lowVal)
 	}
 
-	// geneBuiltin upper-cased.
+	// genes.get upper-cased.
 	e := &Entity{ls: ls, kind: "bibite", entryName: entry}
 	builtinUp := callGeneNoFatal(t, e, upper)
 	if builtinUp == starlark.None {
-		t.Errorf("gene(%q) upper = None, want non-None", upper)
+		t.Errorf("genes.get(%q) upper = None, want non-None", upper)
 	}
 	if builtinUp != exact {
-		t.Errorf("gene(%q)=%v, gene(%q)=%v, want same value", gene, exact, upper, builtinUp)
+		t.Errorf("genes.get(%q)=%v, Get(%q)=%v, want same value", upper, builtinUp, gene, exact)
 	}
 
-	// Absent gene: Get returns found=false, builtin returns None.
+	// Absent gene: Get returns found=false, genes.get returns None.
 	_, foundAbsent, err := c.Get(starlark.String("DefinitelyAbsent_M3"))
 	if err != nil {
 		t.Fatalf("Get(absent): unexpected error %v", err)
@@ -77,7 +77,7 @@ func TestGeneLookupCaseInsensitive(t *testing.T) {
 
 	absentBuiltin := callGeneNoFatal(t, e, "DefinitelyAbsent_M3")
 	if absentBuiltin != starlark.None {
-		t.Errorf("gene(absent)=%v, want None", absentBuiltin)
+		t.Errorf("genes.get(absent)=%v, want None", absentBuiltin)
 	}
 }
 
@@ -129,16 +129,20 @@ func TestGeneLookupCaseCollisionLoud(t *testing.T) {
 		t.Errorf("SetKey(%q) with collision: want error, got nil", query)
 	}
 
-	// geneBuiltin with fold query must error.
+	// genes.get with fold query must error (collision is loud, never default).
 	e := &Entity{ls: ls, kind: "bibite", entryName: entry}
-	attr, attrErr := e.Attr("gene")
+	genesAttr, attrErr := e.Attr("genes")
 	if attrErr != nil {
-		t.Fatalf("Attr(gene): %v", attrErr)
+		t.Fatalf("Attr(genes): %v", attrErr)
 	}
-	fn := attr.(*starlark.Builtin)
+	getAttr, getErr := genesAttr.(*GeneCollection).Attr("get")
+	if getErr != nil {
+		t.Fatalf("genes.Attr(get): %v", getErr)
+	}
+	fn := getAttr.(*starlark.Builtin)
 	_, builtinErr := fn.CallInternal(&starlark.Thread{}, starlark.Tuple{starlark.String(query)}, nil)
 	if builtinErr == nil {
-		t.Errorf("geneBuiltin(%q) with collision: want error, got nil", query)
+		t.Errorf("genes.get(%q) with collision: want error, got nil", query)
 	}
 
 	// Exact-case query for canon1 still resolves correctly (rule 3).
@@ -166,18 +170,23 @@ func TestGeneLookupCaseCollisionLoud(t *testing.T) {
 	}
 }
 
-// callGeneNoFatal calls e.gene(name) and returns the result; fatals on a
+// callGeneNoFatal calls b.genes.get(name) — the tolerant gene read that
+// replaced the removed gene() point read — and returns the result; fatals on a
 // genuine error (not on None, which is the expected miss return).
 func callGeneNoFatal(t *testing.T, e *Entity, name string) starlark.Value {
 	t.Helper()
-	attr, err := e.Attr("gene")
+	genesAttr, err := e.Attr("genes")
 	if err != nil {
-		t.Fatalf("Attr(gene): %v", err)
+		t.Fatalf("Attr(genes): %v", err)
 	}
-	fn := attr.(*starlark.Builtin)
+	getAttr, err := genesAttr.(*GeneCollection).Attr("get")
+	if err != nil {
+		t.Fatalf("genes.Attr(get): %v", err)
+	}
+	fn := getAttr.(*starlark.Builtin)
 	v, err := fn.CallInternal(&starlark.Thread{}, starlark.Tuple{starlark.String(name)}, nil)
 	if err != nil {
-		t.Fatalf("gene(%q): %v", name, err)
+		t.Fatalf("genes.get(%q): %v", name, err)
 	}
 	return v
 }

@@ -30,12 +30,10 @@ func (e *Entity) Freeze()               {} // immutable view; nothing to freeze
 func (e *Entity) Truth() starlark.Bool  { return starlark.True }
 func (e *Entity) Hash() (uint32, error) { return starlark.String(e.kind + e.entryName).Hash() }
 
-// Attr resolves a friendly attribute or the gene() method. Unknown names return
-// (nil, nil) so Starlark reports a clean "<kind> has no .<name> attribute".
+// Attr resolves a friendly attribute or the genes collection. Unknown names
+// return (nil, nil) so Starlark reports a clean "<kind> has no .<name> attribute".
 func (e *Entity) Attr(name string) (starlark.Value, error) {
 	switch name {
-	case "gene":
-		return starlark.NewBuiltin("gene", e.geneBuiltin), nil
 	case "genes":
 		return &GeneCollection{ls: e.ls, kind: e.kind, entryName: e.entryName}, nil
 	case "delete":
@@ -61,15 +59,15 @@ func (e *Entity) Attr(name string) (starlark.Value, error) {
 	}
 }
 
-// AttrNames lists every readable attribute plus gene(), sorted for deterministic
-// dir() output.
+// AttrNames lists every readable attribute plus the genes collection, sorted for
+// deterministic dir() output.
 func (e *Entity) AttrNames() []string {
 	attrs := attrRegistry()[e.kind]
 	names := make([]string, 0, len(attrs)+1)
 	for name := range attrs {
 		names = append(names, name)
 	}
-	names = append(names, "gene", "genes", "delete")
+	names = append(names, "genes", "delete")
 	for sub := range subCollectionRegistry()[e.kind] {
 		names = append(names, sub)
 	}
@@ -87,7 +85,7 @@ func (e *Entity) AttrNames() []string {
 // (so a later plain read observes it), and records a DuckDB mirror intent. Scalar
 // set only — gene writes and structural mutations are later tickets.
 func (e *Entity) SetField(name string, val starlark.Value) error {
-	if name == "gene" || name == "genes" || name == "delete" {
+	if name == "genes" || name == "delete" {
 		return fmt.Errorf("%s.%s is read-only", e.kind, name)
 	}
 	if _, ok := subCollectionRegistry()[e.kind][name]; ok {
@@ -149,30 +147,6 @@ func (e *Entity) SourceLoadedSave() *LoadedSave { return e.ls }
 // transfer binding grafts. It is the single-Entity counterpart of
 // EntityCollection.EntryNames.
 func (e *Entity) EntryName() string { return e.entryName }
-
-// geneBuiltin implements e.gene("Name") -> typed gene value. Returns None if
-// absent (silent miss — this asymmetry is deliberate; b.genes["Name"] raises
-// a KeyError on miss, while b.gene("Name") returns None). The lookup is
-// case-insensitive; errors on a case-collision (≥2 canonical names fold equal).
-func (e *Entity) geneBuiltin(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	var name string
-	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "name", &name); err != nil {
-		return nil, err
-	}
-	genes := e.ls.genesFor(e.kind, e.entryName)
-	if genes == nil {
-		return starlark.None, nil
-	}
-	idx, found, err := foldLookup(genes.byName, name)
-	if err != nil {
-		// A case-collision is a real surprise, not an absent gene — surface it.
-		return nil, err
-	}
-	if !found {
-		return starlark.None, nil
-	}
-	return geneValueToStarlark(genes.backing[idx]), nil
-}
 
 // deleteBuiltin implements b.delete(prune=False): stage a whole-entity delete.
 // This is a structural op — it is staged on the session for the eventual commit

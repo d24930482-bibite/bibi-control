@@ -10,8 +10,7 @@ import (
 )
 
 // Gene is a read-only Starlark view of one gene: its name, typed value, and
-// scalar type. Yielded by GeneCollection and addressable via b.gene(name) for a
-// single lookup.
+// scalar type. Yielded by GeneCollection iteration (`for g in b.genes`).
 type Gene struct {
 	row tb.GeneRow
 }
@@ -46,7 +45,9 @@ func (g *Gene) AttrNames() []string { return []string{"name", "type", "value"} }
 
 // GeneCollection is a lazy sequence over one entity's genes, in save order.
 // Exposed as b.genes; iterate with `for g in b.genes`, read one with
-// b.genes["Name"] (Mapping), write one with b.genes["Name"] = v (HasSetKey).
+// b.genes["Name"] (Mapping, loud KeyError on miss) or the tolerant
+// b.genes.get("Name", default) (HasAttrs), write one with b.genes["Name"] = v
+// (HasSetKey).
 type GeneCollection struct {
 	ls        *LoadedSave
 	kind      string
@@ -59,6 +60,7 @@ var (
 	_ starlark.Sequence  = (*GeneCollection)(nil)
 	_ starlark.Mapping   = (*GeneCollection)(nil)
 	_ starlark.HasSetKey = (*GeneCollection)(nil)
+	_ starlark.HasAttrs  = (*GeneCollection)(nil)
 )
 
 func (c *GeneCollection) String() string       { return "genes" }
@@ -85,9 +87,9 @@ func (c *GeneCollection) rows() []tb.GeneRow {
 // The lookup is case-insensitive: "diet" finds the gene "Diet". An exact match
 // wins over a fold match (so "m" and "M" coexisting is still addressable by
 // exact name). A missing gene reports found=false (Starlark raises a KeyError),
-// matching mapping subscript semantics; b.gene("Name") is the None-returning
-// point read. A case-collision (≥2 canonical names fold to the same lowercase
-// as the query) returns a loud error naming the colliding keys.
+// matching mapping subscript semantics; b.genes.get("Name") is the tolerant,
+// None-returning read. A case-collision (≥2 canonical names fold to the same
+// lowercase as the query) returns a loud error naming the colliding keys.
 func (c *GeneCollection) Get(k starlark.Value) (starlark.Value, bool, error) {
 	name, ok := starlark.AsString(k)
 	if !ok {
@@ -105,6 +107,38 @@ func (c *GeneCollection) Get(k starlark.Value) (starlark.Value, bool, error) {
 		return nil, false, nil
 	}
 	return geneValueToStarlark(set.backing[idx]), true, nil
+}
+
+// Attr exposes the tolerant .get reader; every other name returns (nil, nil) so
+// Starlark reports a clean "gene_collection has no .<name> attribute".
+func (c *GeneCollection) Attr(name string) (starlark.Value, error) {
+	if name == "get" {
+		return starlark.NewBuiltin("get", c.getBuiltin), nil
+	}
+	return nil, nil
+}
+
+func (c *GeneCollection) AttrNames() []string { return []string{"get"} }
+
+// getBuiltin implements b.genes.get(key, default=None): the tolerant counterpart
+// to the loud b.genes["key"] subscript. It returns the gene value on a hit and
+// `default` (None unless supplied) on a genuine miss, matching Starlark dict.get
+// exactly. A case-collision is NOT a miss — it propagates the loud error from
+// Get (foldLookup), so an ambiguous name can never silently resolve to default.
+func (c *GeneCollection) getBuiltin(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var key starlark.Value
+	dflt := starlark.Value(starlark.None)
+	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "key", &key, "default?", &dflt); err != nil {
+		return nil, err
+	}
+	v, found, err := c.Get(key)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return dflt, nil
+	}
+	return v, nil
 }
 
 // SetKey implements b.genes["Name"] = v: stage a guarded gene-value write. The
