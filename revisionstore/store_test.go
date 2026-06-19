@@ -558,6 +558,174 @@ func TestStoreWorkspaceWorldNodeCRUD(t *testing.T) {
 	}
 }
 
+func TestStoreRegistryMutators(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	store, err := Open(filepath.Join(dir, "metadata.sqlite"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	blobs, err := blobstore.NewFSStore(filepath.Join(dir, "blobs"), blobstore.WithInlineThreshold(0))
+	if err != nil {
+		t.Fatalf("NewFSStore() error = %v", err)
+	}
+	defer blobs.Close()
+
+	// 1. Rename round-trip.
+	ws, err := store.CreateWorkspace(ctx, WorkspaceInput{Owner: "owner", Name: "ws"})
+	if err != nil {
+		t.Fatalf("CreateWorkspace() error = %v", err)
+	}
+	if err := store.RenameWorkspace(ctx, ws.ID, "renamed"); err != nil {
+		t.Fatalf("RenameWorkspace() error = %v", err)
+	}
+	gotWS, err := store.GetWorkspace(ctx, ws.ID)
+	if err != nil {
+		t.Fatalf("GetWorkspace() after rename error = %v", err)
+	}
+	if gotWS.Name != "renamed" || gotWS.ID != ws.ID || gotWS.Owner != ws.Owner {
+		t.Fatalf("after rename GetWorkspace() = %#v, want name=renamed id/owner unchanged", gotWS)
+	}
+
+	// 2. Rename unknown workspace -> IsNotFound.
+	if err := store.RenameWorkspace(ctx, uuid.NewString(), "x"); !IsNotFound(err) {
+		t.Fatalf("RenameWorkspace(unknown) error = %v, want IsNotFound", err)
+	}
+
+	// 3. DeleteNode round-trip (and already-gone).
+	node, err := store.CreateNode(ctx, NodeInput{WorkspaceID: ws.ID, NodeID: "node-del"})
+	if err != nil {
+		t.Fatalf("CreateNode() error = %v", err)
+	}
+	if err := store.DeleteNode(ctx, node.ID); err != nil {
+		t.Fatalf("DeleteNode() error = %v", err)
+	}
+	if _, err := store.GetNode(ctx, node.ID); !IsNotFound(err) {
+		t.Fatalf("GetNode() after delete error = %v, want IsNotFound", err)
+	}
+	nodes, err := store.ListNodes(ctx, ws.ID)
+	if err != nil {
+		t.Fatalf("ListNodes() error = %v", err)
+	}
+	if len(nodes) != 0 {
+		t.Fatalf("ListNodes() after node delete len = %d, want 0", len(nodes))
+	}
+	if err := store.DeleteNode(ctx, node.ID); !IsNotFound(err) {
+		t.Fatalf("DeleteNode(already gone) error = %v, want IsNotFound", err)
+	}
+
+	// 4. DeleteWorkspace — load-bearing case: workspace OWNS a world with a real
+	// committed head plus a parent->child revision pair (exercising parent_id)
+	// and a node bound to the world.
+	world, err := store.CreateWorld(ctx, WorldInput{WorkspaceID: ws.ID, Name: "world"})
+	if err != nil {
+		t.Fatalf("CreateWorld() error = %v", err)
+	}
+	run, err := store.RecordScriptRun(ctx, ScriptRunInput{
+		ScriptSHA256: strings.Repeat("e", blobstore.SHA256HexLength),
+		Status:       "succeeded",
+	})
+	if err != nil {
+		t.Fatalf("RecordScriptRun() error = %v", err)
+	}
+
+	firstRef, err := blobs.Put(ctx, []byte("first save"))
+	if err != nil {
+		t.Fatalf("Put(first) error = %v", err)
+	}
+	firstSim := 10.0
+	first, err := store.RecordRevisionAdvancingHead(ctx, world.ID, &firstSim, RevisionInput{
+		BlobRef:     firstRef,
+		ScriptRunID: run.ID,
+	})
+	if err != nil {
+		t.Fatalf("RecordRevisionAdvancingHead(first) error = %v", err)
+	}
+
+	secondRef, err := blobs.Put(ctx, []byte("second save"))
+	if err != nil {
+		t.Fatalf("Put(second) error = %v", err)
+	}
+	secondSim := 20.0
+	if _, err := store.RecordRevisionAdvancingHead(ctx, world.ID, &secondSim, RevisionInput{
+		ParentID:    &first.ID,
+		BlobRef:     secondRef,
+		ScriptRunID: run.ID,
+	}); err != nil {
+		t.Fatalf("RecordRevisionAdvancingHead(second) error = %v", err)
+	}
+
+	boundNode, err := store.CreateNode(ctx, NodeInput{WorkspaceID: ws.ID, NodeID: "node-bound"})
+	if err != nil {
+		t.Fatalf("CreateNode(bound) error = %v", err)
+	}
+	if err := store.BindNode(ctx, boundNode.ID, world.ID); err != nil {
+		t.Fatalf("BindNode() error = %v", err)
+	}
+
+	scriptRunsBefore := countRows(t, ctx, store, "SELECT count(*) FROM script_runs")
+	if scriptRunsBefore == 0 {
+		t.Fatalf("expected at least one script_run before delete")
+	}
+
+	if err := store.DeleteWorkspace(ctx, ws.ID); err != nil {
+		t.Fatalf("DeleteWorkspace() error = %v", err)
+	}
+
+	if _, err := store.GetWorkspace(ctx, ws.ID); !IsNotFound(err) {
+		t.Fatalf("GetWorkspace() after delete error = %v, want IsNotFound", err)
+	}
+	worlds, err := store.ListWorlds(ctx, ws.ID)
+	if err != nil {
+		t.Fatalf("ListWorlds() after delete error = %v", err)
+	}
+	if len(worlds) != 0 {
+		t.Fatalf("ListWorlds() after delete len = %d, want 0", len(worlds))
+	}
+	nodesAfter, err := store.ListNodes(ctx, ws.ID)
+	if err != nil {
+		t.Fatalf("ListNodes() after delete error = %v", err)
+	}
+	if len(nodesAfter) != 0 {
+		t.Fatalf("ListNodes() after delete len = %d, want 0", len(nodesAfter))
+	}
+	if got := countRows(t, ctx, store, "SELECT count(*) FROM save_revisions WHERE world_id = ?", world.ID); got != 0 {
+		t.Fatalf("save_revisions for world after delete = %d, want 0", got)
+	}
+	if got := countRows(t, ctx, store, "SELECT count(*) FROM script_runs"); got != scriptRunsBefore {
+		t.Fatalf("script_runs after delete = %d, want %d (shared rows must survive)", got, scriptRunsBefore)
+	}
+
+	// 5. DeleteWorkspace unknown -> IsNotFound.
+	if err := store.DeleteWorkspace(ctx, uuid.NewString()); !IsNotFound(err) {
+		t.Fatalf("DeleteWorkspace(unknown) error = %v, want IsNotFound", err)
+	}
+
+	// 6. DeleteWorkspace on an empty workspace (no dependents) still succeeds.
+	emptyWS, err := store.CreateWorkspace(ctx, WorkspaceInput{Owner: "owner", Name: "empty"})
+	if err != nil {
+		t.Fatalf("CreateWorkspace(empty) error = %v", err)
+	}
+	if err := store.DeleteWorkspace(ctx, emptyWS.ID); err != nil {
+		t.Fatalf("DeleteWorkspace(empty) error = %v", err)
+	}
+	if _, err := store.GetWorkspace(ctx, emptyWS.ID); !IsNotFound(err) {
+		t.Fatalf("GetWorkspace(empty) after delete error = %v, want IsNotFound", err)
+	}
+}
+
+func countRows(t *testing.T, ctx context.Context, store *Store, query string, args ...any) int64 {
+	t.Helper()
+	var n int64
+	if err := store.db.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
+		t.Fatalf("count query %q error = %v", query, err)
+	}
+	return n
+}
+
 func TestStoreRecordRevisionAdvancingHead(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
