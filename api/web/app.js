@@ -24,6 +24,7 @@ function selectWs(el) {
   el.classList.add('active');
   document.getElementById('wbName').textContent = el.dataset.ws;
   selectedWsId = el.dataset.id || null;
+  if (selectedWsId) loadWorlds(selectedWsId);
 }
 
 /* ---------- column A: render workspace list ----------
@@ -43,6 +44,169 @@ function renderWorkspaces(rows) {
     div.innerHTML = '<span class="ws-caret">&#9656;</span><span class="ws-name">' +
       escapeHtml(ws.name) + '</span>';
     list.appendChild(div);
+  });
+}
+
+/* ---------- column B: worlds render + load ---------- */
+
+/**
+ * renderWorlds(rows) — rebuild the .worlds container from the API array.
+ * Mirrors renderWorkspaces; world rows use id="world-<id>" and
+ * onclick="focusWorld('<id>')" so the cross-highlight stays intact.
+ * @param {Array<{id: string, name: string, head_revision: number|null, live_node: string|null}>} rows
+ */
+function renderWorlds(rows) {
+  const container = document.querySelector('.worlds');
+  container.innerHTML = '';
+  (rows || []).forEach(function(w) {
+    const div = document.createElement('div');
+    div.className = 'world';
+    div.id = 'world-' + w.id;
+    div.setAttribute('onclick', 'focusWorld(' + JSON.stringify(w.id) + ')');
+
+    const nodeCls = w.live_node ? 'w-node live' : 'w-node';
+    const nodeText = w.live_node ? ('&#9679; ' + escapeHtml(w.live_node)) : '&#9675; &#8212;';
+    const revText  = w.head_revision != null ? 'head rev' + w.head_revision : '&#8212;';
+
+    div.innerHTML =
+      '<span class="w-bullet">&#8226;</span>' +
+      '<span class="w-name">' + escapeHtml(w.name) + '</span>' +
+      '<span class="' + nodeCls + '" title="' + (w.live_node ? 'live node bound' : 'no live node') + '">' + nodeText + '</span>' +
+      '<span class="w-rev">' + revText + '</span>';
+
+    container.appendChild(div);
+  });
+}
+
+/**
+ * loadWorlds(wsId) — fetch worlds for the workspace and render col B.
+ * On success, auto-focuses the first world and loads its history.
+ * @param {string} wsId
+ */
+function loadWorlds(wsId) {
+  listWorlds(wsId).then(function(rows) {
+    rows = rows || [];
+    renderWorlds(rows);
+    if (rows.length > 0) {
+      focusWorld(rows[0].id);
+      loadHistory(wsId, rows[0].id, rows[0].name);
+    }
+  }).catch(function(err) { toast(err.message); });
+}
+
+/* ---------- column B: history render + load ---------- */
+
+/**
+ * renderHistory(wid, name, revs) — rebuild the .history block from the API array.
+ * API order is oldest->newest; render newest->oldest (head on the left).
+ * @param {string} wid
+ * @param {string} name  World name for the .h-title.
+ * @param {Array<{id: number, parent_id: number|null, is_head: boolean}>} revs
+ */
+function renderHistory(wid, name, revs) {
+  const history = document.querySelector('.history');
+  if (!history) return;
+
+  const titleEl = history.querySelector('.h-title');
+  if (titleEl) titleEl.innerHTML = 'History &#183; <b>' + escapeHtml(name) + '</b>';
+
+  const wrap = history.querySelector('.rev-line-wrap');
+  if (!wrap) return;
+
+  // Rebuild the rev-line, preserving .h-actions
+  const existingActions = wrap.querySelector('.h-actions');
+  const line = document.createElement('div');
+  line.className = 'rev-line';
+
+  // newest->oldest
+  const ordered = (revs || []).slice().reverse();
+  ordered.forEach(function(rev, i) {
+    const span = document.createElement('span');
+    span.className = rev.is_head ? 'rev head' : 'rev';
+
+    const dotHtml = '<span class="rev-dot">' + (rev.is_head ? '&#9679;' : '&#9675;') + '</span>';
+    const tagHtml = !rev.parent_id ? ' <span class="rev-tag">(import)</span>' : '';
+    span.innerHTML = dotHtml + 'rev' + rev.id + tagHtml;
+
+    line.appendChild(span);
+
+    if (i < ordered.length - 1) {
+      const link = document.createElement('span');
+      link.className = 'rev-link';
+      link.textContent = '──';
+      line.appendChild(link);
+    }
+  });
+
+  wrap.innerHTML = '';
+  wrap.appendChild(line);
+  if (existingActions) wrap.appendChild(existingActions);
+}
+
+/**
+ * loadHistory(wsId, wid, name) — fetch revision history for one world and render it.
+ * @param {string} wsId
+ * @param {string} wid
+ * @param {string} name
+ */
+function loadHistory(wsId, wid, name) {
+  worldHistory(wsId, wid).then(function(revs) {
+    renderHistory(wid, name, revs);
+  }).catch(function(err) { toast(err.message); });
+}
+
+/* ---------- column B: add world ---------- */
+
+/**
+ * submitAddWorld() — real handler for the Add World modal's Import button.
+ * Reads radio state, uploads (or uses server path), calls workspace.add_world via /run,
+ * and refreshes col B on success.
+ */
+function submitAddWorld() {
+  if (!selectedWsId) { toast('select a workspace first'); return; }
+
+  var name = (document.getElementById('aw-name').value || '').trim();
+  if (!name) { toast('name is required'); return; }
+
+  var useUpload = document.getElementById('srcUpload').checked;
+
+  if (useUpload) {
+    var fileInput = document.getElementById('aw-file');
+    var file = fileInput && fileInput.files && fileInput.files[0];
+    if (!file) { toast('choose a file to upload'); return; }
+
+    uploadSave(selectedWsId, file).then(function(result) {
+      return _runAddWorld(result.path, name);
+    }).catch(function(err) { toast(err.message); });
+  } else {
+    var serverPath = (document.getElementById('aw-server-path').value || '').trim();
+    if (!serverPath) { toast('server path is required'); return; }
+    _runAddWorld(serverPath, name).catch(function(err) { toast(err.message); });
+  }
+}
+
+/**
+ * _runAddWorld(path, name) — internal: call workspace.add_world via /run, handle result.
+ * Returns a promise so the caller can catch network errors.
+ */
+function _runAddWorld(path, name) {
+  var program = 'workspace.add_world(path=' + JSON.stringify(path) + ', name=' + JSON.stringify(name) + ')';
+  return runProgram(selectedWsId, program).then(function(res) {
+    if (res.Diagnostics && res.Diagnostics.length) {
+      toast(res.Diagnostics[0].Message);
+      return; // leave modal open
+    }
+    closeModal('m-add-world');
+    // clear inputs for next open
+    document.getElementById('aw-name').value = '';
+    document.getElementById('aw-server-path').value = '';
+    var fi = document.getElementById('aw-file');
+    if (fi) fi.value = '';
+    // reset to upload radio
+    document.getElementById('srcUpload').checked = true;
+    toggleAddSrc();
+    toast('added "' + name + '"');
+    loadWorlds(selectedWsId);
   });
 }
 
@@ -76,6 +240,13 @@ function focusWorld(world) {
   if (row) {
     row.classList.add('highlight');
     row.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    // Refresh history strip when a real workspace is active (U11).
+    // loadHistory is defined above; selectedWsId is the col-A seam variable.
+    if (selectedWsId) {
+      var nameEl = row.querySelector('.w-name');
+      var worldName = nameEl ? nameEl.textContent : String(world);
+      loadHistory(selectedWsId, world, worldName);
+    }
   }
   document.querySelectorAll('.node[data-world="' + world + '"]')
     .forEach(function(n) { n.classList.add('bound-flash'); });
@@ -452,7 +623,7 @@ function toast(msg) {
    Default cadence 10s. On reaching 0 we "poll": bump the ALIVE node's
    TPS / real / sim_time / autosave to new mock values, then reset. */
 let cadence = 10;        // seconds; or 0 for manual
-let remaining = 7;       // start mid-countdown like the wireframe (↻ 0:07)
+let remaining = 7;       // start mid-countdown like the wireframe (&#8635; 0:07)
 let simTime = 1240512;
 let autosaveSecs = 42;
 
@@ -510,9 +681,9 @@ setInterval(tick, 1000);
 renderCountdown();
 
 /* ---------- fake cell run ----------
-   ▶ run -> show "running… ⠿" briefly -> flip to "✓ <time>".
+   run -> show "running... spinner" briefly -> flip to "check <time>".
    For query cell 2 the table/output is revealed on completion. */
-const SPINNER = '<span class="spinner">⠿</span>';
+const SPINNER = '<span class="spinner">⠇</span>';
 
 function runCell(n) {
   const cell = document.getElementById('cell-' + n);

@@ -97,3 +97,61 @@ async function renameWorkspace(id, name) {
 async function deleteWorkspace(id) {
   return req('DELETE', '/api/workspaces/' + id);
 }
+
+/* ---------- worlds ---------- */
+
+/**
+ * GET /api/workspaces/{id}/worlds
+ * Returns all worlds in the workspace with head-revision, sim_time, and live-node indicator.
+ * @param {string} wsId  Workspace id.
+ * @returns {Promise<Array<{id: string, name: string, head_revision: number|null, sim_time: number|null, live_node: string|null}>>}
+ */
+async function listWorlds(wsId) {
+  return req('GET', '/api/workspaces/' + wsId + '/worlds');
+}
+
+/**
+ * GET /api/workspaces/{id}/worlds/{wid}/history
+ * Returns the revision lineage for one world, ordered oldest→newest.
+ * @param {string} wsId  Workspace id.
+ * @param {string} wid   World id.
+ * @returns {Promise<Array<{id: number, parent_id: number|null, created_at: string, source_path: string, is_head: boolean}>>}
+ */
+async function worldHistory(wsId, wid) {
+  return req('GET', '/api/workspaces/' + wsId + '/worlds/' + wid + '/history');
+}
+
+/**
+ * POST /api/workspaces/{id}/run
+ * Runs a Starlark program against the workspace. HTTP 200 even on program failure;
+ * check Diagnostics for errors.
+ * @param {string} wsId     Workspace id.
+ * @param {string} program  Starlark source.
+ * @returns {Promise<{Output: string, Diagnostics: Array<{Severity: string, Code: string, Message: string, Detail: string, Filename: string, Line: number, Column: number}>, StagedOps: number, RevisionRef: string, DryRun: boolean}>}
+ */
+async function runProgram(wsId, program) {
+  return req('POST', '/api/workspaces/' + wsId + '/run', { program });
+}
+
+/**
+ * POST /api/workspaces/{id}/upload
+ * Uploads a save file (.zip) via multipart/form-data. Uses FormData/fetch directly
+ * (bypassing req()) so the browser sets the correct multipart boundary.
+ * @param {string} wsId  Workspace id.
+ * @param {File}   file  The file object to upload (the "file" form part).
+ * @returns {Promise<{path: string}>}  Absolute server path of the uploaded file.
+ */
+async function uploadSave(wsId, file) {
+  const fd = new FormData();
+  fd.append('file', file);
+  const res = await fetch('/api/workspaces/' + wsId + '/upload', {
+    method: 'POST',
+    body: fd
+    // Do NOT set Content-Type: the browser must set it with the multipart boundary.
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error((data && data.error) ? data.error : res.statusText);
+  }
+  return data;
+}

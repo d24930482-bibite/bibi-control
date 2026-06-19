@@ -120,19 +120,9 @@
       </div>
     </div>
 
-    <!-- WORLDS — w-node shows the live-binding state (one live node per world) -->
+    <!-- WORLDS — populated by renderWorlds() in app.js on workspace selection -->
     <div class="section-head"><span class="sh-title">Worlds</span></div>
     <div class="worlds">
-      <div class="world" id="world-alpha" onclick="focusWorld('alpha')">
-        <span class="w-bullet">•</span><span class="w-name">alpha</span>
-        <span class="w-node live" title="live node bound">● node-1</span>
-        <span class="w-rev">head rev3</span>
-      </div>
-      <div class="world" id="world-beta" onclick="focusWorld('beta')">
-        <span class="w-bullet">•</span><span class="w-name">beta</span>
-        <span class="w-node" title="stale node rows, no live handle">○ node-2</span>
-        <span class="w-rev">head rev1</span>
-      </div>
     </div>
     <div class="add-row">
       <button class="btn" onclick="openModal('m-add-world')">+ add / upload</button>
@@ -337,22 +327,16 @@ then start a node. Notes:
 
     <!-- HISTORY strip -->
     <div class="history">
-      <div class="h-title">History · <b>alpha</b></div>
+      <div class="h-title">History · <b>—</b></div>
       <div class="rev-line-wrap">
         <div class="rev-line">
-          <span class="rev head"><span class="rev-dot">●</span>rev3</span>
-          <span class="rev-link">──</span>
-          <span class="rev"><span class="rev-dot">○</span>rev2</span>
-          <span class="rev-link">──</span>
-          <span class="rev"><span class="rev-dot">○</span>rev1 <span class="rev-tag">(import)</span></span>
         </div>
         <div class="h-actions">
-          <button class="btn btn-sm" onclick="toast('diff rev2..rev3 (mock)')">diff</button>
-          <button class="btn btn-sm" onclick="toast('open rev3 (mock)')">open</button>
+          <button class="btn btn-sm" onclick="toast('diff (mock)')">diff</button>
+          <button class="btn btn-sm" onclick="toast('open (mock)')">open</button>
         </div>
       </div>
       <div class="h-caption">
-        <q>set energy</q> <q>transfer in</q> &nbsp;by you · 2m ago
       </div>
     </div>
 
@@ -447,24 +431,23 @@ then start a node. Notes:
         <label for="srcUpload">Upload save (.zip)</label>
       </div>
       <div class="file-pick" id="uploadPick">
-        <button class="btn btn-sm" onclick="toast('file chooser (mock)')">choose file…</button>
-        <span>dasdasd.zip</span>
+        <input type="file" id="aw-file" accept=".zip" class="input">
       </div>
       <div class="radio-row">
         <input type="radio" name="addsrc" id="srcServer" onchange="toggleAddSrc()">
         <label for="srcServer">Server path</label>
       </div>
       <div class="field" id="serverPick" style="display:none; padding-left:24px;">
-        <input class="input mono" placeholder="/srv/bibites/saves/world.zip">
+        <input class="input mono" id="aw-server-path" placeholder="/srv/bibites/saves/world.zip">
       </div>
       <div class="field">
         <label>Name</label>
-        <input class="input" placeholder="alpha">
+        <input class="input" id="aw-name" placeholder="alpha">
       </div>
     </div>
     <div class="modal-foot">
       <button class="btn" onclick="closeModal('m-add-world')">Cancel</button>
-      <button class="btn btn-accent" onclick="closeModal('m-add-world'); toast('add_world(...) (mock)')">Import</button>
+      <button class="btn btn-accent" onclick="submitAddWorld()">Import</button>
     </div>
   </div>
 </div>
