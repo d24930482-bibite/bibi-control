@@ -14,8 +14,14 @@
    U14+) extend this file by adding new async functions following the same
    pattern. Do NOT add column-A-only assumptions to req().
 
-   Backend shapes (from api/handlers_workspaces.go):
+   Backend shapes:
      workspaceJSON  { id: string, name: string, owner: string }
+     nodeInfoResponse { id, world_id, run_id, liveness, status,
+                        tps?, real_tps?, paused?, sim_time?, last_autosave?,
+                        exit_code? }  (api/handlers_nodes.go)
+     logsResponse   { lines: [{time, level, text}] }  (handlers_nodes.go)
+     script.Result  { Output, Diagnostics, StagedOps, RevisionRef, DryRun }
+                    (capitalized — Go default JSON, no json tags)
      error body     { error: string }
    ============================================================================ */
 
@@ -40,7 +46,9 @@ async function req(method, path, body) {
   if (res.status === 204) return undefined;
   const data = await res.json();
   if (!res.ok) {
-    throw new Error((data && data.error) ? data.error : res.statusText);
+    const err = new Error((data && data.error) ? data.error : res.statusText);
+    err.status = res.status;
+    throw err;
   }
   return data;
 }
@@ -131,6 +139,41 @@ async function worldHistory(wsId, wid) {
  */
 async function runProgram(wsId, program) {
   return req('POST', '/api/workspaces/' + wsId + '/run', { program });
+}
+
+/* ---------- nodes ---------- */
+
+/**
+ * GET /api/workspaces/{id}/nodes/info
+ * Returns an array of node info objects. Telemetry fields (tps, real_tps,
+ * paused, sim_time, last_autosave) are present only when liveness=="alive" and
+ * the INFO round-trip succeeded. exit_code present only when liveness=="crashed".
+ * Backend shape (handlers_nodes.go: nodeInfoResponse):
+ *   { id: string, world_id: string, run_id: string,
+ *     liveness: "alive"|"crashed"|"detached", status: string,
+ *     tps?: number, real_tps?: number, paused?: boolean, sim_time?: number,
+ *     last_autosave?: object, exit_code?: number }
+ * @param {string} wsId  Workspace id.
+ * @returns {Promise<Array<object>>}
+ */
+async function nodesInfo(wsId) {
+  return req('GET', '/api/workspaces/' + wsId + '/nodes/info');
+}
+
+/**
+ * GET /api/workspaces/{id}/nodes/{nid}/logs[?follow=1]
+ * Returns a snapshot of the node's captured output ring buffer.
+ * 404 means no buffer exists for that node id (never started / pruned).
+ * 200 with lines:[] means the node started but produced no output yet.
+ * Backend shape (handlers_nodes.go: logsResponse / logLineJSON):
+ *   { lines: Array<{ time: string, level: "info"|"error", text: string }> }
+ * @param {string}  wsId    Workspace id.
+ * @param {string}  nid     Node id.
+ * @param {boolean} follow  Append ?follow=1 (accepted by backend; currently no-op snapshot).
+ * @returns {Promise<{lines: Array<{time: string, level: string, text: string}>}>}
+ */
+async function nodeLogs(wsId, nid, follow) {
+  return req('GET', '/api/workspaces/' + wsId + '/nodes/' + nid + '/logs' + (follow ? '?follow=1' : ''));
 }
 
 /* ---------- notebooks ---------- */
