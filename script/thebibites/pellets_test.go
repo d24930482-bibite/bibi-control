@@ -2,6 +2,7 @@ package thebibites
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"go.starlark.net/starlark"
@@ -355,7 +356,8 @@ func TestPelletCloneIntegralScalarStagesFloat(t *testing.T) {
 }
 
 // TestPelletCloneAppendNotMirrored: a clone-append is structural — staged but not
-// mirrored, so it is invisible to in-run reads/queries until commit.
+// mirrored. An in-run query after it would observe the pre-append set, so the read
+// now fails LOUDLY (M7 bullet 4) instead of silently returning the stale count.
 func TestPelletCloneAppendNotMirrored(t *testing.T) {
 	ls := loadFixture(t)
 	if len(ls.tables.Pellets) == 0 {
@@ -370,20 +372,11 @@ func TestPelletCloneAppendNotMirrored(t *testing.T) {
 	if len(ls.tables.Pellets) != before {
 		t.Errorf("tables.Pellets grew to %d, want %d (append is structural)", len(ls.tables.Pellets), before)
 	}
-	rows, err := ls.query("SELECT count(*) FROM pellets WHERE save_id = ?", ls.saveID)
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	defer rows.Close()
-	if !rows.Next() {
-		t.Fatal("no count row")
-	}
-	var n int
-	if err := rows.Scan(&n); err != nil {
-		t.Fatalf("scan: %v", err)
-	}
-	if n != before {
-		t.Errorf("in-run pellet count = %d, want %d (append must not be mirrored)", n, before)
+	// An in-run read after the staged append must refuse loudly, not return stale data.
+	if _, err := ls.query("SELECT count(*) FROM pellets WHERE save_id = ?", ls.saveID); err == nil {
+		t.Fatalf("in-run read after staged append returned nil error (silent stale read), want a loud refusal")
+	} else if !strings.Contains(err.Error(), "structural edit") {
+		t.Errorf("post-append read error = %q, want it to mention the structural edit", err.Error())
 	}
 }
 

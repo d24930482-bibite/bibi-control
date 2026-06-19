@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 
@@ -248,27 +249,27 @@ func TestSubCollectionDeletePersists(t *testing.T) {
 }
 
 // TestSubCollectionStructuralNotVisibleInRun is the consistency contract for array
-// ops: an append is staged but not mirrored, so an in-run DuckDB query still sees
-// the original count; only after commit is the change present.
+// ops: an append is staged but not mirrored. An in-run DuckDB read after it would
+// observe the pre-append set, so the read now fails LOUDLY (M7 bullet 4) instead of
+// silently returning the stale count; the change is present after commit.
 func TestSubCollectionStructuralNotVisibleInRun(t *testing.T) {
 	ls := loadFixture(t)
 	name := bibiteWithSub(t, ls, "bibite_brain_synapses")
 
-	synCount := func() int {
+	synCountErr := func() error {
 		rows, err := ls.query("SELECT count(*) FROM bibite_brain_synapses WHERE save_id = ? AND entry_name = ?", ls.saveID, name)
 		if err != nil {
-			t.Fatalf("count query: %v", err)
+			return err
 		}
-		defer rows.Close()
-		rows.Next()
-		var n int
-		if err := rows.Scan(&n); err != nil {
-			t.Fatalf("scan: %v", err)
-		}
-		return n
+		rows.Close()
+		return nil
 	}
 
-	before := synCount() // opens DuckDB
+	before := subCollection(t, ls, "bibite", name, "synapses").Len()
+	// A read BEFORE the append works and opens DuckDB once.
+	if err := synCountErr(); err != nil {
+		t.Fatalf("pre-append count query: %v", err)
+	}
 	ec := subCollection(t, ls, "bibite", name, "synapses")
 	fn := starlark.NewBuiltin("append", ec.appendBuiltin)
 	kwargs := []starlark.Tuple{
@@ -281,10 +282,12 @@ func TestSubCollectionStructuralNotVisibleInRun(t *testing.T) {
 	if _, err := fn.CallInternal(&starlark.Thread{}, nil, kwargs); err != nil {
 		t.Fatalf("append: %v", err)
 	}
-	during := synCount()
 
-	if during != before {
-		t.Errorf("in-run synapse count = %d, want %d (append not mirrored)", during, before)
+	// A read AFTER the staged append must refuse loudly, not return stale data.
+	if err := synCountErr(); err == nil {
+		t.Fatalf("in-run read after staged append returned nil error (silent stale read), want a loud refusal")
+	} else if !strings.Contains(err.Error(), "structural edit") {
+		t.Errorf("post-append read error = %q, want it to mention the structural edit", err.Error())
 	}
 	if ls.dbOpenCount != 1 {
 		t.Errorf("dbOpenCount = %d, want 1", ls.dbOpenCount)

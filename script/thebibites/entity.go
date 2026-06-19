@@ -106,12 +106,34 @@ func (e *Entity) SetField(name string, val starlark.Value) error {
 	if err != nil {
 		return fmt.Errorf("%s.%s: %w", e.kind, name, err)
 	}
-	goVal, err := fromStarlark(val)
+	goVal, isNull, err := fromStarlarkNullable(val)
 	if err != nil {
 		return fmt.Errorf("%s.%s: %w", e.kind, name, err)
 	}
-	if err := validateSet(spec, goVal); err != nil {
-		return fmt.Errorf("%s.%s: %w", e.kind, name, err)
+	if isNull {
+		// b.field = None clears an optional scalar to JSON null. species_id is not
+		// nullable in practice (it is a non-negative reference, not an optional cell),
+		// so reject a null clear there with a clear message rather than staging a null
+		// reference. Other columns skip validateSet (type/range/enum do not apply to a
+		// clear) and stage nil -> JSON null (see setRowField's null-write contract).
+		if spec.sourceColumn == speciesIDColumn {
+			return fmt.Errorf("%s.%s: species_id cannot be cleared (it is not nullable)", e.kind, name)
+		}
+	} else {
+		if err := validateSet(spec, goVal); err != nil {
+			return fmt.Errorf("%s.%s: %w", e.kind, name, err)
+		}
+		// Referential guard: a species_id write must name an existing species, not just
+		// be non-negative. Runs after validateSet (shape) and before staging.
+		if spec.sourceColumn == speciesIDColumn {
+			n, ok := asInt64(goVal)
+			if !ok {
+				return fmt.Errorf("%s.%s: species_id must be an integer", e.kind, name)
+			}
+			if err := e.ls.validateSpeciesID(n); err != nil {
+				return fmt.Errorf("%s.%s: %w", e.kind, name, err)
+			}
+		}
 	}
 	staged, err := setRowField(row, spec.fieldIndex, goVal)
 	if err != nil {
@@ -165,7 +187,11 @@ func (e *Entity) deleteBuiltin(thread *starlark.Thread, b *starlark.Builtin, arg
 		return nil, err
 	}
 	e.ls.stagedOps++
-	return starlark.None, nil
+	e.ls.markStructuralStaged()
+	// Return the count staged (1), matching the bulk where(...).delete() count
+	// contract — a single-entity delete that staged silently returned None before,
+	// which read as a no-result rather than the "1 staged" the bulk path reports.
+	return starlark.MakeInt(1), nil
 }
 
 // stageEntityDelete stages one whole-entity delete by entry_name, guarded by the

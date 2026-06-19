@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	mutator "github.com/asemones/bibicontrol/savemutator/thebibites"
@@ -102,25 +103,30 @@ func TestDeletePersistsAndIsolates(t *testing.T) {
 	}
 }
 
-// TestDeleteNotVisibleInRunButVisibleAfterCommit is the headline structural-op
-// contract: a delete is staged but not mirrored, so an in-run query still sees
-// the entity; only after commit is it gone.
-func TestDeleteNotVisibleInRunButVisibleAfterCommit(t *testing.T) {
+// TestDeleteInRunReadErrorsButVisibleAfterCommit is the headline structural-op
+// contract (M7 bullet 4): a delete is staged but not mirrored, so an in-run read
+// AFTER the delete can no longer be trusted (it would observe the pre-edit set).
+// Rather than silently returning stale data, the read now fails LOUDLY; the
+// committed save still reflects the delete. A read BEFORE the delete works fine.
+func TestDeleteInRunReadErrorsButVisibleAfterCommit(t *testing.T) {
 	ls := loadFixture(t)
 	target := leafBibite(t, ls) // opens DuckDB
 
-	before := bibiteCountSQL(t, ls)
+	// A read BEFORE the structural edit still works (and opens DuckDB once).
+	if got := bibiteCountSQL(t, ls); got <= 0 {
+		t.Fatalf("pre-delete count = %d, want > 0", got)
+	}
+
 	e := &Entity{ls: ls, kind: "bibite", entryName: target}
 	if _, err := callMethod(t, e, "delete"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	during := bibiteCountSQL(t, ls)
 
-	if during != before {
-		t.Errorf("in-run bibite count = %d, want %d (delete not mirrored)", during, before)
-	}
-	if ls.dbOpenCount != 1 {
-		t.Errorf("dbOpenCount = %d, want 1 (no re-import)", ls.dbOpenCount)
+	// A read AFTER the structural edit must fail loudly, not return stale data.
+	if _, err := ls.query("SELECT count(*) FROM bibites WHERE save_id = ?", ls.saveID); err == nil {
+		t.Fatalf("in-run read after staged delete returned nil error (silent stale read), want a loud refusal")
+	} else if !strings.Contains(err.Error(), "structural edit") {
+		t.Errorf("post-delete read error = %q, want it to mention the structural edit", err.Error())
 	}
 	if ls.flushStmtCount != 0 {
 		t.Errorf("flushStmtCount = %d, want 0 (structural op does not mirror)", ls.flushStmtCount)

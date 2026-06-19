@@ -238,6 +238,7 @@ func (z *Zone) deleteBuiltin(thread *starlark.Thread, b *starlark.Builtin, args 
 		return nil, fmt.Errorf("zone.delete: %w", err)
 	}
 	z.ls.stagedOps++
+	z.ls.markStructuralStaged()
 	return starlark.None, nil
 }
 
@@ -352,6 +353,7 @@ func (pz *PendingZone) appendBuiltin(thread *starlark.Thread, b *starlark.Builti
 		return nil, fmt.Errorf("zones.clone(...).append: %w", err)
 	}
 	pz.ls.stagedOps++
+	pz.ls.markStructuralStaged()
 	pz.appended = true
 	return starlark.None, nil
 }

@@ -89,6 +89,17 @@ type LoadedSave struct {
 	dryRun     bool
 	willCommit bool
 
+	// structuralStaged records that at least one STRUCTURAL edit (a whole-entity
+	// delete, an element/zone/pellet append or delete) has been staged this run.
+	// Unlike scalar sets, structural ops are deliberately NOT mirrored into DuckDB
+	// (mirror.go contract), so an in-run analytics read after a structural stage
+	// would observe the PRE-edit set — a silent read-after-write trap. ls.query
+	// consults this flag at its head and turns that stale read into a loud error
+	// instead. It is a DEDICATED flag (never reuse stagedOps, which scalar sets bump
+	// too): scalar sets ARE mirrored and must stay readable in-run, so the guard must
+	// not fire for them. Set via markStructuralStaged at every structural stage site.
+	structuralStaged bool
+
 	// zoneIDNext is the next synthetic zone id handed out to save.zones.clone(...)
 	// appends, lazily seeded from max(existing zone id)+1 so cloned zones do not
 	// collide on id with the template or each other within a run. Zone-group
@@ -708,6 +719,25 @@ func (ls *LoadedSave) flushMirror(ctx context.Context) error {
 	ls.mirror.reset()
 	ls.mirrorDirty = false
 	return nil
+}
+
+// markStructuralStaged is called by every structural stage path (whole-entity
+// delete, element/zone/pellet append/delete) right where it bumps stagedOps, to
+// arm the in-run stale-read guard. Structural ops are not mirrored, so once one is
+// staged an analytics read this run can no longer be trusted to reflect it (see
+// structuralStaged + structuralReadError). Scalar sets must NOT call this — they
+// are mirrored and stay readable in-run.
+func (ls *LoadedSave) markStructuralStaged() { ls.structuralStaged = true }
+
+// structuralReadError is the loud diagnostic ls.query returns for any analytics
+// read attempted after a structural edit was staged this run. It converts a silent
+// wrong answer (the pre-edit set, since structural ops are not mirrored) into a
+// clean failure: the read must run BEFORE the structural edit, or AFTER commit.
+func structuralReadError() error {
+	return fmt.Errorf("cannot run an analytics read after a structural edit (delete/append) " +
+		"was staged this run: structural edits are not visible to in-run queries (only after commit), " +
+		"so this read would silently return the pre-edit data — run the read before the structural edit, " +
+		"or after commit")
 }
 
 // entityLocatorRef builds the locator half of a SQLValueRef for one entity —
