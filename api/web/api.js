@@ -176,6 +176,19 @@ async function nodeLogs(wsId, nid, follow) {
   return req('GET', '/api/workspaces/' + wsId + '/nodes/' + nid + '/logs' + (follow ? '?follow=1' : ''));
 }
 
+/**
+ * DELETE /api/workspaces/{id}/nodes/{nid}
+ * Removes the persisted node row (row-only; does NOT stop a live process).
+ * Intended for detached / stale rows. Returns 204 on success; 404 if nid is
+ * unknown.
+ * @param {string} wsId  Workspace id.
+ * @param {string} nid   Node id.
+ * @returns {Promise<undefined>}  Resolves on 204.
+ */
+async function deleteNode(wsId, nid) {
+  return req('DELETE', '/api/workspaces/' + wsId + '/nodes/' + encodeURIComponent(nid));
+}
+
 /* ---------- notebooks ---------- */
 
 /**

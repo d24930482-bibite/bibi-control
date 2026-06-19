@@ -7,6 +7,7 @@ import (
 
 	"github.com/asemones/bibicontrol/ipc"
 	"github.com/asemones/bibicontrol/revisionstore"
+	"github.com/asemones/bibicontrol/workspace"
 )
 
 // nodeInfoResponse is the JSON shape for one node returned by GET
@@ -163,4 +164,26 @@ func (d *Daemon) handleNodeLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, logsResponse{Lines: shaped})
+}
+
+// handleDeleteNode handles DELETE /api/workspaces/{id}/nodes/{nid}.
+//
+// It removes the persisted node row from the workspace registry. This is a
+// row-only deletion — it does NOT stop a live process and is intended for
+// detached / stale rows. On success it returns HTTP 204. On an unknown nid it
+// returns 404 via revisionstore.IsNotFound; all other errors return 500.
+func (d *Daemon) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	nid := r.PathValue("nid")
+
+	if err := workspace.DeleteNode(r.Context(), d.root, nid); err != nil {
+		if revisionstore.IsNotFound(err) {
+			writeError(w, http.StatusNotFound, err)
+		} else {
+			writeError(w, http.StatusInternalServerError, err)
+		}
+		return
+	}
+	_ = id // workspace id is used for routing; the node id is globally unique in the registry
+	w.WriteHeader(http.StatusNoContent)
 }

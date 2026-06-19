@@ -374,6 +374,103 @@ func TestNodesInfo_Detached(t *testing.T) {
 	}
 }
 
+// TestDeleteNode exercises DELETE /api/workspaces/{id}/nodes/{nid}.
+//
+// Strategy mirrors TestNodesInfo_Detached: start a node on ws1 to create a
+// persisted row, then close ws1 (leaving the row stale / detached). Open a
+// fresh daemon d2 (no seeded handle). Assert:
+//
+//   - DELETE returns 204 and the row disappears from GET nodes/info.
+//   - DELETE of an unknown nid returns 404.
+func TestDeleteNode(t *testing.T) {
+	ctx := testCtx(t)
+	root := t.TempDir()
+
+	// Create the workspace and persist a node row.
+	ws, err := workspace.Create(ctx, root, "owner", "delete-node-ws")
+	if err != nil {
+		t.Fatalf("workspace.Create: %v", err)
+	}
+	id := ws.ID()
+
+	world, err := ws.AddWorld(ctx, testFixtureSave(t), "test-world-del")
+	if err != nil {
+		_ = ws.Close()
+		t.Fatalf("AddWorld: %v", err)
+	}
+
+	// Start the node — persists a row with status="running". ConnectOnStart=false
+	// so no fake sim is needed.
+	_, _, err = ws.StartNode(ctx, workspace.StartNodeSpec{
+		WorldID:        world.ID,
+		NodeID:         "n-to-delete",
+		Process:        ipc.ProcessSpec{Path: "/bin/sleep", Args: []string{"60"}},
+		ConnectOnStart: false,
+	})
+	if err != nil {
+		_ = ws.Close()
+		t.Fatalf("StartNode: %v", err)
+	}
+
+	// Close ws so d2 can open its own handle without a second DuckDB writer.
+	if err := ws.Close(); err != nil {
+		t.Logf("ws.Close: %v (non-fatal)", err)
+	}
+
+	// Open a fresh daemon — no seeded handle, so the row is seen as detached.
+	d2 := api.New(root, "owner")
+	t.Cleanup(func() { _ = d2.Close() })
+
+	// ── Case 1: DELETE returns 204 ────────────────────────────────────────────
+	t.Run("delete_204", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodDelete, "/api/workspaces/"+id+"/nodes/n-to-delete", nil)
+		rec := httptest.NewRecorder()
+		d2.Handler().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("delete node: got %d, want 204; body: %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	// ── Case 2: node is absent from nodes/info after deletion ─────────────────
+	t.Run("absent_after_delete", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/workspaces/"+id+"/nodes/info", nil)
+		rec := httptest.NewRecorder()
+		d2.Handler().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("nodes/info: got %d, want 200; body: %s", rec.Code, rec.Body.String())
+		}
+		var infos []map[string]any
+		if err := json.NewDecoder(rec.Body).Decode(&infos); err != nil {
+			t.Fatalf("decode nodes/info: %v", err)
+		}
+		for _, obj := range infos {
+			if obj["id"] == "n-to-delete" {
+				t.Fatalf("n-to-delete still present in nodes/info after DELETE; got %v", infos)
+			}
+		}
+	})
+
+	// ── Case 3: DELETE of unknown nid returns 404 ─────────────────────────────
+	t.Run("delete_unknown_404", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodDelete, "/api/workspaces/"+id+"/nodes/no-such-node", nil)
+		rec := httptest.NewRecorder()
+		d2.Handler().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("delete unknown: got %d, want 404; body: %s", rec.Code, rec.Body.String())
+		}
+		var body map[string]string
+		if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+			t.Fatalf("decode 404 body: %v", err)
+		}
+		if body["error"] == "" {
+			t.Fatal("delete unknown 404: expected non-empty error field")
+		}
+	})
+}
+
 // TestNodesInfo_ResolveNotFound verifies that requesting nodes/info for an
 // unknown workspace id returns 404.
 func TestNodesInfo_ResolveNotFound(t *testing.T) {
