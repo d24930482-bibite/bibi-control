@@ -1581,7 +1581,7 @@ var SL_METHODS = {};
  'append', 'query', 'history_query', 'info', 'state', 'status', 'stop', 'resume',
  'reload', 'kill', 'wait', 'ingest_autosave', 'load', 'unload', 'evict_history',
  'get', 'genes', 'material', 'simulation', 'independent', 'zones', 'bibites',
- 'eggs', 'pellets', 'name', 'id', 'head', 'sim_time']
+ 'eggs', 'pellets', 'synapses', 'settings', 'name', 'id', 'head', 'sim_time']
   .forEach(function(k) { SL_METHODS[k] = 1; });
 
 // highlightStarlark(src) -> HTML string. One left-to-right scan; first match wins
@@ -1716,9 +1716,9 @@ var AC_TYPE_MEMBERS = {
   workspace:  ['add_world', 'bibites', 'eggs', 'genes', 'node', 'nodes', 'pellets', 'poll', 'query', 'start_node', 'synapses', 'transfer', 'world', 'worlds'],
   world:      ['bibites', 'eggs', 'evict_history', 'genes', 'head', 'history_query', 'id', 'load', 'name', 'nodes', 'open', 'pellets', 'query', 'sim_time', 'synapses', 'unload'],
   session:    ['bibites', 'commit', 'eggs', 'pellets', 'settings', 'sql', 'zones'],
-  collection: ['count', 'delete', 'group_by', 'max', 'mean', 'median', 'min', 'quantile', 'set', 'set_expr', 'sum', 'where'],
+  collection: ['count', 'delete', 'group_by', 'max', 'mean', 'median', 'min', 'quantile', 'set', 'set_expr', 'sum', 'where'],  // mutable single-save branch; spanning/read-only branch omits set/set_expr/delete
   node:       ['id', 'ingest_autosave', 'info', 'kill', 'reload', 'resume', 'run_id', 'state', 'status', 'stop', 'wait', 'world'],
-  settings:   ['independent', 'material', 'simulation', 'zones'],
+  settings:   ['independent', 'material', 'simulation'],  // zones lives on session, not settings (Settings.AttrNames)
   // setting_scope: a name-keyed scope. scope["k"] is loud; scope.get("k", default)
   // is tolerant; the scope is also iterable (for s in scope) yielding Setting handles.
   setting_scope: ['get']
