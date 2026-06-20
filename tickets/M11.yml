@@ -1,0 +1,15 @@
+id: M11
+title: Brain node lookup by normalized name (Desc)
+deps:
+    - M3
+    - M5
+phase: done
+worktree: /home/asemones/Documents/personal_code/bibicontrol-wt/M11
+artifacts:
+    plan: docs/tickets/M11.plan.md
+    review: docs/tickets/M11.review.md
+source: docs/missing.md#11
+dod: []
+models:
+    exec: sonnet
+    review: opus

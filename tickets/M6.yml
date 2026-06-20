@@ -1,10 +1,13 @@
 id: M6
 title: 'Transfer: move semantics + body.id remap + full graft surface'
 deps: []
-phase: pending
-worktree: ""
+phase: done
+worktree: /home/asemones/Documents/personal_code/bibicontrol-wt/M6
 artifacts:
-    plan: ""
-    review: ""
+    plan: docs/tickets/M6.plan.md
+    review: docs/tickets/M6.review.md
 source: docs/missing.md#6
 dod: []
+models:
+    exec: opus
+    review: opus

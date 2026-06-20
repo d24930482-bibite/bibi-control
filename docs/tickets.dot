@@ -1,16 +1,17 @@
 digraph tickets {
   rankdir=TB;
   node [shape=box, style="filled,rounded", fontname="sans-serif"];
-  "M1" [label="M1: Spanning surface: genes/brains kinds + time axis + world_id wrapper", fillcolor="#eeeeee"];
-  "M10" [label="M10: Workspace memory & storage lifecycle", fillcolor="#eeeeee"];
-  "M2" [label="M2: Generated cheatlist / quick-reference page", fillcolor="#eeeeee"];
-  "M3" [label="M3: Case-insensitive name lookups (gene/world/species/zone/column)", fillcolor="#eeeeee"];
-  "M4" [label="M4: Unified child-collection surface (+ remove gene())", fillcolor="#eeeeee"];
-  "M5" [label="M5: Brain node<->synapse join navigation", fillcolor="#eeeeee"];
-  "M6" [label="M6: Transfer: move semantics + body.id remap + full graft surface", fillcolor="#eeeeee"];
-  "M7" [label="M7: Bulk / element / NULL / structural write gaps", fillcolor="#eeeeee"];
-  "M8" [label="M8: Save-format drift capture & write-path hardening", fillcolor="#eeeeee"];
-  "M9" [label="M9: Live-world supervision & observability", fillcolor="#eeeeee"];
+  "M1" [label="M1: Spanning surface: genes/brains kinds + time axis + world_id wrapper", fillcolor="#c4ffd0"];
+  "M10" [label="M10: Workspace memory & storage lifecycle", fillcolor="#c4ffd0"];
+  "M11" [label="M11: Brain node lookup by normalized name (Desc)", fillcolor="#c4ffd0"];
+  "M2" [label="M2: Generated cheatlist / quick-reference page", fillcolor="#c4ffd0"];
+  "M3" [label="M3: Case-insensitive name lookups (gene/world/species/zone/column)", fillcolor="#c4ffd0"];
+  "M4" [label="M4: Unified child-collection surface (+ remove gene())", fillcolor="#c4ffd0"];
+  "M5" [label="M5: Brain node<->synapse join navigation", fillcolor="#c4ffd0"];
+  "M6" [label="M6: Transfer: move semantics + body.id remap + full graft surface", fillcolor="#c4ffd0"];
+  "M7" [label="M7: Bulk / element / NULL / structural write gaps", fillcolor="#c4ffd0"];
+  "M8" [label="M8: Save-format drift capture & write-path hardening", fillcolor="#c4ffd0"];
+  "M9" [label="M9: Live-world supervision & observability", fillcolor="#c4ffd0"];
   "U1" [label="U1: Registry mutators (rename/delete ws, delete node)", fillcolor="#c4ffd0"];
   "U10" [label="U10: Frontend foundation + col A", fillcolor="#c4ffd0"];
   "U11" [label="U11: Frontend worlds + history + add-world", fillcolor="#c4ffd0"];
@@ -26,6 +27,8 @@ digraph tickets {
   "U8" [label="U8: Node info + logs endpoints", fillcolor="#c4ffd0"];
   "U9" [label="U9: Stub sim binary", fillcolor="#c4ffd0"];
   "M4" -> "M1";
+  "M3" -> "M11";
+  "M5" -> "M11";
   "M1" -> "M2";
   "M4" -> "M2";
   "M5" -> "M2";

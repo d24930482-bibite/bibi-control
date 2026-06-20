@@ -1,10 +1,14 @@
 id: M3
 title: Case-insensitive name lookups (gene/world/species/zone/column)
 deps: []
-phase: pending
-worktree: ""
+phase: done
+worktree: /home/asemones/Documents/personal_code/bibicontrol-wt/M3
 artifacts:
-    plan: ""
-    review: ""
+    plan: docs/tickets/M3.plan.md
+    review: docs/tickets/M3.review.md
 source: docs/missing.md#3
 dod: []
+notes: 'CLEANUP-ONLY pass: remove the dead ownerKeys map in settingRow (built then discarded via ''_ = ownerKeys'') and its stale comment. No behavior change. Do not touch anything else. Suite must stay green; re-commit (amend or follow-up commit) and advance.'
+models:
+    exec: sonnet
+    review: opus

@@ -482,3 +482,62 @@ silent default. A normalized-name miss is a loud miss (the §4 rule), consistent
   `Desc` is no longer unique; define the behavior (scope-to-brain only, or loud).
 - *Hidden-node names.* `Hidden0/1/…` are unique within a brain but not globally meaningful;
   confirm they resolve like any other `Desc` with no special-casing.
+
+---
+
+## 12. Brain wiring: multi-hop path / reachability is user-space only
+
+You can name a node (§11) and follow one edge (§5: `s.source`/`s.target`,
+`n.inputs`/`n.outputs`), but you cannot ask a *path* question — "is there a string of
+connections from `MeatAngle` to `Rotate`, and is it net-positive?" — as first-class
+surface. §5 deliberately left topo-order / reachability / cycle-detection to a user-space
+walk over its two primitives. `.where` can't express it either: `.where` is a per-element
+attribute predicate (one node, one synapse), while reachability is a whole-graph property,
+so `bibites.where("meatangle ~> rotate > 0")` has nowhere to compile to.
+
+**Today's answer** is an in-script DFS/BFS, e.g.:
+
+```python
+def positive_path(start, goal_idx):
+    seen, stack = set(), [(start, 1)]            # brain is recurrent → guard visited
+    while stack:
+        n, sign = stack.pop()
+        if n.node_index in seen: continue
+        seen.add(n.node_index)
+        for s in n.outputs.where("enabled and weight != 0"):
+            nsign = sign * (1 if s.weight > 0 else -1)
+            if s.target.node_index == goal_idx:
+                if nsign > 0: return True
+            else:
+                stack.append((s.target, nsign))
+    return False
+
+hits = [b for b in world.bibites
+        if positive_path(b.nodes["meatangle"], b.nodes["rotate"].node_index)]
+```
+
+**Gotchas this surfaces** (the reasons it's not trivially first-class):
+- *Names are exact-character.* The output node's `Desc` is **`Rotate`**, not `Rotation`;
+  §11 normalization is lowercase+strip only (no stemming/fuzzy), so `"rotation"` is a loud
+  miss. `"meatangle"` is correct (node 16 `MeatAngle`).
+- *"Positive" is ambiguous:* net sign = product of edge weights along the path (shown
+  above) vs. every edge `weight > 0`. Neither models activation-function monotonicity.
+- *Cost:* O(bibites × brain edges) evaluated in-script — no `.where` pushdown.
+
+**Target (if promoted to a ticket).** A first-class brain path predicate, e.g.
+`b.reaches("meatangle", "rotate", sign="+")` and/or a `bibites.where(...)`-pushable form,
+with explicit policy for: enabled-only edges, sign semantics, max depth / cycle handling,
+and whether it stays an in-process walk or pushes to SQL. Until then this is user-space.
+
+---
+
+## 13. Mutations don't bound-check values
+
+DSL writes (attribute assignment / `.set`, §7) persist whatever value is given — an
+out-of-range value (e.g. a negative count, an activation outside a field's valid domain)
+is written and only surfaces later, if at all. **Target:** intercept out-of-bounds values
+at mutation time and return a loud error instead of writing (consistent with §3/§4's
+loud-miss/loud-ambiguity stance). Open: where bounds come from (per-field metadata, ideally
+generated from the schema rather than a hand-maintained list — cf. the SQL-ref generation
+philosophy), which fields actually carry ranges, and hard-fail vs. clamp. Lives on the
+write path (`script/thebibites` set surface; cf. §7 write gaps, §8 write-path hardening).

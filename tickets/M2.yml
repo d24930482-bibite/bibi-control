@@ -4,10 +4,13 @@ deps:
     - M1
     - M4
     - M5
-phase: pending
-worktree: ""
+phase: done
+worktree: /home/asemones/Documents/personal_code/bibicontrol-wt/M2
 artifacts:
-    plan: ""
-    review: ""
+    plan: docs/tickets/M2.plan.md
+    review: docs/tickets/M2.review.md
 source: docs/missing.md#2
 dod: []
+models:
+    exec: sonnet
+    review: opus

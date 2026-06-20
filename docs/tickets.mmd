@@ -1,14 +1,15 @@
 flowchart TD
-    M1["M1: Spanning surface: genes/brains kinds + time axis + world_id wrapper"]:::pending
-    M10["M10: Workspace memory & storage lifecycle"]:::pending
-    M2["M2: Generated cheatlist / quick-reference page"]:::pending
-    M3["M3: Case-insensitive name lookups (gene/world/species/zone/column)"]:::pending
-    M4["M4: Unified child-collection surface (+ remove gene())"]:::pending
-    M5["M5: Brain node<->synapse join navigation"]:::pending
-    M6["M6: Transfer: move semantics + body.id remap + full graft surface"]:::pending
-    M7["M7: Bulk / element / NULL / structural write gaps"]:::pending
-    M8["M8: Save-format drift capture & write-path hardening"]:::pending
-    M9["M9: Live-world supervision & observability"]:::pending
+    M1["M1: Spanning surface: genes/brains kinds + time axis + world_id wrapper"]:::done
+    M10["M10: Workspace memory & storage lifecycle"]:::done
+    M11["M11: Brain node lookup by normalized name (Desc)"]:::done
+    M2["M2: Generated cheatlist / quick-reference page"]:::done
+    M3["M3: Case-insensitive name lookups (gene/world/species/zone/column)"]:::done
+    M4["M4: Unified child-collection surface (+ remove gene())"]:::done
+    M5["M5: Brain node<->synapse join navigation"]:::done
+    M6["M6: Transfer: move semantics + body.id remap + full graft surface"]:::done
+    M7["M7: Bulk / element / NULL / structural write gaps"]:::done
+    M8["M8: Save-format drift capture & write-path hardening"]:::done
+    M9["M9: Live-world supervision & observability"]:::done
     U1["U1: Registry mutators (rename/delete ws, delete node)"]:::done
     U10["U10: Frontend foundation + col A"]:::done
     U11["U11: Frontend worlds + history + add-world"]:::done
@@ -24,6 +25,8 @@ flowchart TD
     U8["U8: Node info + logs endpoints"]:::done
     U9["U9: Stub sim binary"]:::done
     M4 --> M1
+    M3 --> M11
+    M5 --> M11
     M1 --> M2
     M4 --> M2
     M5 --> M2

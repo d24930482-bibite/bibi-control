@@ -1,10 +1,13 @@
 id: M8
 title: Save-format drift capture & write-path hardening
 deps: []
-phase: pending
-worktree: ""
+phase: done
+worktree: /home/asemones/Documents/personal_code/bibicontrol-wt/M8
 artifacts:
-    plan: ""
-    review: ""
+    plan: docs/tickets/M8.plan.md
+    review: docs/tickets/M8.review.md
 source: docs/missing.md#8
 dod: []
+models:
+    exec: opus
+    review: opus

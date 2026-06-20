@@ -2,10 +2,13 @@ id: M7
 title: Bulk / element / NULL / structural write gaps
 deps:
     - M4
-phase: pending
-worktree: ""
+phase: done
+worktree: /home/asemones/Documents/personal_code/bibicontrol-wt/M7
 artifacts:
-    plan: ""
-    review: ""
+    plan: docs/tickets/M7.plan.md
+    review: docs/tickets/M7.review.md
 source: docs/missing.md#7
 dod: []
+models:
+    exec: opus
+    review: opus
