@@ -427,3 +427,58 @@ Persisted reclamation is solid; in-memory and cross-store edges have gaps:
 - **Cross-store linkage unenforced:** DuckDB `save_id` partitions and revisionstore `sha256` rows have no joint
   invariant; blob byte deletion decoupled from refcount bookkeeping (crash-safe by ordering, correctness rides on a GC
   pass running) (`duckdb/import.go:272` vs `revisionstore/store.go:1136`; `revisionstore/store.go:1372` + `blobstore/fsstore.go:190`).
+
+---
+
+## 11. Brain nodes: lookup by normalized name (Desc), not just id
+
+Brain nodes are addressable today only by *id*: positionally (`b.nodes[0]`, the array
+slot) and — since §5 — by logical `NodeIndex` for edge navigation
+(`script/thebibites/subcollection.go:256-316`). To find a node by *what it is* you must
+write an exact-case predicate, `b.nodes.where("desc == 'Accelerate'")`, which is brittle
+(`'accelerate'` silently matches nothing). Every node already names itself: the save's
+per-node `Desc` field is parsed and projected as `BrainNodeRow.Desc`
+(`saveparser/thebibites/normalize_types.go:307`, populated `saveparser/thebibites/parse_brain.go:29`).
+
+**Grounding (verified against `testdata/saves/the-bibites/autosave_20260301021357.zip`).**
+Across all 40 bibites — including evolved brains (48–49 nodes, hidden types 2/7/8/9) —
+**every node carries a non-empty `Desc`** and **no two nodes in a brain share a `Desc`**.
+Standard nodes are `EnergyRatio … Want2Attack`; evolved hidden nodes are `Hidden0`,
+`Hidden1`, …. `Desc` always matches the live save, so it — not a side table — is the
+source of truth for names.
+
+**Non-goal / trap.** A handwritten `NodeIndex → name` side table is *not* the mechanism.
+Such tables drift from the real save — an early hand-sketch of these mappings already had
+the output block off by one (`32: Accelerate` where the true `NodeIndex` is `33`) and the
+`Phero*` inputs mis-ordered, which is exactly the failure mode name lookup exists to kill.
+Resolution MUST key off the node's own live `Desc`, never a fixed index table. This is a
+*desc override of how nodes are addressed*, not an override of ids.
+
+**Target.** Normalized-name lookup on the existing node collection, reusing §3's fold
+machinery — same characters, any casing, resolved lowercased:
+
+```python
+b.nodes["accelerate"]      # -> the node whose Desc == "Accelerate" (NodeIndex 33)
+b.nodes["EnergyRatio"]     # same node regardless of caps
+b.nodes["hidden0"]         # evolved hidden node, by name
+```
+
+It returns the ordinary node handle, so it inherits the existing read/iterate/write
+surface (§4/§5) for free — this ticket adds an *addressing* path, not a new node API.
+
+**Reuse, don't reinvent.** §3 already ships `foldLookup`
+(`script/thebibites/loadedsave.go:411-440`): exact match wins, then a single case-fold
+scan, and a name that folds to ≥2 distinct canonical entries is a **loud error**, never a
+silent default. A normalized-name miss is a loud miss (the §4 rule), consistent with
+`gene("name")` (`script/thebibites/gene.go:102,162`). Name resolution is per-brain (each
+`b.nodes` is one brain's nodes), so the fold index is built over that brain's `Desc` set.
+
+**Open questions (planner).**
+- *Surface form.* `b.nodes["name"]` subscript vs. an explicit `b.node("name")` accessor —
+  and how either coexists with the existing positional/`NodeIndex` integer access on the
+  same collection (string key → Desc, int key → position/NodeIndex?). Pick the form most
+  consistent with the §4 collection idiom; flag any overload ambiguity.
+- *Cross-brain collections.* If a node collection ever spans brains (§1 all-X surfaces),
+  `Desc` is no longer unique; define the behavior (scope-to-brain only, or loud).
+- *Hidden-node names.* `Hidden0/1/…` are unique within a brain but not globally meaningful;
+  confirm they resolve like any other `Desc` with no special-casing.
