@@ -272,6 +272,17 @@ a.back { display: inline-block; margin-bottom: 1.5rem; }
   also exposes <code>set / set_expr / delete</code>.
   Mutation is per-save by construction; call <code>s.commit(path)</code> to write back.
 </p>
+<p>
+  <strong>Which save(s) you read</strong> follows from where you start:
+  <code>s = world.open()</code> &rarr; the <strong>current head save</strong> (one working
+  partition, the only <strong>writable</strong> scope);
+  <code>world.bibites</code> &rarr; that world's <strong>whole retained history</strong>
+  (every committed revision);
+  <code>workspace.bibites</code> &rarr; <strong>all worlds' history</strong>.
+  Both spanning scopes read <strong>committed history only</strong> &mdash; never an
+  uncommitted working save &mdash; and expose <code>world_id</code> / <code>sim_time</code>
+  (the per-revision time axis) as columns.
+</p>
 
 <h3>workspace.nodes asymmetry (M1)</h3>
 <div class="note">
