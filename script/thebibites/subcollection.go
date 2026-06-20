@@ -57,6 +57,7 @@ var (
 	_ starlark.Iterable = (*ElementCollection)(nil)
 	_ starlark.Sequence = (*ElementCollection)(nil)
 	_ starlark.HasAttrs = (*ElementCollection)(nil)
+	_ starlark.Mapping  = (*ElementCollection)(nil)
 )
 
 func (c *ElementCollection) String() string       { return c.kind + "." + c.spec.attr }
@@ -95,6 +96,60 @@ func (c *ElementCollection) Attr(name string) (starlark.Value, error) {
 }
 
 func (c *ElementCollection) AttrNames() []string { return []string{"append", "count"} }
+
+// Get implements starlark.Mapping so b.nodes["name"] and b.nodes[i] route here.
+// Starlark's getIndex checks Mapping before Indexable, so this single method
+// handles both key types; Indexable is intentionally not implemented (would be
+// dead, see plan §risks).
+//
+//   - starlark.String key: Desc fold lookup, nodes only.
+//   - starlark.Int key: positional access (any sub-collection).
+//   - Other types: loud error.
+func (c *ElementCollection) Get(k starlark.Value) (starlark.Value, bool, error) {
+	switch key := k.(type) {
+	case starlark.String:
+		if c.spec.attr != "nodes" {
+			return nil, false, fmt.Errorf("%s has no name key (string subscript is only valid on nodes)", c.spec.attr)
+		}
+		name := string(key)
+		ordinal, found, err := c.ls.nodeByDesc(c.spec.table, c.entryName, name)
+		if err != nil {
+			// Ambiguity — loud, never a silent pick.
+			return nil, false, err
+		}
+		if !found {
+			// Clean miss — Starlark raises KeyError for (nil, false, nil).
+			return nil, false, nil
+		}
+		rows := c.rows()
+		if ordinal < 0 || int(ordinal) >= len(rows) {
+			return nil, false, fmt.Errorf("nodes[%q]: internal ordinal %d out of range (len %d)", name, ordinal, len(rows))
+		}
+		r := rows[ordinal]
+		return &ArrayElement{ls: c.ls, kind: c.kind, entryName: c.entryName, spec: c.spec, row: r.row, index: r.index}, true, nil
+
+	case starlark.Int:
+		n, err2 := starlark.AsInt32(key)
+		if err2 != nil {
+			return nil, false, fmt.Errorf("%s index overflows int32: %w", c.spec.attr, err2)
+		}
+		length := c.Len()
+		// Python-style negative indexing.
+		idx := int(n)
+		if idx < 0 {
+			idx += length
+		}
+		if idx < 0 || idx >= length {
+			return nil, false, fmt.Errorf("%s index %d out of range (len %d)", c.spec.attr, n, length)
+		}
+		rows := c.rows()
+		r := rows[idx]
+		return &ArrayElement{ls: c.ls, kind: c.kind, entryName: c.entryName, spec: c.spec, row: r.row, index: r.index}, true, nil
+
+	default:
+		return nil, false, fmt.Errorf("%s key must be a string (Desc) or int (position), got %s", c.spec.attr, k.Type())
+	}
+}
 
 func (c *ElementCollection) countBuiltin(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs); err != nil {
