@@ -61,9 +61,21 @@ func TestServesWebIndex(t *testing.T) {
 		}
 	})
 
-	for _, asset := range []string{"/app.js", "/api.js", "/app.css"} {
+	t.Run("index_links_cheatlist", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		body := rec.Body.String()
+		if !strings.Contains(body, "cheatlist.html") {
+			t.Error(`GET /: index.html does not link to cheatlist.html`)
+		}
+	})
+
+	for _, asset := range []string{"/app.js", "/api.js", "/app.css", "/cheatlist.html"} {
 		asset := asset
-		t.Run("serves_"+strings.TrimPrefix(strings.TrimSuffix(asset, ".js"), "/"), func(t *testing.T) {
+		safeName := strings.TrimPrefix(asset, "/")
+		safeName = strings.ReplaceAll(safeName, ".", "_")
+		t.Run("serves_"+safeName, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, asset, nil)
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, req)

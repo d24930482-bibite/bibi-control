@@ -1,6 +1,7 @@
 package thebibites
 
 //go:generate go run ../../cmd/gen_thebibites_schema
+//go:generate go run ../../cmd/gen_dsl_cheatlist
 
 // SQLRefResolverKind declares how a normalized table can be resolved back to an
 // archive mutation target. It is intentionally a small shape vocabulary; the
