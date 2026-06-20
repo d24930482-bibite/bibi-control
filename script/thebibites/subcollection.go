@@ -149,6 +149,7 @@ func (c *ElementCollection) appendBuiltin(thread *starlark.Thread, b *starlark.B
 		return nil, fmt.Errorf("%s.append: %w", c.spec.attr, err)
 	}
 	c.ls.stagedOps++
+	c.ls.markStructuralStaged()
 	return starlark.None, nil
 }
 
@@ -354,5 +355,6 @@ func (e *ArrayElement) deleteBuiltin(thread *starlark.Thread, b *starlark.Builti
 		return nil, fmt.Errorf("%s.delete: %w", e.spec.attr, err)
 	}
 	e.ls.stagedOps++
+	e.ls.markStructuralStaged()
 	return starlark.None, nil
 }

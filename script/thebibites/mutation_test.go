@@ -538,7 +538,9 @@ func TestStaleValueGuard(t *testing.T) {
 }
 
 // TestSetCleanErrors: read-only, unknown, and non-scalar sets each return a clean
-// error and stage nothing.
+// error and stage nothing. Note: b.field = None is NO LONGER an error on a writable
+// scalar — it is a valid NULL clear (M7 bullet 1), covered by
+// TestSetFieldNullWritesAndRoundTrips; a Starlark LIST is still a non-scalar reject.
 func TestSetCleanErrors(t *testing.T) {
 	ls := loadFixture(t)
 	e := &Entity{ls: ls, kind: "bibite", entryName: firstBibiteEntry(t, ls)}
@@ -551,7 +553,6 @@ func TestSetCleanErrors(t *testing.T) {
 		{"read-only locator", "body_id", starlark.MakeInt(5)},
 		{"unknown attribute", "definitely_not_a_column", starlark.Float(1)},
 		{"non-scalar value", "energy", starlark.NewList(nil)},
-		{"none value", "energy", starlark.None},
 	}
 	for _, tc := range cases {
 		if err := e.SetField(tc.attr, tc.val); err == nil {

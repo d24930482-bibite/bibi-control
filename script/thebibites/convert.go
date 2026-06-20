@@ -97,6 +97,22 @@ func fromStarlark(v starlark.Value) (any, error) {
 	}
 }
 
+// fromStarlarkNullable is the None-accepting variant of fromStarlark, for the one
+// write surface that supports clearing an optional scalar to JSON null
+// (Entity.SetField — b.field = None). None maps to (nil, true, nil); every other
+// scalar delegates to fromStarlark and reports isNull=false. fromStarlark itself is
+// left rejecting None on purpose: its other call sites (genes, settings, zones,
+// pellets, subcollection, bulk) have no nil handling, so blanket-accepting None
+// there would silently stage a JSON null they never validate. Callers that opt in
+// route through this helper and handle the isNull branch explicitly.
+func fromStarlarkNullable(v starlark.Value) (val any, isNull bool, err error) {
+	if v == starlark.None {
+		return nil, true, nil
+	}
+	val, err = fromStarlark(v)
+	return val, false, err
+}
+
 // goScalar reads a reflected Go scalar (off a normalized row) into a plain Go
 // value, used to capture the current value for the stale-value guard. Numeric
 // kinds collapse to int64/uint64/float64; comparison downstream is numeric-type
@@ -125,10 +141,24 @@ func goScalar(v reflect.Value) (any, error) {
 // the only "typing" done at write time (memory safety, type fidelity of the staged
 // JSON value); full value validation (range/enum/type-match) is validateSet in
 // guards.go, run before this.
+//
+// A nil goVal is the NULL-write path (b.field = None on an optional scalar): the
+// in-memory field is set to its zero value and nil is returned so the stage/mirror
+// carry a JSON null (the mutator's setJSONPath -> normalizeJSONValue(nil) -> JSON
+// null, and the mirror CASTs a nil arg to SQL NULL). Read-back caveat: an explicit
+// null write zeroes the present 1:1 row, so a later plain attribute read returns
+// 0/""/false via toStarlark, NOT None — None is reserved for a genuinely ABSENT 1:1
+// row (Entity.Attr). The committed JSON null is the contract; the in-run read-back
+// of a zeroed cell is best-effort. Making the present row "absent" would be a far
+// larger change and is out of scope.
 func setRowField(row reflect.Value, fieldIndex []int, goVal any) (any, error) {
 	field := row.FieldByIndex(fieldIndex)
 	if !field.CanSet() {
 		return nil, fmt.Errorf("field is not settable")
+	}
+	if goVal == nil {
+		field.Set(reflect.Zero(field.Type()))
+		return nil, nil
 	}
 	switch field.Kind() {
 	case reflect.Float32, reflect.Float64:

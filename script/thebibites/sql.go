@@ -52,7 +52,17 @@ func identityTable(kind string) (string, error) {
 // query opens DuckDB lazily, flushes any pending mutation mirror (no-op in T5),
 // and runs a query. flushMirror sits at the head of every query so a later T6
 // read-after-write observes staged sets without a reparse.
+//
+// If a STRUCTURAL edit was staged this run (structuralStaged), the read is refused
+// loudly BEFORE touching DuckDB: structural ops are not mirrored, so the result
+// would silently reflect the pre-edit set (a read-after-write trap). Every
+// push-down read — Query, save.sql, where-resolution (matchingEntryNames), and the
+// scalar/grouped aggregates — routes through here, so the guard covers them all in
+// one place. Scalar sets are unaffected: they are mirrored and never set the flag.
 func (ls *LoadedSave) query(q string, args ...any) (*sql.Rows, error) {
+	if ls.structuralStaged {
+		return nil, structuralReadError()
+	}
 	ctx := ls.queryCtx()
 	db, err := ls.openDB(ctx)
 	if err != nil {
@@ -619,6 +629,18 @@ func (ls *LoadedSave) bulkSet(kind, where, column string, value starlark.Value) 
 	if err := validateSet(spec, goVal); err != nil {
 		return 0, fmt.Errorf("%s.%s: %w", kind, column, err)
 	}
+	// Referential guard: a bulk species_id set is a single constant, so the existence
+	// check runs once here (before the query), mirroring validateSet's before-query
+	// rejection — a bad id is refused even when the predicate matches zero rows.
+	if spec.sourceColumn == speciesIDColumn {
+		n, ok := asInt64(goVal)
+		if !ok {
+			return 0, fmt.Errorf("%s.%s: species_id must be an integer", kind, column)
+		}
+		if err := ls.validateSpeciesID(n); err != nil {
+			return 0, fmt.Errorf("%s.%s: %w", kind, column, err)
+		}
+	}
 
 	q, args, err := ls.bulkSetQuery(kind, where, spec)
 	if err != nil {
@@ -739,6 +761,18 @@ func (ls *LoadedSave) bulkSetExpr(kind, where, column, expr string) (int, error)
 		// computed value (e.g. a non-negative bound rejects a row that went negative).
 		if err := validateSet(spec, coerced); err != nil {
 			return 0, fmt.Errorf("%s.%s: %w", kind, column, err)
+		}
+		// Referential guard, per row: the expression can yield a different species_id
+		// per matched entity, so the existence check runs on each computed value (after
+		// coerce + shape validation). The first dangling id fails the whole call.
+		if spec.sourceColumn == speciesIDColumn {
+			n, ok := asInt64(coerced)
+			if !ok {
+				return 0, fmt.Errorf("%s.%s: species_id must be an integer", kind, column)
+			}
+			if err := ls.validateSpeciesID(n); err != nil {
+				return 0, fmt.Errorf("%s.%s: %w", kind, column, err)
+			}
 		}
 		if err := ls.writeThroughAndStage(spec, r.Ref, r.CurrentValue, coerced, kind, column); err != nil {
 			return 0, err
@@ -1051,6 +1085,7 @@ func (ls *LoadedSave) bulkDelete(kind, where string, prune bool) (int, error) {
 			return 0, err
 		}
 		ls.stagedOps++
+		ls.markStructuralStaged()
 	}
 	return len(names), nil
 }

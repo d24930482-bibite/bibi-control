@@ -256,6 +256,7 @@ func (p *Pellet) deleteBuiltin(thread *starlark.Thread, b *starlark.Builtin, arg
 		return nil, fmt.Errorf("pellet.delete: %w", err)
 	}
 	p.ls.stagedOps++
+	p.ls.markStructuralStaged()
 	return starlark.None, nil
 }
 
@@ -415,6 +416,7 @@ func (pp *PendingPellet) appendBuiltin(thread *starlark.Thread, b *starlark.Buil
 		return nil, fmt.Errorf("pellets.clone(...).append: %w", err)
 	}
 	pp.ls.stagedOps++
+	pp.ls.markStructuralStaged()
 	pp.appended = true
 	return starlark.None, nil
 }

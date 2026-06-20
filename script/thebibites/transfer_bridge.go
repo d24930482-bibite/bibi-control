@@ -93,6 +93,7 @@ func TransferEntries(srcLS, dstLS *LoadedSave, entryNames []string, opts Transfe
 		}
 		// One structural stage per graft (mirrors entity.go's stageEntityDelete).
 		dstLS.stagedOps++
+		dstLS.markStructuralStaged()
 
 		if opts.Move {
 			// Stage the source-side delete for THIS entry, only after its dst graft
@@ -109,6 +110,7 @@ func TransferEntries(srcLS, dstLS *LoadedSave, entryNames []string, opts Transfe
 				return 0, fmt.Errorf("transfer: move %q: stage source delete: %w", name, err)
 			}
 			srcLS.stagedOps++
+			srcLS.markStructuralStaged()
 		}
 	}
 	return len(entryNames), nil

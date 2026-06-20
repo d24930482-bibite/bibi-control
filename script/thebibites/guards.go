@@ -141,6 +141,30 @@ func validateSet(spec attrSpec, goVal any) error {
 	return validateValue(ruleFor(spec.sourceColumn, spec.sqlType), goVal)
 }
 
+// speciesIDColumn is the generated source column carrying a species id. The
+// referential guard (validateSpeciesID) keys off it so the same check applies to
+// the scalar SetField path and the bulkSet/bulkSetExpr paths, exactly as
+// nonNegativeColumns does for the shape rule.
+const speciesIDColumn = "species_id"
+
+// validateSpeciesID is the referential existence check for a species_id write:
+// the id must match an actual species row in this save, not merely be non-negative
+// (the existing shape rule). A nonexistent id would stage a dangling reference, so
+// it is rejected loudly with a diagnostic naming the column and the bad id. The
+// species set is one row per species (small), so a linear scan over
+// ls.tables.Species is fine — no perf concern. Only rows with HasSpeciesID match
+// (a species row without a parsed id cannot be a valid target). Shared by the
+// entity scalar SetField path and both bulk write paths.
+func (ls *LoadedSave) validateSpeciesID(n int64) error {
+	for i := range ls.tables.Species {
+		s := &ls.tables.Species[i]
+		if s.HasSpeciesID && s.SpeciesID == n {
+			return nil
+		}
+	}
+	return fmt.Errorf("species_id %d does not match any species in this save", n)
+}
+
 // scalarTypeRule is the value-validation Rule for a gene or settings value, keyed
 // by its parsed ScalarType (type only — these carry no semantic bounds; a gene or
 // setting may legitimately be negative). It lets gene/settings writes reuse
