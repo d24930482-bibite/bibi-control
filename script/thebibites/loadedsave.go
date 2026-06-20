@@ -72,6 +72,13 @@ type LoadedSave struct {
 	nodeByIndexOnce sync.Once
 	nodeByIndexMap  map[nodeByIndexKey]nodeByIndexVal
 
+	// nodeByDescOnce guards the lazy build of nodeByDescMap. nodeByDescMap
+	// maps (nodesTable, entryName) -> {byName: Desc -> arrayOrdinal} so
+	// b.nodes["name"] resolves in O(1) after a single O(N) build per
+	// LoadedSave, modeled on the nodeByIndex lazy-Once pattern (M11).
+	nodeByDescOnce sync.Once
+	nodeByDescMap  map[nodeByDescKey]*nodeByDescVal
+
 	// mirror buffers scalar mutations not yet mirrored into DuckDB; mirrorDirty
 	// marks it non-empty. T5 never sets these (no mutations); T6 fills the buffer
 	// on every staged set and flushMirror drains it into the open DuckDB as one
@@ -331,9 +338,9 @@ func (ls *LoadedSave) buildSubRowIndex() {
 
 // nodeByIndexKey uniquely identifies a brain node across tables and entities.
 type nodeByIndexKey struct {
-	table      string
-	entryName  string
-	nodeIndex  int64
+	table     string
+	entryName string
+	nodeIndex int64
 }
 
 // nodeByIndexVal is the resolved node row plus its array ordinal (the element's
@@ -389,6 +396,79 @@ func (ls *LoadedSave) buildNodeByIndexMap() {
 					ls.nodeByIndexMap[key] = nodeByIndexVal{row: row, ordinal: int64(ordinal)}
 				}
 			}
+		}
+	}
+}
+
+// nodeByDescKey identifies a brain's node-by-Desc fold map (per table + entity).
+type nodeByDescKey struct {
+	table     string
+	entryName string
+}
+
+// nodeByDescVal holds the Desc->arrayOrdinal map for one brain. The map shape
+// matches geneSet.byName so foldLookup is reused verbatim.
+type nodeByDescVal struct {
+	byName map[string]int // Desc -> array ordinal
+}
+
+// nodeByDesc resolves a user-typed Desc name to the array ordinal of the
+// matching node within the given brain. Triggers the lazy Once build, then
+// delegates to foldLookup for case-insensitive resolution (exact-match fast
+// path, single fold match, ≥2 distinct Descs loud ambiguity error). Returns
+// (0, false, nil) for a genuine miss; (0, false, err) for ambiguity.
+// A nil byName (entity has no nodes) returns (0, false, nil).
+func (ls *LoadedSave) nodeByDesc(table, entryName, query string) (ordinal int64, found bool, err error) {
+	ls.nodeByDescOnce.Do(ls.buildNodeByDescMap)
+	key := nodeByDescKey{table: table, entryName: entryName}
+	v := ls.nodeByDescMap[key]
+	if v == nil {
+		return 0, false, nil
+	}
+	idx, ok, ferr := foldLookup(v.byName, query)
+	if ferr != nil {
+		return 0, false, ferr
+	}
+	if !ok {
+		return 0, false, nil
+	}
+	return int64(idx), true, nil
+}
+
+// buildNodeByDescMap scans every nodes sub-collection spec across all entity
+// kinds and builds nodeByDescMap: (table, entryName) -> {Desc -> arrayOrdinal}.
+// It reads Desc via nodeSpec.elementAttrs["node_desc"].fieldIndex so no field
+// name is hardcoded. First-wins on exact Desc collision within one brain
+// (malformed save, consistent with nodeByIndex). Empty Desc rows are skipped
+// so nodes[""] is a clean miss. Calls subRowsFor to trigger subRowOnce first.
+func (ls *LoadedSave) buildNodeByDescMap() {
+	ls.nodeByDescMap = make(map[nodeByDescKey]*nodeByDescVal)
+	registry := subCollectionRegistry()
+	for _, subs := range registry {
+		nodeSpec, ok := subs["nodes"]
+		if !ok {
+			continue
+		}
+		descAttr, ok := nodeSpec.elementAttrs["node_desc"]
+		if !ok {
+			continue
+		}
+		// Trigger subRowOnce by calling subRowsFor with a dummy entryName (the
+		// same side-effect trick used by buildNodeByIndexMap).
+		ls.subRowsFor(nodeSpec.table, "")
+		for entryName, rows := range ls.subRowIdx[nodeSpec.table] {
+			key := nodeByDescKey{table: nodeSpec.table, entryName: entryName}
+			val := &nodeByDescVal{byName: make(map[string]int, len(rows))}
+			for ordinal, row := range rows {
+				desc := row.FieldByIndex(descAttr.fieldIndex).String()
+				if desc == "" {
+					continue // skip unnamed nodes
+				}
+				if _, exists := val.byName[desc]; !exists {
+					val.byName[desc] = ordinal // first-wins on duplicate Desc
+				}
+			}
+			ls.nodeByDescMap[key] = val
 		}
 	}
 }

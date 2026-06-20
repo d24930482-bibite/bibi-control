@@ -893,3 +893,335 @@ func TestEggBrainNavigation(t *testing.T) {
 		t.Error("egg dst.inputs is empty; expected at least the original synapse")
 	}
 }
+
+// attrString reads a starlark string attr as a Go string, failing on error or
+// wrong type.
+func attrString(t *testing.T, e *ArrayElement, name string) string {
+	t.Helper()
+	v, err := e.Attr(name)
+	if err != nil {
+		t.Fatalf("Attr(%q): %v", name, err)
+	}
+	if v == nil {
+		t.Fatalf("Attr(%q) returned nil", name)
+	}
+	s, ok := starlark.AsString(v)
+	if !ok {
+		t.Fatalf("Attr(%q) = %T, want String", name, v)
+	}
+	return s
+}
+
+// buildDescNavLS builds a synthetic brain with two nodes that have distinct
+// Desc fields: node0 Desc="Accelerate" (NodeIndex=10), node1 Desc="Hidden0"
+// (NodeIndex=11), and one synapse. NodeRowIndex intentionally equals the array
+// ordinal (0, 1) for simplicity.
+func buildDescNavLS(entryName string) *LoadedSave {
+	ls := &LoadedSave{
+		session:    mutator.NewSession(nil),
+		willCommit: false,
+		tables: tb.ExtractedSave{
+			Bibites: []tb.BibiteRow{
+				{EntryName: entryName},
+			},
+			BibiteBrainNodes: []tb.BrainNodeRow{
+				{EntryName: entryName, NodeRowIndex: 0, NodeIndex: 10, Desc: "Accelerate"},
+				{EntryName: entryName, NodeRowIndex: 1, NodeIndex: 11, Desc: "Hidden0"},
+			},
+			BibiteBrainSynapses: []tb.BrainSynapseRow{
+				{EntryName: entryName, SynapseRowIndex: 0, NodeIn: 10, NodeOut: 11, Weight: 0.5, Enabled: true, Innovation: 1},
+			},
+		},
+	}
+	ls.buildAccess()
+	return ls
+}
+
+// buildAmbigLS builds a brain with two nodes whose Descs differ only by case,
+// used to test foldLookup ambiguity.
+func buildAmbigLS(entryName string) *LoadedSave {
+	ls := &LoadedSave{
+		session:    mutator.NewSession(nil),
+		willCommit: false,
+		tables: tb.ExtractedSave{
+			Bibites: []tb.BibiteRow{
+				{EntryName: entryName},
+			},
+			BibiteBrainNodes: []tb.BrainNodeRow{
+				{EntryName: entryName, NodeRowIndex: 0, NodeIndex: 20, Desc: "Foo"},
+				{EntryName: entryName, NodeRowIndex: 1, NodeIndex: 21, Desc: "foo"},
+			},
+			BibiteBrainSynapses: []tb.BrainSynapseRow{},
+		},
+	}
+	ls.buildAccess()
+	return ls
+}
+
+// TestNodeLookupByDescExact: b.nodes["Accelerate"] returns the node whose
+// node_desc == "Accelerate" at array ordinal 0.
+func TestNodeLookupByDescExact(t *testing.T) {
+	const entry = "bibites/desctest.bb8"
+	ls := buildDescNavLS(entry)
+	ec := subCollection(t, ls, "bibite", entry, "nodes")
+
+	v, ok, err := ec.Get(starlark.String("Accelerate"))
+	if err != nil {
+		t.Fatalf("Get(Accelerate): %v", err)
+	}
+	if !ok {
+		t.Fatal("Get(Accelerate) found=false, want true")
+	}
+	elem, isElem := v.(*ArrayElement)
+	if !isElem {
+		t.Fatalf("Get returned %T, want *ArrayElement", v)
+	}
+	if got := attrString(t, elem, "node_desc"); got != "Accelerate" {
+		t.Errorf("node_desc = %q, want Accelerate", got)
+	}
+	if got := attrInt64(t, elem, "index"); got != 0 {
+		t.Errorf("index (array ordinal) = %d, want 0", got)
+	}
+}
+
+// TestNodeLookupByDescCaseFold: case-insensitive variants resolve to the same node.
+func TestNodeLookupByDescCaseFold(t *testing.T) {
+	const entry = "bibites/desctest.bb8"
+	ls := buildDescNavLS(entry)
+	ec := subCollection(t, ls, "bibite", entry, "nodes")
+
+	for _, query := range []string{"accelerate", "ACCELERATE", "aCcElErAtE"} {
+		v, ok, err := ec.Get(starlark.String(query))
+		if err != nil {
+			t.Fatalf("Get(%q): %v", query, err)
+		}
+		if !ok {
+			t.Fatalf("Get(%q) found=false, want true", query)
+		}
+		elem := v.(*ArrayElement)
+		if got := attrString(t, elem, "node_desc"); got != "Accelerate" {
+			t.Errorf("Get(%q).node_desc = %q, want Accelerate", query, got)
+		}
+		if got := attrInt64(t, elem, "index"); got != 0 {
+			t.Errorf("Get(%q).index = %d, want 0", query, got)
+		}
+	}
+}
+
+// TestNodeLookupHiddenName: hidden node names (e.g. "Hidden0") are ordinary
+// Desc values — no special-casing, fold works the same way.
+func TestNodeLookupHiddenName(t *testing.T) {
+	const entry = "bibites/desctest.bb8"
+	ls := buildDescNavLS(entry)
+	ec := subCollection(t, ls, "bibite", entry, "nodes")
+
+	v, ok, err := ec.Get(starlark.String("hidden0"))
+	if err != nil {
+		t.Fatalf("Get(hidden0): %v", err)
+	}
+	if !ok {
+		t.Fatal("Get(hidden0) found=false, want true")
+	}
+	elem := v.(*ArrayElement)
+	if got := attrString(t, elem, "node_desc"); got != "Hidden0" {
+		t.Errorf("node_desc = %q, want Hidden0", got)
+	}
+	if got := attrInt64(t, elem, "index"); got != 1 {
+		t.Errorf("index = %d, want 1", got)
+	}
+}
+
+// TestNodeLookupMissIsLoud: a miss returns (nil, false, nil) causing a Starlark
+// KeyError — not a silent None.
+func TestNodeLookupMissIsLoud(t *testing.T) {
+	const entry = "bibites/desctest.bb8"
+	ls := buildDescNavLS(entry)
+	ec := subCollection(t, ls, "bibite", entry, "nodes")
+
+	v, ok, err := ec.Get(starlark.String("nope"))
+	if err != nil {
+		t.Fatalf("Get(nope) returned unexpected error: %v", err)
+	}
+	if ok {
+		t.Fatalf("Get(nope) found=true, want false (miss)")
+	}
+	if v != nil {
+		t.Fatalf("Get(nope) value=%v, want nil", v)
+	}
+}
+
+// TestNodeLookupAmbiguousIsLoud: two nodes whose Descs differ only by case make
+// a fold query with no exact match return a non-nil error (ambiguity), not a
+// silent pick.
+func TestNodeLookupAmbiguousIsLoud(t *testing.T) {
+	const entry = "bibites/ambigtest.bb8"
+	ls := buildAmbigLS(entry)
+	ec := subCollection(t, ls, "bibite", entry, "nodes")
+
+	// "FOO" has no exact match; both "Foo" and "foo" fold-match, causing ambiguity.
+	v, ok, err := ec.Get(starlark.String("FOO"))
+	if err == nil {
+		t.Fatalf("Get(FOO) error=nil, want ambiguity error (v=%v, ok=%v)", v, ok)
+	}
+	if !strings.Contains(err.Error(), "ambiguous") {
+		t.Errorf("ambiguity error = %q, want it to mention 'ambiguous'", err.Error())
+	}
+}
+
+// TestNodeLookupByIntPositional: integer subscripts do positional access.
+func TestNodeLookupByIntPositional(t *testing.T) {
+	const entry = "bibites/desctest.bb8"
+	ls := buildDescNavLS(entry)
+	ec := subCollection(t, ls, "bibite", entry, "nodes")
+
+	// nodes[0] -> Accelerate (ordinal 0)
+	v0, ok0, err0 := ec.Get(starlark.MakeInt(0))
+	if err0 != nil || !ok0 {
+		t.Fatalf("Get(0): err=%v ok=%v", err0, ok0)
+	}
+	elem0 := v0.(*ArrayElement)
+	if got := attrString(t, elem0, "node_desc"); got != "Accelerate" {
+		t.Errorf("nodes[0].node_desc = %q, want Accelerate", got)
+	}
+
+	// nodes[1] -> Hidden0 (ordinal 1)
+	v1, ok1, err1 := ec.Get(starlark.MakeInt(1))
+	if err1 != nil || !ok1 {
+		t.Fatalf("Get(1): err=%v ok=%v", err1, ok1)
+	}
+	elem1 := v1.(*ArrayElement)
+	if got := attrString(t, elem1, "node_desc"); got != "Hidden0" {
+		t.Errorf("nodes[1].node_desc = %q, want Hidden0", got)
+	}
+
+	// nodes[-1] -> last node (Hidden0, ordinal 1)
+	vN, okN, errN := ec.Get(starlark.MakeInt(-1))
+	if errN != nil || !okN {
+		t.Fatalf("Get(-1): err=%v ok=%v", errN, okN)
+	}
+	elemN := vN.(*ArrayElement)
+	if got := attrInt64(t, elemN, "index"); got != 1 {
+		t.Errorf("nodes[-1].index = %d, want 1", got)
+	}
+
+	// nodes[99] -> out-of-range loud error
+	_, _, errOOB := ec.Get(starlark.MakeInt(99))
+	if errOOB == nil {
+		t.Fatal("Get(99) error=nil, want out-of-range error")
+	}
+	if !strings.Contains(errOOB.Error(), "out of range") {
+		t.Errorf("out-of-range error = %q, want mention of 'out of range'", errOOB.Error())
+	}
+}
+
+// TestNodeLookupStringOnNonNodes: a string key on synapses or stomach is a loud
+// error (string subscript is only valid on nodes).
+func TestNodeLookupStringOnNonNodes(t *testing.T) {
+	const entry = "bibites/desctest.bb8"
+	ls := buildDescNavLS(entry)
+
+	for _, attr := range []string{"synapses"} {
+		ec := subCollection(t, ls, "bibite", entry, attr)
+		_, _, err := ec.Get(starlark.String("x"))
+		if err == nil {
+			t.Errorf("%s[\"x\"] error=nil, want loud error", attr)
+		}
+	}
+}
+
+// TestNodeLookupResolvedHandleNavigates: a Desc-resolved node element supports
+// M5 navigation (.inputs / .outputs), proving the returned handle is a full node
+// handle with the correct spec.
+func TestNodeLookupResolvedHandleNavigates(t *testing.T) {
+	const entry = "bibites/desctest.bb8"
+	ls := buildDescNavLS(entry)
+	ec := subCollection(t, ls, "bibite", entry, "nodes")
+
+	v, ok, err := ec.Get(starlark.String("Accelerate"))
+	if err != nil || !ok {
+		t.Fatalf("Get(Accelerate): err=%v ok=%v", err, ok)
+	}
+	elem := v.(*ArrayElement)
+
+	// .outputs on the source node (NodeIndex=10) should find the synapse.
+	outputsV, err := elem.Attr("outputs")
+	if err != nil {
+		t.Fatalf("Accelerate.outputs: %v", err)
+	}
+	outputsList, ok2 := outputsV.(*starlark.List)
+	if !ok2 {
+		t.Fatalf("outputs returned %T, want *starlark.List", outputsV)
+	}
+	if outputsList.Len() == 0 {
+		t.Error("Accelerate.outputs is empty; expected the one synapse (NodeIn=10)")
+	}
+
+	// .inputs on the target node (NodeIndex=11, Desc="Hidden0") should find the same synapse.
+	vHidden, ok3, err3 := ec.Get(starlark.String("Hidden0"))
+	if err3 != nil || !ok3 {
+		t.Fatalf("Get(Hidden0): err=%v ok=%v", err3, ok3)
+	}
+	inputsV, err := vHidden.(*ArrayElement).Attr("inputs")
+	if err != nil {
+		t.Fatalf("Hidden0.inputs: %v", err)
+	}
+	inputsList, ok4 := inputsV.(*starlark.List)
+	if !ok4 {
+		t.Fatalf("inputs returned %T, want *starlark.List", inputsV)
+	}
+	if inputsList.Len() == 0 {
+		t.Error("Hidden0.inputs is empty; expected the one synapse (NodeOut=11)")
+	}
+}
+
+// TestNodeLookupViaScript: end-to-end Starlark interpreter test that b.nodes["accelerate"].desc
+// works through the evaluator.
+func TestNodeLookupViaScript(t *testing.T) {
+	ls := loadFixture(t)
+	// Find a bibite that has nodes with non-empty Desc values.
+	nodeRows := ls.subRowsFor("bibite_brain_nodes", "")
+	var (
+		targetEntry string
+		targetDesc  string
+	)
+	descAttr := subCollectionRegistry()["bibite"]["nodes"].elementAttrs["node_desc"]
+	for _, name := range ls.access["bibites"].order {
+		rows := ls.subRowsFor("bibite_brain_nodes", name)
+		for _, row := range rows {
+			d := row.FieldByIndex(descAttr.fieldIndex).String()
+			if d != "" {
+				targetEntry = name
+				targetDesc = d
+				break
+			}
+		}
+		if targetEntry != "" {
+			break
+		}
+	}
+	_ = nodeRows // suppress unused warning
+	if targetEntry == "" {
+		t.Skip("fixture has no bibite with a named node")
+	}
+
+	program := []byte(fmt.Sprintf(`
+s = open()
+
+def check():
+    for b in s.bibites:
+        if b.entry_name == %q:
+            n = b.nodes[%q]
+            got = n.node_desc
+            if got != %q:
+                fail("expected desc %%r, got %%r" %% (%q, got))
+            return got
+    fail("entry not found")
+
+print("desc=%%s" %% check())
+`, targetEntry, strings.ToLower(targetDesc), targetDesc, targetDesc))
+
+	res, err := script.Run(context.Background(), program, Globals(ls), script.Options{Filename: "desc_lookup.star"})
+	if err != nil {
+		t.Fatalf("script.Run: %v (%+v)", err, res.Diagnostics)
+	}
+}
